@@ -62,7 +62,8 @@ public struct CLISessionBackend: Sendable {
   /// What the session says it is doing right now, or `nil` when nothing reports it —
   /// see `LoopNode.activity`. `projectPath` routed as `presence`'s is.
   public var activity: @Sendable (LoopNode, String?) async -> String?
-  public var startResult: @Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>
+  public var startResult:
+    @Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>
   public var terminateResult: @Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>
   public var exists: @Sendable (LoopNode, String?) async -> Bool
   public var enumerate: @Sendable () async -> [UUID]
@@ -82,10 +83,12 @@ public struct CLISessionBackend: Sendable {
     usage: @escaping @Sendable (LoopNode, String?) async -> UsageSample?,
     activity: @escaping @Sendable (LoopNode, String?) async -> String? = { _, _ in nil },
     summary: @escaping @Sendable (LoopNode, String?) async -> SummaryReading? = { _, _ in nil },
-    startResult: (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)? = nil,
+    startResult: (
+      @Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>
+    )? = nil,
     terminateResult: (@Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>)? = nil,
-    exists: (@Sendable (LoopNode, String?) async -> Bool)? = nil
-    , enumerate: (@Sendable () async -> [UUID])? = nil
+    exists: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
+    enumerate: (@Sendable () async -> [UUID])? = nil
   ) {
     self.kind = kind
     self.launch = launch
@@ -95,14 +98,16 @@ public struct CLISessionBackend: Sendable {
     self.presence = presence
     self.usage = usage
     self.activity = activity
-    self.startResult = startResult ?? { node, path in
-      await launch(node, path)
-      return .success(.started)
-    }
-    self.terminateResult = terminateResult ?? { node, path in
-      await terminate(node, path)
-      return .success(())
-    }
+    self.startResult =
+      startResult ?? { node, path in
+        await launch(node, path)
+        return .success(.started)
+      }
+    self.terminateResult =
+      terminateResult ?? { node, path in
+        await terminate(node, path)
+        return .success(())
+      }
     self.exists = exists ?? { _, _ in false }
     self.enumerate = enumerate ?? { [] }
     self.summary = summary
@@ -255,8 +260,7 @@ extension CLISessionBackend {
       usage: { _, _ in nil },
       startResult: { _, _ in .failure(.unavailable("backend is not spiked")) },
       terminateResult: { _, _ in .success(()) },
-      exists: { _, _ in false }
-      , enumerate: { [] }
+      exists: { _, _ in false }, enumerate: { [] }
     )
   }
 

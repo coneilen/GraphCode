@@ -366,10 +366,11 @@ public struct DaemonReplayBuffer: Equatable, Sendable {
     if cursor < first {
       let missingCount = first - (cursor + 1)
       if missingCount > 0 {
-        guard Self.rangesCover(
-          lowerBound: cursor + 1,
-          upperBound: first - 1,
-          ranges: skippingRanges)
+        guard
+          Self.rangesCover(
+            lowerBound: cursor + 1,
+            upperBound: first - 1,
+            ranges: skippingRanges)
         else {
           throw ReplayError.cursorOutsideWindow
         }

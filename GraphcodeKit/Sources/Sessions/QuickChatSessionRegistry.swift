@@ -20,8 +20,10 @@ public enum QuickChatSessionRegistry {
   }
 
   public static func ids() -> [UUID] {
-    guard let files = try? FileManager.default.contentsOfDirectory(
-      at: directory, includingPropertiesForKeys: nil) else { return [] }
+    guard
+      let files = try? FileManager.default.contentsOfDirectory(
+        at: directory, includingPropertiesForKeys: nil)
+    else { return [] }
     return files.compactMap {
       UUID(uuidString: $0.deletingPathExtension().lastPathComponent)
     }

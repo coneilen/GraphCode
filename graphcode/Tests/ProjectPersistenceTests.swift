@@ -116,7 +116,8 @@ struct ProjectPersistenceTests {
     let persistence = ProjectPersistence(baseDirectory: directory)
     let project = ProjectRef(path: "/tmp/legacy-project", name: "legacy-project")
     let graph = LoopGraph(project: project, nodes: [LoopNode(title: "Legacy")])
-    let legacyURL = directory
+    let legacyURL =
+      directory
       .appendingPathComponent("projects", isDirectory: true)
       .appendingPathComponent("_tmp_legacy-project.json")
     try JSONEncoder().encode(graph).write(to: legacyURL)
@@ -137,7 +138,8 @@ struct ProjectPersistenceTests {
       .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
     let persistence = ProjectPersistence(baseDirectory: directory)
     let path = "/tmp/legacy-delete"
-    let legacyURL = directory
+    let legacyURL =
+      directory
       .appendingPathComponent("projects", isDirectory: true)
       .appendingPathComponent("_tmp_legacy-delete.json")
     let graph = LoopGraph(project: ProjectRef(path: path, name: "legacy-delete"))

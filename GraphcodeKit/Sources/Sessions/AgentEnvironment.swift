@@ -24,9 +24,9 @@ public enum AgentEnvironment {
   /// server that outlives them.
   public static func scrubInheritedAgentIdentity() {
     #if !os(Windows)
-    for key in ProcessInfo.processInfo.environment.keys where isInheritedAgentIdentity(key) {
-      unsetenv(key)
-    }
+      for key in ProcessInfo.processInfo.environment.keys where isInheritedAgentIdentity(key) {
+        unsetenv(key)
+      }
     #endif
   }
 }

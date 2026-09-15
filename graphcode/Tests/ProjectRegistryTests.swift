@@ -449,63 +449,63 @@ struct ProjectRegistryTests {
     #expect(reconnectTransport.frames.isEmpty)
   }
 
-#if canImport(Darwin)
-  @Test
-  func unixCloseSyncWaitsForActiveFrameBeforeClosingDescriptor() async throws {
-    try await assertUnixCloseWaitsForActiveFrame { connection in
-      connection.closeSync()
+  #if canImport(Darwin)
+    @Test
+    func unixCloseSyncWaitsForActiveFrameBeforeClosingDescriptor() async throws {
+      try await assertUnixCloseWaitsForActiveFrame { connection in
+        connection.closeSync()
+      }
     }
-  }
 
-  @Test
-  func unixAsyncCloseWaitsForActiveFrameBeforeClosingDescriptor() async throws {
-    try await assertUnixCloseWaitsForActiveFrame { connection in
-      try await connection.close()
+    @Test
+    func unixAsyncCloseWaitsForActiveFrameBeforeClosingDescriptor() async throws {
+      try await assertUnixCloseWaitsForActiveFrame { connection in
+        try await connection.close()
+      }
     }
-  }
 
-  private func assertUnixCloseWaitsForActiveFrame(
-    _ close: @escaping @Sendable (UnixSocketConnection) async throws -> Void
-  ) async throws {
-    var pair = [Int32](repeating: -1, count: 2)
-    #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
-    let peerDescriptor = pair[1]
-    defer { Darwin.close(peerDescriptor) }
+    private func assertUnixCloseWaitsForActiveFrame(
+      _ close: @escaping @Sendable (UnixSocketConnection) async throws -> Void
+    ) async throws {
+      var pair = [Int32](repeating: -1, count: 2)
+      #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
+      let peerDescriptor = pair[1]
+      defer { Darwin.close(peerDescriptor) }
 
-    var sendBuffer: Int32 = 1_024
-    _ = setsockopt(
-      pair[0],
-      SOL_SOCKET,
-      SO_SNDBUF,
-      &sendBuffer,
-      socklen_t(MemoryLayout<Int32>.size))
-    let connection = UnixSocketConnection(
-      fileDescriptor: pair[0], writeTimeout: 5)
-    let payload = Data(repeating: 0x41, count: 2 * 1024 * 1024)
-    let sendTask = Task {
-      try await connection.sendFrame(payload)
+      var sendBuffer: Int32 = 1_024
+      _ = setsockopt(
+        pair[0],
+        SOL_SOCKET,
+        SO_SNDBUF,
+        &sendBuffer,
+        socklen_t(MemoryLayout<Int32>.size))
+      let connection = UnixSocketConnection(
+        fileDescriptor: pair[0], writeTimeout: 5)
+      let payload = Data(repeating: 0x41, count: 2 * 1024 * 1024)
+      let sendTask = Task {
+        try await connection.sendFrame(payload)
+      }
+      try await Task.sleep(for: .milliseconds(50))
+
+      let closeCompletion = CloseCompletionProbe()
+      let closeTask = Task {
+        try await close(connection)
+        await closeCompletion.mark()
+      }
+      try await Task.sleep(for: .milliseconds(50))
+      let closedBeforeDrain = await closeCompletion.completed
+      #expect(!closedBeforeDrain)
+
+      let received = try await Task.detached {
+        try FramedMessageIO.readFrame(from: peerDescriptor)
+      }.value
+      try await sendTask.value
+      try await closeTask.value
+      let closedAfterDrain = await closeCompletion.completed
+      #expect(closedAfterDrain)
+      #expect(received == payload)
     }
-    try await Task.sleep(for: .milliseconds(50))
-
-    let closeCompletion = CloseCompletionProbe()
-    let closeTask = Task {
-      try await close(connection)
-      await closeCompletion.mark()
-    }
-    try await Task.sleep(for: .milliseconds(50))
-    let closedBeforeDrain = await closeCompletion.completed
-    #expect(!closedBeforeDrain)
-
-    let received = try await Task.detached {
-      try FramedMessageIO.readFrame(from: peerDescriptor)
-    }.value
-    try await sendTask.value
-    try await closeTask.value
-    let closedAfterDrain = await closeCompletion.completed
-    #expect(closedAfterDrain)
-    #expect(received == payload)
-  }
-#endif
+  #endif
 
   @Test
   func deletingAProjectsLoopsEndsEverySessionFirst() async {
