@@ -263,7 +263,7 @@ public actor ProjectRegistry {
     public func addConnection(id: UUID, fileDescriptor: Int32) async {
       await addConnection(
         id: id,
-        connection: UnixSocketConnection(fileDescriptor: fileDescriptor))
+        connection: UnixSocketConnection(fileDescriptor: fileDescriptor, bufferedWrites: true))
     }
   #endif
 

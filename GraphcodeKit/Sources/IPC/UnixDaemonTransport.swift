@@ -10,7 +10,7 @@ import Foundation
   /// A small async adapter around a Unix descriptor. Blocking syscalls are moved off
   /// Swift's cooperative executor; socket receive/send timeouts bound stalled peers.
   public final class UnixSocketByteStream: @unchecked Sendable, DaemonByteStream {
-    private let fileDescriptor: Int32
+    fileprivate let fileDescriptor: Int32
     private let closeOnClose: Bool
     private let lock = NSLock()
     private var isClosed = false
@@ -197,6 +197,7 @@ import Foundation
     public let endpoint: DaemonEndpoint
     private let stream: UnixSocketByteStream
     private let acceptsWrites: Bool
+    private let buffersWrites: Bool
     private let writeQueue = DispatchQueue(
       label: "com.graphcode.unix-socket-frame-writes")
     private let stateLock = NSLock()
@@ -207,16 +208,22 @@ import Foundation
       fileDescriptor: Int32,
       endpoint: DaemonEndpoint = .unixSocket(URL(fileURLWithPath: "")),
       readTimeout: TimeInterval? = nil,
-      writeTimeout: TimeInterval? = nil
+      writeTimeout: TimeInterval? = nil,
+      bufferedWrites: Bool = false
     ) {
       self.id = id
       self.endpoint = endpoint
       // Compatibility callers use -1 as an intentionally inert descriptor in tests.
       self.acceptsWrites = fileDescriptor >= 0
+      self.buffersWrites = bufferedWrites && fileDescriptor >= 0
       self.stream = UnixSocketByteStream(
         fileDescriptor: fileDescriptor,
         readTimeout: readTimeout,
-        writeTimeout: writeTimeout)
+        writeTimeout: writeTimeout,
+        closeOnClose: !self.buffersWrites)
+      if self.buffersWrites {
+        OutboundChannels.open(fileDescriptor, tag: id.tag)
+      }
     }
 
     public func receiveFrame() async throws -> Data {
@@ -265,6 +272,12 @@ import Foundation
 
     public func sendFrame(_ data: Data) async throws {
       guard acceptsWrites else { return }
+      if buffersWrites {
+        guard OutboundChannels.send(data, to: stream.fileDescriptor) else {
+          throw FramedMessageIO.IOError.connectionClosed
+        }
+        return
+      }
       try await withCheckedThrowingContinuation {
         (continuation: CheckedContinuation<Void, any Error>) in
         writeQueue.async {
@@ -301,6 +314,12 @@ import Foundation
 
     public func sendFrameSync(_ data: Data) throws {
       guard acceptsWrites else { return }
+      if buffersWrites {
+        guard OutboundChannels.send(data, to: stream.fileDescriptor) else {
+          throw FramedMessageIO.IOError.connectionClosed
+        }
+        return
+      }
       try writeQueue.sync {
         stateLock.lock()
         let closed = isClosed
@@ -325,7 +344,11 @@ import Foundation
         }
         isClosed = true
         stateLock.unlock()
-        stream.closeSync()
+        if buffersWrites {
+          OutboundChannels.close(stream.fileDescriptor)
+        } else {
+          stream.closeSync()
+        }
       }
     }
 
@@ -427,7 +450,7 @@ import Foundation
           }
           continuation.resume(
             returning: UnixSocketConnection(
-              fileDescriptor: client, endpoint: self.endpoint))
+              fileDescriptor: client, endpoint: self.endpoint, bufferedWrites: true))
         }
       }
     }

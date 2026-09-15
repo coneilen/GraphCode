@@ -1,5 +1,4 @@
 import Foundation
-
 import MailroomKit
 
 /// Owns the daemon's one `LoopGraph`, applies commands, automatically fires `.handoff`
@@ -745,7 +744,7 @@ public actor GraphStore {
     public func addConnection(id: UUID, fileDescriptor: Int32) async {
       await addConnection(
         id: id,
-        connection: UnixSocketConnection(fileDescriptor: fileDescriptor))
+        connection: UnixSocketConnection(fileDescriptor: fileDescriptor, bufferedWrites: true))
     }
   #endif
 
@@ -777,6 +776,9 @@ public actor GraphStore {
     // A loop inside a composite addresses itself by its own id; route it through the
     // composite that owns it before previewing or applying the command.
     let command = routeIntoSubGraph(command) ?? command
+    guard let v2PayloadLimit else {
+      return await applyCommand(command, broadcastErrors: broadcastErrors)
+    }
     let previous = commandTail
     let commandID = nextCommandID
     nextCommandID = nextCommandID == UInt64.max ? 0 : nextCommandID + 1
@@ -787,15 +789,13 @@ public actor GraphStore {
           message: "graph store is unavailable",
           graph: LoopGraph(project: ProjectRef(path: "", name: "Untitled")))
       }
-      if let v2PayloadLimit {
-        let preview = await self.preview(command, broadcastErrors: broadcastErrors)
-        if case .applied(let projectedGraph) = preview,
-          !Self.v2GraphChangeFits(projectedGraph, limit: v2PayloadLimit)
-        {
-          return .rejected(
-            message: "resulting graph response exceeds the v2 payload limit",
-            graph: await self.graph)
-        }
+      let preview = await self.preview(command, broadcastErrors: broadcastErrors)
+      if case .applied(let projectedGraph) = preview,
+        !Self.v2GraphChangeFits(projectedGraph, limit: v2PayloadLimit)
+      {
+        return .rejected(
+          message: "resulting graph response exceeds the v2 payload limit",
+          graph: await self.graph)
       }
       return await self.applyCommand(command, broadcastErrors: broadcastErrors)
     }
