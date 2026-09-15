@@ -1224,16 +1224,15 @@ public actor GraphStore {
     // Settled before the write-back and roll-up below, so a client sees the refusal
     // ahead of the broadcast it would otherwise time out against, and an update's
     // re-armed poller is in place before anyone sees the graph it belongs to.
-    for message in effects.errors.drained {
+    let rejectedMessage: String? =
+      if case .rejected(let message, _) = result { message } else { nil }
+    for message in effects.errors.drained where message != rejectedMessage {
       announceError(message)
     }
     processRecurrence(effects.recurrence)
     graph.nodes[id: nodeID]?.subGraph = await child.graph
     rollUpComposite(nodeID)
-    if case .rejected(let message, _) = result {
-      return message
-    }
-    return nil
+    return rejectedMessage
   }
 
   /// A composite's own state *is* its sub-graph's aggregate — the roll-up docs/05 asks
