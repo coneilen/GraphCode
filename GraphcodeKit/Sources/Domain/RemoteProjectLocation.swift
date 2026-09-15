@@ -72,9 +72,16 @@ public struct RemoteProjectLocation: Equatable, Sendable {
 
   /// The path string this location travels as — `parse`'s inverse.
   public var projectPath: String {
-    isCodespace
-      ? "\(Self.codespaceScheme)://\(host)\(remotePath)"
-      : "\(Self.scheme)://\(authority)\(remotePath)"
+    if isCodespace {
+      return "\(Self.codespaceScheme)://\(host)\(remotePath)"
+    }
+    var components = URLComponents()
+    components.scheme = Self.scheme
+    components.user = user
+    components.host = host
+    components.port = port
+    components.path = remotePath
+    return components.string ?? "\(Self.scheme)://\(authority)\(remotePath)"
   }
 
   /// An absolute remote path reduced to the one spelling git will print for it, so two
@@ -99,14 +106,16 @@ public struct RemoteProjectLocation: Equatable, Sendable {
   /// as `-p`, but the authority string carries it for identity and display).
   public var authority: String {
     let userPart = user.map { "\($0)@" } ?? ""
+    let hostPart = host.contains(":") ? "[\(host)]" : host
     let portPart = port.map { ":\($0)" } ?? ""
-    return "\(userPart)\(host)\(portPart)"
+    return "\(userPart)\(hostPart)\(portPart)"
   }
 
   /// What ssh itself is told to connect to — the authority without the port.
   public var sshDestination: String {
     let userPart = user.map { "\($0)@" } ?? ""
-    return "\(userPart)\(host)"
+    let hostPart = host.contains(":") ? "[\(host)]" : host
+    return "\(userPart)\(hostPart)"
   }
 
   /// The sidebar title: the repository folder's name, with the host to tell it apart
@@ -165,7 +174,7 @@ public struct RemoteProjectLocation: Equatable, Sendable {
       invocation.append(remoteCommand)
       return invocation
     }
-    var invocation = ["/usr/bin/ssh"]
+    var invocation = [SSHExecutableResolver.executableURL()?.path ?? "ssh"]
     if interactive { invocation.append("-t") }
     invocation += [
       "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
