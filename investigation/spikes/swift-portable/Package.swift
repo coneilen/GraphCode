@@ -4,6 +4,7 @@ import PackageDescription
 
 let package = Package(
   name: "GraphcodePortableDomainSpike",
+  platforms: [.macOS(.v15)],
   products: [
     .library(name: "GraphcodePortableDomain", targets: ["GraphcodePortableDomain"])
   ],

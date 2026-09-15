@@ -2,7 +2,11 @@ import Foundation
 
 #if canImport(Darwin)
   import Darwin
+#elseif canImport(Glibc)
+  import Glibc
+#endif
 
+#if canImport(Darwin) || canImport(Glibc)
   /// A small async adapter around a Unix descriptor. Blocking syscalls are moved off
   /// Swift's cooperative executor; socket receive/send timeouts bound stalled peers.
   public final class UnixSocketByteStream: @unchecked Sendable, DaemonByteStream {
@@ -21,10 +25,14 @@ import Foundation
       self.closeOnClose = closeOnClose
       Self.applyTimeout(readTimeout, to: fileDescriptor, option: SO_RCVTIMEO)
       Self.applyTimeout(writeTimeout, to: fileDescriptor, option: SO_SNDTIMEO)
-      var noSignal = 1
-      _ = setsockopt(
-        fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal,
-        socklen_t(MemoryLayout<Int32>.size))
+      #if canImport(Darwin)
+        var noSignal = 1
+        _ = setsockopt(
+          fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal,
+          socklen_t(MemoryLayout<Int32>.size))
+      #else
+        signal(SIGPIPE, SIG_IGN)
+      #endif
     }
 
     public func readExactly(_ count: Int) async throws -> Data {
@@ -66,7 +74,11 @@ import Foundation
       isClosed = true
       lock.unlock()
       if shouldClose, closeOnClose {
-        Darwin.close(fileDescriptor)
+        #if canImport(Darwin)
+          Darwin.close(fileDescriptor)
+        #else
+          Glibc.close(fileDescriptor)
+        #endif
       }
     }
 
@@ -102,7 +114,11 @@ import Foundation
         var remaining = rawBuffer.count
         var pointer = baseAddress
         while remaining > 0 {
-          let result = Darwin.write(fileDescriptor, pointer, remaining)
+          #if canImport(Darwin)
+            let result = Darwin.write(fileDescriptor, pointer, remaining)
+          #else
+            let result = Glibc.write(fileDescriptor, pointer, remaining)
+          #endif
           if result < 0, errno == EINTR { continue }
           if result <= 0 {
             throw FramedMessageIO.IOError.writeFailed(errno: errno)
@@ -130,8 +146,13 @@ import Foundation
           try waitUntilReadable(fileDescriptor, by: deadline)
         }
         let result = buffer.withUnsafeMutableBytes { rawBuffer in
-          Darwin.read(
-            fileDescriptor, rawBuffer.baseAddress!.advanced(by: total), count - total)
+          #if canImport(Darwin)
+            Darwin.read(
+              fileDescriptor, rawBuffer.baseAddress!.advanced(by: total), count - total)
+          #else
+            Glibc.read(
+              fileDescriptor, rawBuffer.baseAddress!.advanced(by: total), count - total)
+          #endif
         }
         if result == 0 { throw FramedMessageIO.IOError.connectionClosed }
         if result < 0, errno == EINTR { continue }
@@ -323,7 +344,11 @@ import Foundation
     private var isClosed = false
 
     public init(path: URL, backlog: Int32 = 8) throws {
-      let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+      #if canImport(Darwin)
+        let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+      #else
+        let descriptor = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+      #endif
       guard descriptor >= 0 else {
         throw FramedMessageIO.IOError.readFailed(errno: errno)
       }
@@ -333,9 +358,15 @@ import Foundation
 
       var address = sockaddr_un()
       address.sun_family = sa_family_t(AF_UNIX)
-      address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+      #if canImport(Darwin)
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+      #endif
       guard self.path.utf8.count < MemoryLayout<sockaddr_un>.size - 2 else {
-        Darwin.close(descriptor)
+        #if canImport(Darwin)
+          Darwin.close(descriptor)
+        #else
+          Glibc.close(descriptor)
+        #endif
         throw FramedMessageIO.IOError.writeFailed(errno: ENAMETOOLONG)
       }
       withUnsafeMutablePointer(to: &address.sun_path) { field in
@@ -349,17 +380,34 @@ import Foundation
       }
       let bound = withUnsafePointer(to: &address) { pointer in
         pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-          Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+          #if canImport(Darwin)
+            Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+          #else
+            Glibc.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+          #endif
         }
       }
       guard bound == 0 else {
         let code = errno
-        Darwin.close(descriptor)
+        #if canImport(Darwin)
+          Darwin.close(descriptor)
+        #else
+          Glibc.close(descriptor)
+        #endif
         throw FramedMessageIO.IOError.writeFailed(errno: code)
       }
-      guard Darwin.listen(descriptor, backlog) == 0 else {
+      #if canImport(Darwin)
+        let listening = Darwin.listen(descriptor, backlog)
+      #else
+        let listening = Glibc.listen(descriptor, backlog)
+      #endif
+      guard listening == 0 else {
         let code = errno
-        Darwin.close(descriptor)
+        #if canImport(Darwin)
+          Darwin.close(descriptor)
+        #else
+          Glibc.close(descriptor)
+        #endif
         unlink(self.path)
         throw FramedMessageIO.IOError.writeFailed(errno: code)
       }
@@ -368,7 +416,11 @@ import Foundation
     public func accept() async throws -> any DaemonConnection {
       try await withCheckedThrowingContinuation { continuation in
         DispatchQueue.global().async {
-          let client = Darwin.accept(self.fileDescriptor, nil, nil)
+          #if canImport(Darwin)
+            let client = Darwin.accept(self.fileDescriptor, nil, nil)
+          #else
+            let client = Glibc.accept(self.fileDescriptor, nil, nil)
+          #endif
           guard client >= 0 else {
             continuation.resume(throwing: FramedMessageIO.IOError.readFailed(errno: errno))
             return
@@ -386,7 +438,11 @@ import Foundation
       isClosed = true
       lock.unlock()
       if shouldClose {
-        Darwin.close(fileDescriptor)
+        #if canImport(Darwin)
+          Darwin.close(fileDescriptor)
+        #else
+          Glibc.close(fileDescriptor)
+        #endif
         unlink(path)
       }
     }
