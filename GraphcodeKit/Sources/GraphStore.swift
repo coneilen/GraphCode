@@ -744,7 +744,8 @@ public actor GraphStore {
     public func addConnection(id: UUID, fileDescriptor: Int32) async {
       await addConnection(
         id: id,
-        connection: UnixSocketConnection(fileDescriptor: fileDescriptor, bufferedWrites: true))
+        connection: UnixSocketConnection(
+          id: id, fileDescriptor: fileDescriptor, bufferedWrites: true))
     }
   #endif
 

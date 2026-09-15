@@ -132,7 +132,11 @@ private actor AppDaemonConnection {
             var saidUnreadable = false
             while !Task.isCancelled {
               guard await isCurrentReader(readerID) else { return }
-              let data = try await connection.receiveFrame()
+              let data = try await withTaskCancellationHandler {
+                try await connection.receiveFrame()
+              } onCancel: {
+                Task { try? await connection.close() }
+              }
               guard let event = try? JSONDecoder().decode(DaemonEvent.self, from: data) else {
                 if !saidUnreadable {
                   saidUnreadable = true
