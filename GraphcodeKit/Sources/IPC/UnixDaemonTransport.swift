@@ -101,7 +101,7 @@ import Foundation
       if let timeout, timeout.isFinite, timeout >= 0 {
         interval = timeval(
           tv_sec: Int(timeout),
-          tv_usec: Int32((timeout - timeout.rounded(.down)) * 1_000_000))
+          tv_usec: suseconds_t((timeout - timeout.rounded(.down)) * 1_000_000))
       }
       _ = setsockopt(
         fileDescriptor, SOL_SOCKET, option, &interval,
