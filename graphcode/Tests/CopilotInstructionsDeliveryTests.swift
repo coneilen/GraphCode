@@ -37,7 +37,7 @@ struct CopilotInstructionsDeliveryTests {
       try process.run()
       let data = output.fileHandleForReading.readDataToEndOfFile()
       process.waitUntilExit()
-      return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .newlines)
+      return (String(bytes: data, encoding: .utf8) ?? "").trimmingCharacters(in: .newlines)
     }
     #expect(try expanded(existing: nil) == "/b/briefings/p")
     #expect(try expanded(existing: "") == "/b/briefings/p")

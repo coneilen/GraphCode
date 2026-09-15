@@ -28,7 +28,8 @@ extension GhosttyTerminalView {
     let quoted = RemoteProjectLocation.shellQuoted
     let delivery =
       ZmxSessionLauncher.remoteDeliveryScript(
-        forNode: nil, backend: backend, at: location, settings: settings)
+        forNode: nil, backend: backend, at: location, settings: settings
+      )
       .map { $0 + "; " } ?? ""
     let agentScripts =
       launchesClaudeCode
