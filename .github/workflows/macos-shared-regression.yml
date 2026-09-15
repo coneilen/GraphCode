@@ -41,6 +41,8 @@ jobs:
           mise install
       - name: Validate shared portable Swift package
         run: mise exec -- swift test --package-path investigation/spikes/swift-portable
+      - name: Install Tuist dependencies
+        run: mise exec -- tuist install
       - name: Validate macOS app, daemon, and CLI
         run: mise exec -- make test
       - name: Validate macOS lint and formatting
