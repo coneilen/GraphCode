@@ -544,6 +544,12 @@ public actor DaemonConnectionChannel {
     }
   }
 
+  public func sendEncodedV1Event(_ data: Data) async throws {
+    guard !isClosed else { throw FramedMessageIO.IOError.connectionClosed }
+    guard case .v1 = mode else { return }
+    try await writeGate.send(data)
+  }
+
   public func envelopeForEvent(_ event: DaemonEvent) -> DaemonWireEnvelope? {
     guard !isClosed, case .v2 = mode, isSubscribed(to: event) else { return nil }
     return replayStore.append(clientID: clientID, event: event)

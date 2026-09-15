@@ -28,11 +28,30 @@ extension OrchestratorClient {
 private final class ReaderToken: @unchecked Sendable {
   private let lock = NSLock()
   private var readerID: UInt64?
+  private var connection: (any DaemonConnection)?
 
   func set(_ readerID: UInt64) {
     lock.lock()
     self.readerID = readerID
     lock.unlock()
+  }
+
+  func setConnection(_ connection: any DaemonConnection) {
+    lock.lock()
+    self.connection = connection
+    lock.unlock()
+  }
+
+  func closeConnection() {
+    lock.lock()
+    let connection = self.connection
+    lock.unlock()
+    guard let connection else { return }
+    if let unixConnection = connection as? UnixSocketConnection {
+      unixConnection.closeSync()
+    } else {
+      Task { try? await connection.close() }
+    }
   }
 
   var value: UInt64? {
@@ -128,6 +147,7 @@ private actor AppDaemonConnection {
               return
             }
             connectedConnection = connection
+            token.setConnection(connection)
             if await isReconnect() { try await rejoinProjects(on: connection) }
             var saidUnreadable = false
             while !Task.isCancelled {
@@ -165,6 +185,7 @@ private actor AppDaemonConnection {
       }
       continuation.onTermination = { _ in
         task.cancel()
+        token.closeConnection()
         Task {
           while token.value == nil { await Task.yield() }
           if let readerID = token.value {

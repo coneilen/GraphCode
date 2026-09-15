@@ -772,14 +772,17 @@ public actor GraphStore {
   public func handle(
     _ command: GraphCommand,
     from connectionID: UUID? = nil,
-    serializeCommands: Bool = false,
+    serializeCommands: Bool = true,
     broadcastErrors: Bool = true,
     v2PayloadLimit: Int? = nil
   ) async -> GraphStoreCommandResult {
     // A loop inside a composite addresses itself by its own id; route it through the
     // composite that owns it before previewing or applying the command.
     let command = routeIntoSubGraph(command) ?? command
-    guard serializeCommands || v2PayloadLimit != nil else {
+    let serializes =
+      v2PayloadLimit != nil
+      || (serializeCommands && !Self.allowsDrainRecoveryWhileHandling(command))
+    guard serializes else {
       return await applyCommand(
         command, from: connectionID, broadcastErrors: broadcastErrors)
     }
@@ -814,6 +817,15 @@ public actor GraphStore {
       commandTailID = nil
     }
     return result
+  }
+
+  private static func allowsDrainRecoveryWhileHandling(_ command: GraphCommand) -> Bool {
+    switch command {
+    case .messageNode, .memoNode, .mailroomPost, .mailroomInbox, .mailroomWatch:
+      return true
+    default:
+      return false
+    }
   }
 
   /// Runs a command against a side-effect-free copy so a v2 request can be rejected
@@ -4181,16 +4193,16 @@ public actor GraphStore {
       ])
     revision += 1
     let event = DaemonEvent.graphChanged(graph.wireSnapshot(revision: revision))
+    let v1Data = try? JSONEncoder().encode(event)
     let envelopes = onGraphEvent?(event) ?? [:]
     let encoded = Date()
     let intended = connections.count
-    let accepted = await notifyClients(event, envelopes: envelopes)
-    let bytes = (try? JSONEncoder().encode(event).count) ?? 0
+    let accepted = await notifyClients(event, envelopes: envelopes, encodedV1: v1Data)
     DaemonLog.shared.record(
       "broadcast",
       DaemonRequestContext.fields + [
         ("kind", "graphChanged"), ("revision", String(revision)),
-        ("bytes", String(bytes)),
+        ("bytes", String(v1Data?.count ?? 0)),
         ("encode_ms", DaemonLog.milliseconds(encoded.timeIntervalSince(started))),
         ("recipients", String(intended)), ("accepted", String(accepted)),
         ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
@@ -4205,7 +4217,8 @@ public actor GraphStore {
   /// lost at the next daemon restart.
   private func notifyClients(
     _ event: DaemonEvent,
-    envelopes: [UUID: DaemonWireEnvelope]
+    envelopes: [UUID: DaemonWireEnvelope],
+    encodedV1: Data? = nil
   ) async -> Int {
     var fallbackEnvelopes: [UUID: DaemonWireEnvelope] = [:]
     for channel in connections.values where envelopes[channel.clientID] == nil {
@@ -4219,7 +4232,8 @@ public actor GraphStore {
       if await send(
         event,
         to: id,
-        envelope: envelopes[channel.clientID] ?? fallbackEnvelopes[channel.clientID])
+        envelope: envelopes[channel.clientID] ?? fallbackEnvelopes[channel.clientID],
+        encodedV1: encodedV1)
       {
         accepted += 1
       }
@@ -4235,6 +4249,8 @@ public actor GraphStore {
     let delta = DaemonEvent.nodesChanged(
       projectPath: graph.project.path, revision: revision, nodes: nodes)
     let snapshot = DaemonEvent.graphChanged(graph.wireSnapshot(revision: revision))
+    let deltaData = try? JSONEncoder().encode(delta)
+    let snapshotData = try? JSONEncoder().encode(snapshot)
     let envelopes = onGraphEvent?(delta) ?? [:]
     var fallbackEnvelopes: [UUID: DaemonWireEnvelope] = [:]
     var accepted = 0
@@ -4243,7 +4259,7 @@ public actor GraphStore {
       if case .v1 = channel.mode,
         connectionCapabilities[id]?.contains(ClientCapability.nodesChanged.rawValue) != true
       {
-        if await send(snapshot, to: id) { accepted += 1 }
+        if await send(snapshot, to: id, encodedV1: snapshotData) { accepted += 1 }
         snapshots += 1
         continue
       }
@@ -4254,16 +4270,16 @@ public actor GraphStore {
         }
         envelope = fallbackEnvelopes[channel.clientID]
       }
-      if await send(delta, to: id, envelope: envelope) { accepted += 1 }
+      if await send(delta, to: id, envelope: envelope, encodedV1: deltaData) {
+        accepted += 1
+      }
     }
-    let deltaBytes = (try? JSONEncoder().encode(delta).count) ?? 0
-    let snapshotBytes = (try? JSONEncoder().encode(snapshot).count) ?? 0
     DaemonLog.shared.record(
       "broadcast",
       [
         ("kind", "nodesChanged"), ("revision", String(revision)),
-        ("nodes", String(nodes.count)), ("bytes", String(deltaBytes)),
-        ("snapshot_bytes", String(snapshotBytes)),
+        ("nodes", String(nodes.count)), ("bytes", String(deltaData?.count ?? 0)),
+        ("snapshot_bytes", String(snapshotData?.count ?? 0)),
         ("recipients", String(connections.count)), ("accepted", String(accepted)),
         ("as_snapshot", String(snapshots)),
         ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
@@ -4273,11 +4289,14 @@ public actor GraphStore {
   private func send(
     _ event: DaemonEvent,
     to connectionID: UUID,
-    envelope: DaemonWireEnvelope? = nil
+    envelope: DaemonWireEnvelope? = nil,
+    encodedV1: Data? = nil
   ) async -> Bool {
     guard let channel = connections[connectionID] else { return false }
     do {
-      if let envelope {
+      if case .v1 = channel.mode, let encodedV1 {
+        try await channel.sendEncodedV1Event(encodedV1)
+      } else if let envelope {
         try await channel.sendEvent(envelope: envelope)
       } else {
         try await channel.sendEvent(event)
