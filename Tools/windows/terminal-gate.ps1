@@ -38,6 +38,24 @@ function Invoke-Native([string] $description, [scriptblock] $command) {
   }
 }
 
+function Invoke-NativeWithRetry(
+  [string] $description,
+  [scriptblock] $command,
+  [int] $Attempts = 3
+) {
+  for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+    Write-Host "==> $description (attempt $attempt/$Attempts)"
+    & $command
+    if ($LASTEXITCODE -eq 0) {
+      return
+    }
+    if ($attempt -lt $Attempts) {
+      Start-Sleep -Seconds (5 * $attempt)
+    }
+  }
+  throw "$description failed after $Attempts attempts with exit code $LASTEXITCODE"
+}
+
 function Assert-Equal([string] $actual, [string] $expected, [string] $label) {
   if ($actual -ne $expected) {
     throw "$label expected $expected but found $actual"
@@ -200,7 +218,7 @@ try {
       Push-Location $WinghosttyRoot
       try { & $Zig0152 build -Demit-win32-host=true } finally { Pop-Location }
     }
-    Invoke-Native "zmx Windows provider artifact" {
+    Invoke-NativeWithRetry "zmx Windows provider artifact" {
       Push-Location $ZmxRoot
       try { & $Zig0160 build -Dtarget=x86_64-windows-gnu } finally { Pop-Location }
     }

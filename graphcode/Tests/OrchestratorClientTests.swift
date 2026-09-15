@@ -336,9 +336,13 @@ private final class StubDaemon: @unchecked Sendable {
         acceptedDescriptors.indices.contains(index) ? acceptedDescriptors[index] : nil
       }), descriptor >= 0
     else { return true }
-    var byte: UInt8 = 0
-    let result = recv(descriptor, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
-    return result == 0
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while true {
+      let result = recv(descriptor, &buffer, buffer.count, MSG_DONTWAIT)
+      if result == 0 { return true }
+      if result > 0 { continue }
+      return errno != EAGAIN && errno != EWOULDBLOCK
+    }
   }
 
   /// Reads one framed command off an accepted connection, waiting for the accept to land.

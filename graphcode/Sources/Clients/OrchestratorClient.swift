@@ -285,7 +285,15 @@ private actor AppDaemonConnection {
         try await sendRaw(command, on: connection)
       case .openProject, .closeProject, .forgetProject, .deleteProjectGraph, .graphCommand,
         .mailbox:
-        try await ensureRejoined(connection)
+        do {
+          try await ensureRejoined(connection)
+        } catch {
+          await invalidate(connection)
+          let replacement = try await ensureConnected()
+          try await ensureRejoined(replacement)
+          try await sendRaw(command, on: replacement)
+          return
+        }
         try await sendRaw(command, on: connection)
       }
     } catch {

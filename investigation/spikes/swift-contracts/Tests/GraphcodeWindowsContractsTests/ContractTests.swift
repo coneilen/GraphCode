@@ -1,10 +1,19 @@
 import Foundation
-
 import GraphcodeWindowsContracts
-
 import XCTest
 
 final class ContractTests: XCTestCase {
+  func testRemoteProjectPathEscapesSpecialCharactersAndRoundTripsIPv6() {
+    let location = RemoteProjectLocation(
+      user: "dev", host: "2001:db8::1", port: 2200,
+      remotePath: "/repo name/#q?x%雪")
+
+    XCTAssertEqual(
+      location.projectPath,
+      "ssh://dev@[2001:db8::1]:2200/repo%20name/%23q%3Fx%25%E9%9B%AA")
+    XCTAssertEqual(RemoteProjectLocation.parse(projectPath: location.projectPath), location)
+  }
+
   func testDeployedV1CommandStillDecodes() throws {
     let data = Data(#"{"listRecentProjects":{}}"#.utf8)
 

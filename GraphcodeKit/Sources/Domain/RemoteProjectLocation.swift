@@ -53,7 +53,7 @@ public struct RemoteProjectLocation: Equatable, Sendable {
     if projectPath.hasPrefix("\(codespaceScheme)://") {
       guard let components = URLComponents(string: projectPath),
         components.scheme == codespaceScheme,
-        let name = components.host, SafeArgument.isSafeSSHComponent(name),
+        let name = components.host.map(unbracketedHost), SafeArgument.isSafeSSHComponent(name),
         components.user == nil, components.port == nil,
         !components.path.isEmpty, components.path.hasPrefix("/")
       else { return nil }
@@ -62,7 +62,7 @@ public struct RemoteProjectLocation: Equatable, Sendable {
     guard projectPath.hasPrefix("\(scheme)://"),
       let components = URLComponents(string: projectPath),
       components.scheme == scheme,
-      let host = components.host, SafeArgument.isSafeSSHComponent(host),
+      let host = components.host.map(unbracketedHost), SafeArgument.isSafeSSHComponent(host),
       components.user.map(SafeArgument.isSafeSSHComponent) ?? true,
       !components.path.isEmpty, components.path.hasPrefix("/")
     else { return nil }
@@ -72,16 +72,24 @@ public struct RemoteProjectLocation: Equatable, Sendable {
 
   /// The path string this location travels as — `parse`'s inverse.
   public var projectPath: String {
+    let encodedPath =
+      remotePath.addingPercentEncoding(withAllowedCharacters: Self.remotePathAllowed)
+      ?? remotePath
     if isCodespace {
-      return "\(Self.codespaceScheme)://\(host)\(remotePath)"
+      return "\(Self.codespaceScheme)://\(host)\(encodedPath)"
     }
-    var components = URLComponents()
-    components.scheme = Self.scheme
-    components.user = user
-    components.host = host
-    components.port = port
-    components.path = remotePath
-    return components.string ?? "\(Self.scheme)://\(authority)\(remotePath)"
+    return "\(Self.scheme)://\(authority)\(encodedPath)"
+  }
+
+  private static let remotePathAllowed: CharacterSet = {
+    var allowed = CharacterSet.alphanumerics
+    allowed.insert(charactersIn: "-._~/")
+    return allowed
+  }()
+
+  private static func unbracketedHost(_ host: String) -> String {
+    guard host.hasPrefix("["), host.hasSuffix("]") else { return host }
+    return String(host.dropFirst().dropLast())
   }
 
   /// An absolute remote path reduced to the one spelling git will print for it, so two
