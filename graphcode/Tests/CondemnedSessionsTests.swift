@@ -110,7 +110,7 @@ struct OrphanedSessionReaperTests {
     try JSONEncoder().encode(graph)
       .write(to: projects.appendingPathComponent("_tmp_p.json"))
     let chats = QuickChatStore(baseDirectory: workspace)
-    chats.save([QuickChat(id: chatID, title: "chat")])
+    try chats.save([QuickChat(id: chatID, title: "chat")])
 
     let live = try #require(
       OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]))
