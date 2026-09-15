@@ -51,7 +51,7 @@ public enum SessionBriefing {
   /// `.github/copilot-instructions.md`, the two names Copilot looks for in a *repository*,
   /// and concluded the variable was ignored. `copilot help environment` says only "custom
   /// instructions files", which is how both readings survived. Re-measured on 2026-09-15
-  /// against 1.0.75, 1.0.82, 1.0.83 and 1.0.84-1/-3/-5: an `*.instructions.md` anywhere
+  /// against 1.0.75, 1.0.82, 1.0.83 and 1.0.84-1/-3/-5/-8: an `*.instructions.md` anywhere
   /// under a listed directory lands in the system message on every one of them, with or
   /// without `applyTo` front matter, while those two names never load from there.
   ///
