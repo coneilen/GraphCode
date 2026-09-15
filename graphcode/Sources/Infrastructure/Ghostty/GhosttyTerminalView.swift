@@ -193,10 +193,11 @@ struct GhosttyTerminalView: NSViewRepresentable {
     // delivers it for a daemon-started session — before this, only daemon-started loops
     // knew they could fan out, and a turn-based loop (which only ever starts here) asked
     // to create more loops improvised with its backend's own sub-agents instead (the
-    // Copilot shape of issue #2). Claude takes the file itself as a flag; Copilot and
-    // Codex are granted the directory and pointed at the file inside their opening
-    // prompt — see `sessionEnvironment`, where the pointer rides in the env var and so
-    // needs no shell quoting.
+    // Copilot shape of issue #2). Claude takes the file itself as a flag; Copilot is
+    // granted the directory and finds its copy through its environment
+    // (`briefingEnvironment`); Codex is granted the directory and pointed at the file
+    // inside its opening prompt — see `sessionEnvironment`, where the pointer rides in the
+    // env var and so needs no shell quoting.
     // A remote session's briefing path is `~/`-relative and deliberately unquoted
     // here: this whole string is the remote zsh's `-c` script, and that shell's own
     // tilde expansion is the only thing that knows the remote home directory.
@@ -207,6 +208,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
         parts.append("--add-dir \((briefingPath as NSString).deletingLastPathComponent)")
       }
     }
+    addBriefingEnvironment(briefingPath, to: &parts)
     if !prompt.isEmpty {
       if let flag = backend.promptFlag { parts.append(flag) }
       parts.append(prompt)
@@ -235,6 +237,15 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// fresh launches cannot diverge on how the shell resolves the agent.
   static func interactiveLoginShell(_ parts: [String]) -> [String] {
     ["/bin/zsh", "-i", "-l", "-c", parts.joined(separator: " ")]
+  }
+
+  /// `env` assignments ahead of the executable, double-quoted so the session's login shell
+  /// expands what `SessionBriefing.copilotInstructionsEnvironment` left for it to expand.
+  func addBriefingEnvironment(_ briefingPath: String?, to parts: inout [String]) {
+    let environment = backend.briefingEnvironment(briefingPath: briefingPath)
+    guard !environment.isEmpty else { return }
+    let assignments = environment.keys.sorted().map { "\($0)=\"\(environment[$0] ?? "")\"" }
+    parts.insert(contentsOf: ["env"] + assignments, at: 1)
   }
 
   func addRemotePresenceSettings(_ path: String?, to parts: inout [String]) {
@@ -287,7 +298,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
   }
 
   /// What rides into the session through the environment: the opening prompt, carrying
-  /// for Copilot and Codex the pointer at the briefing file — on whichever side keeps a
+  /// for Codex, OpenCode and pi the pointer at the briefing file — on whichever side keeps a
   /// leading `/loop` directive leading (`SessionPrompt`). In the env var rather
   /// than on the command line because the pointer is prose — inside `"$VAR"` it needs no
   /// quoting and cannot break the shell string the command is joined into. Claude's
@@ -295,7 +306,9 @@ struct GhosttyTerminalView: NSViewRepresentable {
   func sessionEnvironment(briefingPath: String?, hooksFile: URL? = nil) -> [String: String] {
     var environment = backend.presenceEnvironment(hooksFile: hooksFile)
     guard var prompt = initialPrompt else { return environment }
-    if backend != .claudeCode, let briefingPath {
+    if backend != .claudeCode, backend.briefingEnvironment(briefingPath: briefingPath).isEmpty,
+      let briefingPath
+    {
       prompt = SessionPrompt.composed(
         preamble: SessionBriefing.pointer(toBriefingAt: briefingPath), prompt: prompt)
     }
@@ -384,7 +397,8 @@ struct GhosttyTerminalView: NSViewRepresentable {
     let settings = GraphcodeSettingsStore.load()
     guard SessionIDStore.load(forNodeID: nodeID) != nil,
       let resumeLaunch = resumeCommand(
-        settings: settings, hooksFile: presenceHooksFile(), remoteSettingsPath: nil)
+        settings: settings, briefingPath: briefingFile(settings: settings)?.path,
+        hooksFile: presenceHooksFile(), remoteSettingsPath: nil)
     else {
       // Nothing banked means there is no resume for this pane to make. It does *not* mean
       // a fresh launch is this pane's to make: `graphcoded` owns an unattended loop's

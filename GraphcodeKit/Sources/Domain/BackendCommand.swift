@@ -83,10 +83,10 @@ extension CLISessionBackendKind {
   /// cosmetic. `claude` takes `--append-system-prompt-file <path>`, which adds the file's
   /// contents to its system prompt and leaves the human's prompt as the only thing in the
   /// conversation. `copilot` has no equivalent — its custom instructions come from
-  /// `AGENTS.md` files it discovers on disk (hence `--no-custom-instructions` to switch
-  /// that off), which graphcode has no business writing into someone's repository. So
-  /// Copilot has no equivalent flag and no working equivalent mechanism, so it is told to
-  /// read the file by a preamble on the prompt and granted access to it with `--add-dir`.
+  /// instruction files it discovers on disk, which graphcode has no business writing into
+  /// someone's repository — so it is pointed at a copy in graphcode's own directory through
+  /// its environment instead (`briefingEnvironment`), which lands in its system prompt
+  /// just as Claude's flag does.
   ///
   /// Neither carries the prose on the command line. See `SessionBriefing` for why that is
   /// load-bearing rather than tidy: the launch command is typed into a terminal, and a
@@ -125,20 +125,7 @@ extension CLISessionBackendKind {
       // for a prompt that actually is one, so an ordinary Copilot session keeps the
       // CLI's own defaults.
       let experimental = SessionPrompt.mentionsRecurrence(prompt) ? ["--experimental"] : []
-      guard let briefingPath else {
-        return model + access + experimental + ["--interactive", prompt]
-      }
-      // And the preamble telling it the briefing is there to read. See
-      // `SessionBriefing.pointer` for why the tidier env-var route was abandoned.
-      // Ordered by `SessionPrompt`, not concatenated: a time-based node's prompt is the
-      // `/loop …` directive itself, and Copilot is the one backend that both hosts that
-      // loop type and receives its briefing as a preamble (issue #179).
-      return model + access + experimental
-        + [
-          "--interactive",
-          SessionPrompt.composed(
-            preamble: SessionBriefing.pointer(toBriefingAt: briefingPath), prompt: prompt),
-        ]
+      return model + access + experimental + ["--interactive", prompt]
     case .codex:
       // Same shape as Claude Code — an interactive TUI taking its prompt positionally —
       // so the briefing rides the same way Copilot's does: `--add-dir` for access, a
@@ -266,6 +253,13 @@ extension CLISessionBackendKind {
   /// is named by a config file, and `OPENCODE_CONFIG` is the one route that *merges over*
   /// the user's own config instead of replacing it (`OPENCODE_CONFIG_DIR` would drop
   /// their providers and plugins on the floor — read off the config loader, not the docs).
+  /// The environment that delivers the briefing at `briefingPath`, for the one backend
+  /// that takes it that way (`SessionBriefing.copilotInstructionsDirectoryVariable`).
+  public func briefingEnvironment(briefingPath: String?) -> [String: String] {
+    guard self == .copilotCLI, let briefingPath else { return [:] }
+    return SessionBriefing.copilotInstructionsEnvironment(briefingPath: briefingPath)
+  }
+
   public func presenceEnvironment(hooksFile: URL?) -> [String: String] {
     switch self {
     case .openCode:

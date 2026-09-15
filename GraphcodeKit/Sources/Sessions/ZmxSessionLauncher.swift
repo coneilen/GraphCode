@@ -1223,8 +1223,11 @@ public enum ZmxSessionLauncher {
       + Self.loginShellInvocation(
         of: executable, arguments: resumeArgs,
         environment: Self.environment(
-          forBackend: node.backend, briefingPath: nil, hooksFile: hooksFile,
-          remoteHooksPath: remoteEnvironmentPath),
+          forBackend: node.backend,
+          briefingPath: Self.resumeBriefingPath(
+            forBackend: node.backend, projectPath: projectPath, isRemote: remote != nil,
+            settings: settings),
+          hooksFile: hooksFile, remoteHooksPath: remoteEnvironmentPath),
         scriptSuffix: remoteHooksSuffix)
   }
 
@@ -1260,18 +1263,34 @@ public enum ZmxSessionLauncher {
     return paths
   }
 
-  /// Environment a session needs beyond what its shell provides. Copilot's briefing rides
-  /// on its argv (see `CLISessionBackendKind.launchArguments`) after the documented
-  /// environment route turned out not to work; OpenCode's presence plugin is the one
-  /// thing that genuinely has to travel this way (`presenceEnvironment`).
+  /// Environment a session needs beyond what its shell provides: Copilot's briefing
+  /// (`briefingEnvironment`) and OpenCode's presence plugin (`presenceEnvironment`).
   static func environment(
     forBackend backend: CLISessionBackendKind, briefingPath: String?, hooksFile: URL? = nil,
     remoteHooksPath: String? = nil
   ) -> [String: String] {
+    let briefing = backend.briefingEnvironment(briefingPath: briefingPath)
     if backend == .openCode, let remoteHooksPath {
-      return ["OPENCODE_CONFIG": remoteHooksPath]
+      return briefing.merging(["OPENCODE_CONFIG": remoteHooksPath]) { $1 }
     }
-    return backend.presenceEnvironment(hooksFile: hooksFile)
+    return briefing.merging(backend.presenceEnvironment(hooksFile: hooksFile)) { $1 }
+  }
+
+  /// The briefing a resumed session is launched with. Only Copilot needs one: it rebuilds
+  /// its system prompt from the resuming process's environment, where every other
+  /// backend's briefing either rides in the conversation it restores or in a flag the
+  /// resume never carried.
+  static func resumeBriefingPath(
+    forBackend backend: CLISessionBackendKind, projectPath: String?, isRemote: Bool,
+    settings: GraphcodeSettings
+  ) -> String? {
+    guard backend == .copilotCLI, settings.briefsSessionsAboutTheGraph, let projectPath else {
+      return nil
+    }
+    return isRemote
+      ? SessionBriefing.text(projectPath: projectPath)
+        .map { _ in RemoteGraphAccess.briefingPath(forProjectPath: projectPath) }
+      : SessionBriefing.write(projectPath: projectPath)?.path
   }
 
   /// What a remote session's launch appends so its reporter loads — a `$HOME` path only
@@ -1528,13 +1547,33 @@ public enum ZmxSessionLauncher {
   /// because the app's *attach* delivers too, before any node exists to have memory.
   /// Public for exactly that caller (`GhosttyTerminalView.remoteCommand`).
   public static func remoteDeliveryScript(
-    forNode node: LoopNode?, at location: RemoteProjectLocation, settings: GraphcodeSettings
+    forNode node: LoopNode?, backend: CLISessionBackendKind? = nil,
+    at location: RemoteProjectLocation, settings: GraphcodeSettings
   ) -> String? {
+    // The shim's receipt, written only once every file has landed — see
+    // `installerScript`. It is what lets a later ensure skip a delivery it doesn't need
+    // without ever claiming a shim the host never received.
+    RemoteGraphAccess.installerScript(
+      files: remoteDeliveryFiles(forNode: node, backend: backend, at: location, settings: settings),
+      receipt: (path: RemoteGraphAccess.shimStampPath, content: RemoteGraphAccess.cliShimStamp))
+  }
+
+  /// `remoteDeliveryScript`'s manifest: home-relative path → content. Copilot's copy of the
+  /// briefing (`SessionBriefing.copilotInstructionsFile`) goes only to a Copilot session,
+  /// named by `node` or, for the app's attach, by `backend`.
+  static func remoteDeliveryFiles(
+    forNode node: LoopNode?, backend: CLISessionBackendKind? = nil,
+    at location: RemoteProjectLocation, settings: GraphcodeSettings
+  ) -> [String: String] {
     var files = [RemoteGraphAccess.cliInstallPath: RemoteGraphAccess.cliShimSource]
     if settings.briefsSessionsAboutTheGraph,
       let text = SessionBriefing.text(projectPath: location.projectPath)
     {
       files[RemoteGraphAccess.briefingPath(forProjectPath: location.projectPath)] = text
+      if (node?.backend ?? backend) == .copilotCLI {
+        files[RemoteGraphAccess.copilotInstructionsPath(forProjectPath: location.projectPath)] =
+          text
+      }
     }
     if let node {
       let wakeURL = NodeMemory.directory(
@@ -1555,12 +1594,7 @@ public enum ZmxSessionLauncher {
           promptText
       }
     }
-    // The shim's receipt, written only once every file above has landed — see
-    // `installerScript`. It is what lets a later ensure skip a delivery it doesn't need
-    // without ever claiming a shim the host never received.
-    return RemoteGraphAccess.installerScript(
-      files: files,
-      receipt: (path: RemoteGraphAccess.shimStampPath, content: RemoteGraphAccess.cliShimStamp))
+    return files
   }
 
   /// `quotedCommand`, except that arguments naming graphcode's own remote files —

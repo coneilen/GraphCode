@@ -19,12 +19,19 @@ struct SessionPromptTests {
       prompt: "/loop 1h Check the queue", tier: .standard,
       briefingPath: "/tmp/briefings/x/AGENTS.md")
 
+    // Copilot's briefing now arrives through its environment (`briefingEnvironment`), so
+    // nothing is left in the message to push the directive off the front.
     let interactive = try #require(arguments.firstIndex(of: "--interactive"))
-    let opening = arguments[interactive + 1]
-    #expect(opening.hasPrefix("/loop 1h Check the queue"))
-    // Trailing, not dropped: `/loop <interval> <task>` takes the rest of the line as the
-    // task, so the briefing reaches every scheduled pass rather than none of them.
-    #expect(opening.contains("/tmp/briefings/x/AGENTS.md"))
+    #expect(arguments[interactive + 1] == "/loop 1h Check the queue")
+
+    // A backend that still takes the pointer trails it: `/loop <interval> <task>` takes
+    // the rest of the line as the task, so the briefing reaches every scheduled pass.
+    let opencode = CLISessionBackendKind.openCode.launchArguments(
+      prompt: "/loop 1h Check the queue", tier: .standard,
+      briefingPath: "/tmp/briefings/x/AGENTS.md")
+    let flag = try #require(opencode.firstIndex(of: "--prompt"))
+    #expect(opencode[flag + 1].hasPrefix("/loop 1h Check the queue"))
+    #expect(opencode[flag + 1].contains("/tmp/briefings/x/AGENTS.md"))
   }
 
   /// The other half of the same rule, and the one issue #2 bought: an ordinary prose
@@ -32,13 +39,13 @@ struct SessionPromptTests {
   /// the work is a session that never fanned out.
   @Test
   func anOrdinaryPromptStillOpensWithTheBriefingPointer() throws {
-    let arguments = CLISessionBackendKind.copilotCLI.launchArguments(
+    let arguments = CLISessionBackendKind.openCode.launchArguments(
       prompt: "fix the failing test", tier: .standard,
       briefingPath: "/tmp/briefings/x/AGENTS.md")
 
-    let interactive = try #require(arguments.firstIndex(of: "--interactive"))
-    #expect(arguments[interactive + 1].hasPrefix("Before anything else"))
-    #expect(arguments[interactive + 1].hasSuffix("fix the failing test"))
+    let flag = try #require(arguments.firstIndex(of: "--prompt"))
+    #expect(arguments[flag + 1].hasPrefix("Before anything else"))
+    #expect(arguments[flag + 1].hasSuffix("fix the failing test"))
   }
 
   /// The wake digest is the second preamble a launched session carries (`NodeMemory`),

@@ -37,9 +37,39 @@ public enum SessionBriefing {
     directory.appendingPathComponent(slug(for: projectPath), isDirectory: true)
   }
 
-  /// The filename Copilot looks for when it searches a directory, and the file Claude Code
-  /// is handed by path. One file, two delivery mechanisms, no duplication.
+  /// The file Claude Code is handed by path and the other backends are pointed at.
   public static let fileName = "AGENTS.md"
+
+  /// The variable Copilot CLI reads for extra instruction directories, and the copy of the
+  /// briefing it finds there.
+  ///
+  /// **Copilot searches those directories for `*.instructions.md` files, not `AGENTS.md`.**
+  /// The first cut pointed the variable at a directory holding only `AGENTS.md`, nothing
+  /// loaded, and Copilot loops silently never fanned out (issue #2). The measurement that
+  /// followed was real — Copilot's own session logs from 2026-07-28 show CLI 1.0.75 and a
+  /// working-directory control that fired — but it tried only `AGENTS.md` and
+  /// `.github/copilot-instructions.md`, the two names Copilot looks for in a *repository*,
+  /// and concluded the variable was ignored. `copilot help environment` says only "custom
+  /// instructions files", which is how both readings survived. Re-measured on 2026-09-15
+  /// against 1.0.75, 1.0.82, 1.0.83 and 1.0.84-1/-3/-5: an `*.instructions.md` anywhere
+  /// under a listed directory lands in the system message on every one of them, with or
+  /// without `applyTo` front matter, while those two names never load from there.
+  ///
+  /// Resuming rebuilds the system message from the resuming process's environment, so a
+  /// resumed Copilot session needs the variable as much as a fresh one does.
+  public static let copilotInstructionsDirectoryVariable = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+  public static let copilotInstructionsFile = "instructions/graphcode.instructions.md"
+
+  /// Points Copilot at the directory holding `briefingPath`, *after* any directories the
+  /// user's own shell already listed — the variable is comma-separated and theirs first.
+  /// Expanded by the session's login shell, the only place that knows the user's value
+  /// and, for a remote `~/` path, the host's home directory.
+  public static func copilotInstructionsEnvironment(briefingPath: String) -> [String: String] {
+    let variable = copilotInstructionsDirectoryVariable
+    var directory = (briefingPath as NSString).deletingLastPathComponent
+    if directory.hasPrefix("~/") { directory = "$HOME/" + directory.dropFirst(2) }
+    return [variable: "${\(variable):+$\(variable),}\(directory)"]
+  }
 
   /// The briefing for a node in `projectPath`'s graph, or `nil` when there's no path to
   /// tell it about — every command the briefing describes takes one, so a briefing
@@ -272,21 +302,10 @@ public enum SessionBriefing {
       """
   }
 
-  /// How Copilot CLI is told about the briefing: a one-line preamble on the prompt, and
-  /// `--add-dir` so the session is allowed to read the file it names.
+  /// How a backend with no system-prompt channel is told about the briefing — Codex,
+  /// OpenCode and pi: a one-line preamble on the prompt. Copilot has a channel
+  /// (`copilotInstructionsDirectoryVariable`) and no longer takes one.
   ///
-  /// **`COPILOT_CUSTOM_INSTRUCTIONS_DIRS` does not work.** `copilot help environment`
-  /// documents it as "additional directories to search for custom instructions files", and
-  /// it was the obvious right answer — a real system-level instruction, nothing in the
-  /// prompt, nothing written into anyone's repository. Measured against 1.0.75 it is simply
-  /// ignored: an `AGENTS.md` in a directory named by that variable has no effect, in either
-  /// the `AGENTS.md` or `.github/copilot-instructions.md` layout, while the identical file
-  /// in the working directory is picked up every time. Shipping on the documentation cost
-  /// a release where Copilot loops silently never fanned out (issue #2).
-  ///
-  /// `--add-dir` is the half that is easy to miss. Copilot verifies file paths, so a
-  /// session told to read `~/.graphcode/briefings/…` cannot reach it — the pointer alone
-  /// looks like the agent ignoring an instruction when it is actually being denied.
   /// Deliberately ASCII-only, with plain words on both sides of the path. This string
   /// travels through more layers than any other prose graphcode emits — argv, zmx's
   /// typed command line, a canonical-mode tty, sometimes ssh — and an em dash sitting
@@ -313,6 +332,10 @@ public enum SessionBriefing {
       try FileManager.default.createDirectory(
         at: directory, withIntermediateDirectories: true)
       try text.write(to: url, atomically: true, encoding: .utf8)
+      let instructions = directory.appendingPathComponent(copilotInstructionsFile)
+      try FileManager.default.createDirectory(
+        at: instructions.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try text.write(to: instructions, atomically: true, encoding: .utf8)
       return url
     } catch {
       // A session with no briefing is the pre-briefing behaviour, which works. Failing the
