@@ -649,6 +649,7 @@ public actor ProjectRegistry {
         let requester: UUID? = if case .v1 = channel.mode { connectionID } else { nil }
         let result = await store.handle(
           inner, from: requester,
+          serializeCommands: true,
           broadcastErrors: broadcastErrors,
           v2PayloadLimit: v2PayloadLimit)
         switch result {

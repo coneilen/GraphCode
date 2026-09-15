@@ -135,7 +135,11 @@ private actor AppDaemonConnection {
               let data = try await withTaskCancellationHandler {
                 try await connection.receiveFrame()
               } onCancel: {
-                Task { try? await connection.close() }
+                if let unixConnection = connection as? UnixSocketConnection {
+                  unixConnection.closeSync()
+                } else {
+                  Task { try? await connection.close() }
+                }
               }
               guard let event = try? JSONDecoder().decode(DaemonEvent.self, from: data) else {
                 if !saidUnreadable {

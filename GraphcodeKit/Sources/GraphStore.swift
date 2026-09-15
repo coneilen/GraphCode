@@ -772,13 +772,14 @@ public actor GraphStore {
   public func handle(
     _ command: GraphCommand,
     from connectionID: UUID? = nil,
+    serializeCommands: Bool = false,
     broadcastErrors: Bool = true,
     v2PayloadLimit: Int? = nil
   ) async -> GraphStoreCommandResult {
     // A loop inside a composite addresses itself by its own id; route it through the
     // composite that owns it before previewing or applying the command.
     let command = routeIntoSubGraph(command) ?? command
-    guard let v2PayloadLimit else {
+    guard serializeCommands || v2PayloadLimit != nil else {
       return await applyCommand(
         command, from: connectionID, broadcastErrors: broadcastErrors)
     }
@@ -792,13 +793,15 @@ public actor GraphStore {
           message: "graph store is unavailable",
           graph: LoopGraph(project: ProjectRef(path: "", name: "Untitled")))
       }
-      let preview = await self.preview(command, broadcastErrors: broadcastErrors)
-      if case .applied(let projectedGraph) = preview,
-        !Self.v2GraphChangeFits(projectedGraph, limit: v2PayloadLimit)
-      {
-        return .rejected(
-          message: "resulting graph response exceeds the v2 payload limit",
-          graph: await self.graph)
+      if let v2PayloadLimit {
+        let preview = await self.preview(command, broadcastErrors: broadcastErrors)
+        if case .applied(let projectedGraph) = preview,
+          !Self.v2GraphChangeFits(projectedGraph, limit: v2PayloadLimit)
+        {
+          return .rejected(
+            message: "resulting graph response exceeds the v2 payload limit",
+            graph: await self.graph)
+        }
       }
       return await self.applyCommand(
         command, from: connectionID, broadcastErrors: broadcastErrors)
