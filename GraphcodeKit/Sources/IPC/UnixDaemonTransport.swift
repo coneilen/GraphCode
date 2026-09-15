@@ -74,6 +74,7 @@ import Foundation
       isClosed = true
       lock.unlock()
       if shouldClose, closeOnClose {
+        _ = shutdown(fileDescriptor, Int32(SHUT_RDWR))
         #if canImport(Darwin)
           Darwin.close(fileDescriptor)
         #else

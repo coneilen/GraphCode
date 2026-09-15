@@ -770,6 +770,7 @@ public actor GraphStore {
 
   public func handle(
     _ command: GraphCommand,
+    from connectionID: UUID? = nil,
     broadcastErrors: Bool = true,
     v2PayloadLimit: Int? = nil
   ) async -> GraphStoreCommandResult {
@@ -777,7 +778,8 @@ public actor GraphStore {
     // composite that owns it before previewing or applying the command.
     let command = routeIntoSubGraph(command) ?? command
     guard let v2PayloadLimit else {
-      return await applyCommand(command, broadcastErrors: broadcastErrors)
+      return await applyCommand(
+        command, from: connectionID, broadcastErrors: broadcastErrors)
     }
     let previous = commandTail
     let commandID = nextCommandID
@@ -797,7 +799,8 @@ public actor GraphStore {
           message: "resulting graph response exceeds the v2 payload limit",
           graph: await self.graph)
       }
-      return await self.applyCommand(command, broadcastErrors: broadcastErrors)
+      return await self.applyCommand(
+        command, from: connectionID, broadcastErrors: broadcastErrors)
     }
     commandTail = operation
     commandTailID = commandID
@@ -834,6 +837,7 @@ public actor GraphStore {
 
   private func applyCommand(
     _ command: GraphCommand,
+    from connectionID: UUID? = nil,
     broadcastErrors: Bool = true
   ) async -> GraphStoreCommandResult {
     switch command {
@@ -987,7 +991,12 @@ public actor GraphStore {
       await mailroomPost(text: text, topic: topic, from: from)
 
     case .mailroomInbox:
-      return await reject(legacyInboxRefusal(), broadcastErrors: broadcastErrors)
+      let message = legacyInboxRefusal()
+      if let connectionID, connections[connectionID] != nil {
+        _ = await send(.errorOccurred(message), to: connectionID)
+      }
+      onAnnounceError?(message)
+      return .rejected(message: message, graph: graph)
 
     case .mailroomWatch(let on, let topic, let from):
       mailroomWatch(on: on, topic: topic, from: from)
@@ -4169,7 +4178,19 @@ public actor GraphStore {
     revision += 1
     let event = DaemonEvent.graphChanged(graph.wireSnapshot(revision: revision))
     let envelopes = onGraphEvent?(event) ?? [:]
-    await notifyClients(event, envelopes: envelopes)
+    let encoded = Date()
+    let intended = connections.count
+    let accepted = await notifyClients(event, envelopes: envelopes)
+    let bytes = (try? JSONEncoder().encode(event).count) ?? 0
+    DaemonLog.shared.record(
+      "broadcast",
+      DaemonRequestContext.fields + [
+        ("kind", "graphChanged"), ("revision", String(revision)),
+        ("bytes", String(bytes)),
+        ("encode_ms", DaemonLog.milliseconds(encoded.timeIntervalSince(started))),
+        ("recipients", String(intended)), ("accepted", String(accepted)),
+        ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
+      ])
   }
 
   /// The half of `broadcast` that tells clients, without the half that writes to disk.
@@ -4181,7 +4202,7 @@ public actor GraphStore {
   private func notifyClients(
     _ event: DaemonEvent,
     envelopes: [UUID: DaemonWireEnvelope]
-  ) async {
+  ) async -> Int {
     var fallbackEnvelopes: [UUID: DaemonWireEnvelope] = [:]
     for channel in connections.values where envelopes[channel.clientID] == nil {
       guard fallbackEnvelopes[channel.clientID] == nil else { continue }
@@ -4189,12 +4210,17 @@ public actor GraphStore {
         fallbackEnvelopes[channel.clientID] = envelope
       }
     }
+    var accepted = 0
     for (id, channel) in connections {
-      await send(
+      if await send(
         event,
         to: id,
         envelope: envelopes[channel.clientID] ?? fallbackEnvelopes[channel.clientID])
+      {
+        accepted += 1
+      }
     }
+    return accepted
   }
 
   /// Sends a presence delta to clients that understand it and a same-revision snapshot
@@ -4213,8 +4239,7 @@ public actor GraphStore {
       if case .v1 = channel.mode,
         connectionCapabilities[id]?.contains(ClientCapability.nodesChanged.rawValue) != true
       {
-        await send(snapshot, to: id)
-        accepted += 1
+        if await send(snapshot, to: id) { accepted += 1 }
         snapshots += 1
         continue
       }
@@ -4225,8 +4250,7 @@ public actor GraphStore {
         }
         envelope = fallbackEnvelopes[channel.clientID]
       }
-      await send(delta, to: id, envelope: envelope)
-      accepted += 1
+      if await send(delta, to: id, envelope: envelope) { accepted += 1 }
     }
     let deltaBytes = (try? JSONEncoder().encode(delta).count) ?? 0
     let snapshotBytes = (try? JSONEncoder().encode(snapshot).count) ?? 0
@@ -4246,16 +4270,18 @@ public actor GraphStore {
     _ event: DaemonEvent,
     to connectionID: UUID,
     envelope: DaemonWireEnvelope? = nil
-  ) async {
-    guard let channel = connections[connectionID] else { return }
+  ) async -> Bool {
+    guard let channel = connections[connectionID] else { return false }
     do {
       if let envelope {
         try await channel.sendEvent(envelope: envelope)
       } else {
         try await channel.sendEvent(event)
       }
+      return true
     } catch {
       evictConnection(connectionID)
+      return false
     }
   }
 

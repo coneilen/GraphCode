@@ -645,8 +645,9 @@ public actor ProjectRegistry {
         }
         let v2PayloadLimit: Int? =
           if case .v2 = channel.mode { FramedMessageIO.v2MaxPayloadBytes } else { nil }
+        let requester: UUID? = if case .v1 = channel.mode { connectionID } else { nil }
         let result = await store.handle(
-          inner,
+          inner, from: requester,
           broadcastErrors: broadcastErrors,
           v2PayloadLimit: v2PayloadLimit)
         switch result {
