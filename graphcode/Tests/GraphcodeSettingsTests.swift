@@ -34,7 +34,7 @@ struct GraphcodeSettingsTests {
       defaultBackend: .copilotCLI, defaultModelTier: .capable,
       codexApprovals: .unsandboxed, claudePermissionMode: .bypassPermissions,
       copilotPermissions: .ask, copilotPreferredVersion: "1.0.84-5",
-      copilotPermissions: .ask, briefsSessionsAboutTheGraph: false,
+      briefsSessionsAboutTheGraph: false,
       autoSelectsModel: true, showsActivityStrip: true, betaUpdates: true)
 
     #expect(GraphcodeSettingsStore.save(settings, to: url))
