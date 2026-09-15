@@ -71,6 +71,10 @@ public enum RemoteGraphAccess {
     briefingDirectory(forProjectPath: projectPath) + "/" + SessionBriefing.fileName
   }
 
+  public static func copilotInstructionsPath(forProjectPath projectPath: String) -> String {
+    briefingDirectory(forProjectPath: projectPath) + "/" + SessionBriefing.copilotInstructionsFile
+  }
+
   /// The remote twin of `NodeMemory.directory(forProjectPath:nodeID:)`. Only the wake
   /// digest is delivered there — the log itself stays on the Mac, where the daemon
   /// appends to it; the digest is the budgeted, rebuildable view of it.

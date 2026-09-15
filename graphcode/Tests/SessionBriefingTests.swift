@@ -40,8 +40,8 @@ struct SessionBriefingTests {
     defer { try? FileManager.default.removeItem(at: url) }
     let written = try String(contentsOf: url, encoding: .utf8)
     #expect(written.contains("graphcode node create \(Self.project)"))
-    // Named for Copilot's own discovery, which searches directories rather than taking a
-    // file — and sitting in a per-project directory readable enough to tell them apart.
+    // Sitting in a per-project directory readable enough to tell them apart, beside the
+    // copy Copilot discovers (`CopilotInstructionsDeliveryTests`).
     #expect(url.lastPathComponent == SessionBriefing.fileName)
     #expect(url.deletingLastPathComponent().lastPathComponent.contains("project"))
   }
@@ -191,33 +191,35 @@ struct SessionBriefingTests {
   }
 
   @Test
-  func copilotIsBothToldToReadTheBriefingAndAllowedTo() throws {
-    // `copilot` has no `--append-system-prompt`, and the documented
-    // COPILOT_CUSTOM_INSTRUCTIONS_DIRS is ignored in 1.0.75 — measured, not assumed.
+  func copilotFindsTheBriefingThroughItsEnvironmentAndMayStillReadIt() throws {
+    // Copilot searches `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` for `*.instructions.md` and puts
+    // what it finds in its system prompt — measured per version, not assumed
+    // (`SessionBriefing.copilotInstructionsDirectoryVariable`).
     let arguments = try #require(
       ZmxSessionLauncher.arguments(
         forNode: node(backend: .copilotCLI), projectPath: Self.project))
 
     #expect(!arguments.contains("--append-system-prompt-file"))
+    let variable = SessionBriefing.copilotInstructionsDirectoryVariable
+    let script = try #require(arguments.first { $0.hasPrefix("exec ") })
+    #expect(script.hasPrefix("exec env \(variable)=\"${\(variable):+$\(variable),}"))
+    #expect(script.contains("briefings"))
 
-    // Copilot needs *both* halves, and shipping only one is issue #2: a preamble telling
-    // it to read the briefing, and permission to actually open it. Copilot verifies file
-    // paths, so without the second the session is denied the file it was just told to
-    // open — which looks exactly like an agent ignoring its instructions. Under YOLO
-    // every path is already allowed; under the narrower tools-only mode the briefing's
-    // directory must be granted by name. The launcher reads the machine's real settings,
-    // so the assertion accepts whichever route this machine is on.
+    // The directory grant stays. Under YOLO every path is already allowed; under the
+    // narrower tools-only mode Copilot verifies paths, and a session asked about its
+    // briefing should be able to open the file. The launcher reads the machine's real
+    // settings, so the assertion accepts whichever route this machine is on.
     if !arguments.contains("--yolo") {
       let granted = zip(arguments, arguments.dropFirst())
         .filter { $0.0 == "--add-dir" }.map(\.1)
       #expect(granted.contains { $0.contains("briefings") })
     }
 
-    // A Copilot time loop opens as prose — run now, then arm /every — so the briefing
-    // pointer leads it, and the raw directive never fronts the message.
+    // Nothing about the briefing rides in the prompt, so a Copilot time loop opens with
+    // its own first pass and the directive that arms the schedule.
     let interactive = try #require(arguments.firstIndex(of: "--interactive"))
     let opening = arguments[interactive + 1]
-    #expect(opening.contains(".md"))
+    #expect(!opening.contains("briefing file"))
     #expect(opening.contains("Run this task now: Check"))
     #expect(opening.contains("/every 1h Check"))
     #expect(!opening.hasPrefix("/loop"))

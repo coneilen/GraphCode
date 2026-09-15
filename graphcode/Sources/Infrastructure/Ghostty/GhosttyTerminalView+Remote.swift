@@ -27,7 +27,8 @@ extension GhosttyTerminalView {
     RemoteProjectLocation.prepareControlSocketDirectory()
     let quoted = RemoteProjectLocation.shellQuoted
     let delivery =
-      ZmxSessionLauncher.remoteDeliveryScript(forNode: nil, at: location, settings: settings)
+      ZmxSessionLauncher.remoteDeliveryScript(
+        forNode: nil, backend: backend, at: location, settings: settings)
       .map { $0 + "; " } ?? ""
     let agentScripts =
       launchesClaudeCode
@@ -209,7 +210,8 @@ extension GhosttyTerminalView {
     var script = preparation + "{ "
     let nodeID = SurfaceRef.nodeID(fromZmxSessionName: sessionName)
     let resumeLaunch = resumeCommand(
-      settings: settings, remoteSettingsPath: remotePresenceSettingsPath, isRemote: true)
+      settings: settings, briefingPath: remoteBriefingPath(settings: settings),
+      remoteSettingsPath: remotePresenceSettingsPath, isRemote: true)
     if let nodeID, let resumeLaunch {
       let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: nodeID)
       let attempt =
@@ -243,8 +245,8 @@ extension GhosttyTerminalView {
   /// machine wrote. A resumed local session needs them for the same reason a fresh one
   /// does: without them the loop reports IDLE for as long as it runs.
   func resumeCommand(
-    settings: GraphcodeSettings, hooksFile: URL? = nil, remoteSettingsPath: String?,
-    isRemote: Bool = false
+    settings: GraphcodeSettings, briefingPath: String? = nil, hooksFile: URL? = nil,
+    remoteSettingsPath: String?, isRemote: Bool = false
   ) -> [String]? {
     guard backend.supportsResume, var parts = launchPrefix(settings: settings) else {
       return nil
@@ -258,6 +260,7 @@ extension GhosttyTerminalView {
     .joined(separator: " ")
     if !presence.isEmpty { parts.append(presence) }
     addRemotePresenceSettings(remoteSettingsPath, to: &parts)
+    addBriefingEnvironment(briefingPath, to: &parts)
     parts += backend.resumeArguments(
       sessionID: "\"$\(ZmxSessionLauncher.remoteResumeIDVariable)\"")
     return Self.interactiveLoginShell(parts)

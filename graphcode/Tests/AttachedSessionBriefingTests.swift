@@ -39,18 +39,38 @@ struct AttachedSessionBriefingTests {
   }
 
   @Test
-  func copilotIsGrantedTheDirectoryAndPointedAtTheFile() {
+  func copilotIsGrantedTheDirectoryAndFindsTheBriefingThroughItsEnvironment() {
     let command = shellCommand(.copilotCLI)
     // `--add-dir` is the half that is easy to miss: Copilot verifies paths, so without
-    // it the pointer reads as the agent ignoring an instruction (issue #2's shape).
+    // it a session asked about its briefing reads as ignoring it (issue #2's shape).
     #expect(command.contains("--add-dir /tmp/briefings/proj"))
     #expect(command.contains("--interactive"))
+    let variable = SessionBriefing.copilotInstructionsDirectoryVariable
+    #expect(
+      command.hasPrefix(
+        "exec env \(variable)=\"${\(variable):+$\(variable),}/tmp/briefings/proj\" copilot"))
 
-    // The pointer rides inside the env var, where prose needs no shell quoting.
+    // And the prompt is left alone, as Claude's is.
     let environment = surface(.copilotCLI).sessionEnvironment(briefingPath: briefing)
-    let prompt = environment["GRAPHCODE_TRIGGER_PROMPT"] ?? ""
-    #expect(prompt.contains(briefing))
-    #expect(prompt.hasSuffix(" go"))
+    #expect(environment["GRAPHCODE_TRIGGER_PROMPT"] == "go")
+  }
+
+  @Test
+  func aResumedCopilotSurfaceIsBriefedAgain() {
+    // Copilot rebuilds its system prompt from the resuming process's environment, so a
+    // resume without the variable is a session that has forgotten it is in a graph.
+    let settings = GraphcodeSettings()
+    let copilot =
+      surface(.copilotCLI).resumeCommand(
+        settings: settings, briefingPath: briefing, remoteSettingsPath: nil)?.last ?? ""
+    #expect(copilot.hasPrefix("exec env COPILOT_CUSTOM_INSTRUCTIONS_DIRS="))
+    #expect(copilot.contains("--resume"))
+    for backend in [CLISessionBackendKind.claudeCode, .codex, .openCode, .pi] {
+      let resumed =
+        surface(backend).resumeCommand(
+          settings: settings, briefingPath: briefing, remoteSettingsPath: nil)?.last ?? ""
+      #expect(!resumed.contains("COPILOT_CUSTOM_INSTRUCTIONS_DIRS"), "\(backend)")
+    }
   }
 
   @Test
@@ -87,6 +107,7 @@ struct AttachedSessionBriefingTests {
       surface(.copilotCLI).agentCommand(
         settings: GraphcodeSettings(), briefingPath: nil)?.last ?? ""
     #expect(!command.contains("--add-dir"))
+    #expect(!command.contains("COPILOT_CUSTOM_INSTRUCTIONS_DIRS"))
     let environment = surface(.copilotCLI).sessionEnvironment(briefingPath: nil)
     #expect(environment["GRAPHCODE_TRIGGER_PROMPT"] == "go")
   }
