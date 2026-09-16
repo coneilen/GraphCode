@@ -64,6 +64,17 @@ prints its captured child output rather than discarding it. Session/resource
 tracking uses exact test-owned CIM process matches and their descendants, not a
 global `zmx list` that can hang on unrelated sessions.
 
+Real high-output timeouts also emit `HARDENING_OUTPUT_DIAGNOSTICS_JSON`: captured
+byte count, independent start/end marker offsets, attach/capture state, and at
+most 512 bytes from each end of the synthetic transcript. This does not change
+the payload, hash checks, or completion deadline.
+
+Completion markers are located after ANSI and line-ending normalization, just
+like the payload: ConPTY may insert color/title sequences or wrapping inside a
+marker. Regression fixtures cover fragmented markers, multiple OSC titles,
+incomplete/reversed markers, and empty completed output. The exact normalized
+4 MiB length and SHA-256 checks still decide whether the payload passes.
+
 ## Remote SSH
 
 Remote validation uses controlled POSIX hosts and sanitized fixtures:

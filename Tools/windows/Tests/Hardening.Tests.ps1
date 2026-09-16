@@ -182,6 +182,31 @@ function Find-Bytes([byte[]] $haystack, [byte[]] $needle, [int] $start = 0) {
   return -1
 }
 
+function Get-HighOutputDiagnostics([byte[]] $bytes, [string] $startMarker, [string] $endMarker) {
+  $count = [Math]::Min(512, $bytes.Length)
+  [ordered]@{
+    capturedBytes = $bytes.Length
+    startOffset = Find-Bytes $bytes ([Text.Encoding]::ASCII.GetBytes($startMarker))
+    endOffset = Find-Bytes $bytes ([Text.Encoding]::ASCII.GetBytes($endMarker))
+    prefix = [Text.Encoding]::ASCII.GetString($bytes, 0, $count)
+    suffix = [Text.Encoding]::ASCII.GetString($bytes, $bytes.Length - $count, $count)
+  }
+}
+
+function Get-HighOutputPayloadText([byte[]] $bytes, [string] $startMarker, [string] $endMarker) {
+  $text = [Text.Encoding]::ASCII.GetString($bytes)
+  $escape = [regex]::Escape([string][char]27)
+  $text = [regex]::Replace($text, "$escape\][^\a]*?(?:\a|$escape\\|$)", "")
+  $text = [regex]::Replace($text, "$escape\[[0-?]*[ -/]*[@-~]", "")
+  $text = $text.Replace("`r", "").Replace("`n", "")
+  $start = $text.IndexOf($startMarker, [StringComparison]::Ordinal)
+  if ($start -lt 0) { return $null }
+  $offset = $start + $startMarker.Length
+  $end = $text.IndexOf($endMarker, $offset, [StringComparison]::Ordinal)
+  if ($end -lt 0) { return $null }
+  return $text.Substring($offset, $end - $offset)
+}
+
 function Select-NewProductResourceSample([object] $sample, [int[]] $baselinePids) {
   $details = @($sample.processes | Where-Object { $baselinePids -notcontains $_.pid })
   [pscustomobject]@{
@@ -394,35 +419,37 @@ function Invoke-RealMatrix {
       "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedCommand`r"
     Assert-True ($LASTEXITCODE -eq 0) "real zmx output command was not accepted"
     $completed = $false
+    $payloadText = $null
     $deadline = [DateTime]::UtcNow.AddSeconds(90)
     while ([DateTime]::UtcNow -lt $deadline) {
       $bytes = $captureStream.ToArray()
-      $startBytes = [Text.Encoding]::ASCII.GetBytes($escapedStart)
-      $endBytes = [Text.Encoding]::ASCII.GetBytes($escapedEnd)
-      $startIndex = Find-Bytes $bytes $startBytes
-      $endIndex = if ($startIndex -ge 0) { Find-Bytes $bytes $endBytes ($startIndex + $startBytes.Length) } else { -1 }
-      if ($startIndex -ge 0 -and $endIndex -ge 0) {
+      $payloadText = Get-HighOutputPayloadText $bytes $escapedStart $escapedEnd
+      if ($null -ne $payloadText) {
         $completed = $true
         break
       }
       Start-Sleep -Milliseconds 250
     }
-    if (-not $attach.HasExited) {
+    $attachExited = $attach.HasExited
+    if (-not $attachExited) {
       Stop-Process -Id $attachId -Force -ErrorAction SilentlyContinue
     }
+    if (-not $completed) {
+      $diagnostics = Get-HighOutputDiagnostics $captureStream.ToArray() $escapedStart $escapedEnd
+      $diagnostics["attachExitedBeforeStop"] = $attachExited
+      $diagnostics["captureTaskStatus"] = $captureTask.Status.ToString()
+      $diagnostics["captureErrorTaskStatus"] = $captureErrorTask.Status.ToString()
+      $diagnostics["outputDaemonExited"] = $outputDaemon.HasExited
+      if ($captureErrorTask.IsCompletedSuccessfully) {
+        $stderr = $captureErrorTask.Result
+        $diagnostics["stderr"] = $stderr.Substring(0, [Math]::Min(512, $stderr.Length))
+      }
+      Write-Output ("HARDENING_OUTPUT_DIAGNOSTICS_JSON=" + ($diagnostics | ConvertTo-Json -Compress))
+    }
     Assert-True $completed "real zmx output session did not complete"
-    $bytes = $captureStream.ToArray()
     try { $attach.StandardOutput.BaseStream.Dispose() } catch {}
     try { [void] $captureTask.Wait(1000) } catch {}
     try { [void] $captureErrorTask.Wait(1000) } catch {}
-    $startIndex = Find-Bytes $bytes ([Text.Encoding]::ASCII.GetBytes($escapedStart))
-    $endIndex = Find-Bytes $bytes ([Text.Encoding]::ASCII.GetBytes($escapedEnd)) ($startIndex + $escapedStart.Length)
-    $payload = $bytes[($startIndex + $escapedStart.Length)..($endIndex - 1)]
-    $payloadText = [Text.Encoding]::ASCII.GetString($payload)
-    $escape = [regex]::Escape([string][char]27)
-    $payloadText = [regex]::Replace($payloadText, "$escape\][^\a]*(?:\a|$escape\\)", "")
-    $payloadText = [regex]::Replace($payloadText, "$escape\[[0-?]*[ -/]*[@-~]", "")
-    $payloadText = $payloadText.Replace("`r", "").Replace("`n", "")
     $payload = [Text.Encoding]::ASCII.GetBytes($payloadText)
     Assert-True ($payload.Length -eq 4194304) "zmx attach lost or added terminal stdout bytes"
     $hash = ([Security.Cryptography.SHA256]::Create().ComputeHash($payload) |

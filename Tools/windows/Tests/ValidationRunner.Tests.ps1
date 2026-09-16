@@ -74,6 +74,65 @@ try {
     throw "RED: full-pinned Windows CI does not provide an owned environment harness"
   }
   $hardeningSource = Get-Content (Join-Path $PSScriptRoot "Hardening.Tests.ps1") -Raw
+  & {
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput(
+      $hardeningSource, [ref]$tokens, [ref]$errors)
+    foreach ($name in @("Find-Bytes", "Get-HighOutputDiagnostics", "Get-HighOutputPayloadText")) {
+      $function = $ast.Find({
+          param($node)
+          $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $name
+        }, $true)
+      if (-not $function) { throw "RED: high-output diagnostics helper is missing: $name" }
+      . ([scriptblock]::Create($function.Extent.Text))
+    }
+    $bytes = [Text.Encoding]::ASCII.GetBytes("START" + ("A" * 1024) + "END")
+    $diagnostics = Get-HighOutputDiagnostics $bytes "START" "END"
+    if ($diagnostics.capturedBytes -ne $bytes.Length -or
+        $diagnostics.startOffset -ne 0 -or $diagnostics.endOffset -ne 1029 -or
+        $diagnostics.prefix.Length -ne 512 -or $diagnostics.suffix.Length -ne 512) {
+      throw "High-output diagnostics lost marker positions or exceeded transcript bounds"
+    }
+    $partial = Get-HighOutputDiagnostics ([Text.Encoding]::ASCII.GetBytes("END")) "START" "END"
+    if ($partial.startOffset -ne -1 -or $partial.endOffset -ne 0) {
+      throw "High-output diagnostics hide an end marker when the start marker is missing"
+    }
+    $empty = Get-HighOutputDiagnostics ([byte[]]::new(0)) "START" "END"
+    if ($empty.capturedBytes -ne 0 -or $empty.startOffset -ne -1 -or
+        $empty.endOffset -ne -1 -or $empty.prefix -ne "" -or $empty.suffix -ne "") {
+      throw "High-output diagnostics cannot report an empty capture"
+    }
+    $escape = [string][char]27
+    $captures = @(
+      "STARTAAAAEND",
+      "ST${escape}[0mARTAA${escape}[31mAAEN${escape}[0mD",
+      "STA`r`nRTAAAAE`r`nND",
+      "START${escape}]0;END$([char]7)AAAAEND",
+      "ST${escape}]0;title${escape}\ARTAAAAEND",
+      "${escape}]0;before${escape}\STARTAAAAEND${escape}]0;after${escape}\"
+    )
+    foreach ($capture in $captures) {
+      $payload = Get-HighOutputPayloadText ([Text.Encoding]::ASCII.GetBytes($capture)) "START" "END"
+      if ($payload -cne "AAAA") {
+        throw "RED: high-output completion must survive terminal framing inside markers"
+      }
+    }
+    foreach ($capture in @("", "STARTAAAA", "AAAAEND", "ENDSTARTAAAA",
+        "${escape}]0;STARTAAAAEND")) {
+      $payload = Get-HighOutputPayloadText ([Text.Encoding]::ASCII.GetBytes($capture)) "START" "END"
+      if ($null -ne $payload) { throw "Incomplete or reversed output markers were accepted" }
+    }
+    $emptyPayload = Get-HighOutputPayloadText ([Text.Encoding]::ASCII.GetBytes("STARTEND")) "START" "END"
+    if ($null -eq $emptyPayload -or $emptyPayload -cne "") {
+      throw "Empty completed output must reach the length/hash checks, not look pending"
+    }
+  }
+  if ($hardeningSource -notmatch
+      '(?s)if \(-not \$completed\).*?Get-HighOutputDiagnostics.*?HARDENING_OUTPUT_DIAGNOSTICS_JSON=.*?Assert-True \$completed') {
+    throw "RED: real high-output failure omits bounded transcript diagnostics"
+  }
   if ($hardeningSource -notmatch
       '(?s)if \(\$LASTEXITCODE -ne 0\) \{\s*\$output \| Write-Output\s*throw "hardening repeated run') {
     throw "RED: failed repeated hardening discards its child diagnostics"
