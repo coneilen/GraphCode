@@ -376,10 +376,9 @@ struct PresenceReportingTests {
 
   @Test
   func nothingElseIsSecondGuessedByASessionReading() {
-    // Every other state is a fact about the loop's place in the graph. A `.blocked` node
-    // is waiting on an edge whether or not its session breathes, and a `.succeeded` one
-    // is finished whatever is still running in its pane.
-    for state in LoopState.allCases where state != .running {
+    // Every remaining state is a fact about the loop's place in the graph that no poll
+    // improves on: a `.succeeded` node is finished whatever is still running in its pane.
+    for state in LoopState.allCases where state != .running && state != .blocked {
       #expect(node(state, .busy).displayState == state)
       #expect(node(state, .idle).displayState == state)
     }
@@ -483,5 +482,42 @@ struct PresenceReportingTests {
       succeeded: true,
       output: "graphcode-status: absent")
     #expect(reading.presence == .absent)
+  }
+}
+
+/// The BLOCKED half of the correction, out of the suite body only because swiftlint's
+/// `type_body_length` is an error at 350 lines and this file sits on it.
+extension PresenceReportingTests {
+  @Test
+  func aBlockedLoopWhoseSessionIsWorkingSaysSo() {
+    // The card a human actually hit: a sketch opened by hand behind an unfired hand-off,
+    // its agent running commands in the pane, the card reading BLOCKED the whole time.
+    // Waiting on an edge and working are both true; the pane is the half they can see.
+    #expect(node(.blocked, .busy).displayState == .running)
+    #expect(node(.blocked, .awaitingInput).displayState == .awaitingInput)
+  }
+
+  @Test
+  func aBlockedLoopWithNothingRunningStaysBlocked() {
+    // The correction is only ever a live session overriding the graph's belief. With no
+    // session there is nothing to report and the edge is the whole story — and `unknown`
+    // is a probe that failed in transport, which observed nothing at all.
+    #expect(node(.blocked, .idle).displayState == .blocked)
+    #expect(node(.blocked, .absent).displayState == .blocked)
+    #expect(node(.blocked, .unknown).displayState == .blocked)
+    #expect(node(.blocked, nil).displayState == .blocked)
+
+    var exited = node(.blocked, .busy)
+    exited.presence = PresenceReading(presence: .busy, confidence: .reported, exitCode: 0)
+    #expect(exited.displayState == .blocked)
+  }
+
+  @Test
+  func correctingABlockedCardLeavesTheGraphsOwnBeliefAlone() {
+    // `state` is what edge firing, `MessageBus.deliverability` and the stranded rollup
+    // read. A loop that looks busy has not stopped being the node its hand-off gates.
+    let working = node(.blocked, .busy)
+    #expect(working.state == .blocked)
+    #expect(!working.isResolved)
   }
 }

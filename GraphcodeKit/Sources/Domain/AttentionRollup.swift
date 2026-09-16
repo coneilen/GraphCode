@@ -122,9 +122,10 @@ public enum AttentionRollup {
   /// `.blocked` counts only when the block can never clear on its own. A node waiting on
   /// an upstream that is still running is working as designed; one waiting on an
   /// upstream that already failed, stalled, or resolved without firing this edge is
-  /// stuck, and that is worth a human's time. Reporting every blocked node would bury
-  /// the real problems under the normal ones — which is the failure mode this rollup
-  /// exists to prevent.
+  /// stuck — as is one whose upstream is merely quiet forever, an attended loop nobody
+  /// will reopen being the common shape. Both are worth a human's time. Reporting every
+  /// blocked node would bury the real problems under the normal ones — which is the
+  /// failure mode this rollup exists to prevent.
   static func reason(for node: LoopNode) -> AttentionReason? {
     switch node.displayState {
     case .failed: return .failed
@@ -142,10 +143,12 @@ public enum AttentionRollup {
     var stranded: Set<UUID> = []
     for node in graph.nodes where node.state == .blocked {
       let inbound = graph.edges.filter { $0.to == node.id && $0.kind.blocksTarget && !$0.fired }
-      // Every remaining hope has already had its chance and didn't fire.
+      // Every remaining hope has already had its chance and didn't fire — or can no
+      // longer take it. A source that has resolved is the obvious case; the quiet one is
+      // a source that never will, which `LoopNode.mayStillReachResolution` decides.
       let anyStillPossible = inbound.contains { edge in
         guard let source = graph.nodes[id: edge.from] else { return false }
-        return !source.isResolved
+        return source.mayStillReachResolution
       }
       if !inbound.isEmpty && !anyStillPossible { stranded.insert(node.id) }
     }

@@ -428,14 +428,19 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// The state a surface should show, which is `state` corrected by what the session is
   /// actually doing.
   ///
-  /// Only `.running` is ever corrected, and that is the whole point. Every other state is
-  /// a fact about the loop's place in the graph that no session reading can improve on: a
-  /// `.blocked` node is waiting on an edge whether or not its session is alive, and a
-  /// `.succeeded` one is finished whatever is still running in its pane. `.running` is the
-  /// odd one out because it is set at *creation* and cleared only by resolution — so
-  /// between those two moments it is a claim about the present tense that nothing was
-  /// checking. A goal loop whose agent answered and stopped reads RUNNING, pulsing, for
-  /// as long as it takes a human to notice and stop it.
+  /// Two states are corrected, and only where a session reading beats the graph's belief.
+  /// `.succeeded` is finished whatever is still running in its pane, and `.idle` is what
+  /// the graph decided; no poll improves on either. `.running` is set at *creation* and
+  /// cleared only by resolution, so between those two moments it is a claim about the
+  /// present tense that nothing was checking — a goal loop whose agent answered and
+  /// stopped reads RUNNING, pulsing, until a human notices.
+  ///
+  /// `.blocked` is corrected for the opposite reason: it *understates*. A blocked loop is
+  /// not necessarily parked — `opensOnHumanTap` lets a human open an attended one, and an
+  /// unattended child's session starts before the follow-up hand-off marks it blocked. In
+  /// both cases an agent is working in a pane the card labels BLOCKED, which is the one
+  /// reading a human cannot argue with. Only a live session overrides it: quiet, absent
+  /// and unknown all stay BLOCKED, because then the edge really is the whole story.
   ///
   /// Deliberately derived rather than written back into `state`. `state` is what the graph
   /// believes, and edge firing, `MessageBus.deliverability` and resolution all read it; a
@@ -478,6 +483,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// A backend that reports nothing leaves `presence` nil and this returns `state`
   /// untouched, which is exactly the behaviour every surface had before presence existed.
   public var displayState: LoopState {
+    if state == .blocked { return displayStateForBlockedSession }
     guard state == .running, let presence = presence?.presence else { return state }
     if let exitCode = self.presence?.exitCode {
       return exitCode == 0 ? .idle : .failed
@@ -492,6 +498,22 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     // A probe that failed in transport observed nothing — the graph's own belief is
     // the only honest thing left to show, exactly as if no reading existed.
     case .unknown: return state
+    }
+  }
+
+  /// What a `.blocked` node shows once its session is live and doing something. Waiting on
+  /// an edge and working in a pane are both true at once here, and the pane is the half a
+  /// human can see; a card that says BLOCKED over a session running `grep` is telling them
+  /// the graph's plan instead of what is happening.
+  ///
+  /// `state` itself is untouched, exactly as for `.running`: edge firing and resolution
+  /// still read a blocked node as blocked, because it is.
+  private var displayStateForBlockedSession: LoopState {
+    guard presence?.exitCode == nil else { return .blocked }
+    switch presence?.presence {
+    case .busy: return .running
+    case .awaitingInput: return .awaitingInput
+    case .idle, .absent, .unknown, nil: return .blocked
     }
   }
 
@@ -516,6 +538,30 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     }
     let grace = Date().addingTimeInterval(-Self.absentSessionGraceSeconds)
     return createdAt < grace ? .failed : .idle
+  }
+
+  /// Whether this node could still reach a resolution without a human going and starting
+  /// it — the question `AttentionRollup.strandedNodeIDs` has to answer about the far end
+  /// of an unfired hand-off.
+  ///
+  /// `!isResolved` alone answers it wrongly, and quietly: an attended loop that is idle,
+  /// sessionless and long past its launch grace is unresolved and will stay that way, so
+  /// every loop waiting on its hand-off is stuck for good while the rollup reads them as
+  /// working as designed. That is exactly the block that "can never clear on its own".
+  ///
+  /// Anything short of an actual reading counts as yes. A missing or `.unknown` presence
+  /// observed nothing, and a guess that strands a healthy loop puts a false alarm in the
+  /// one queue whose whole value is that everything in it is real.
+  public var mayStillReachResolution: Bool {
+    guard !isResolved else { return false }
+    if presenceShowsLiveSession { return true }
+    if presence == nil || (presence?.presence == .unknown && presence?.exitCode == nil) {
+      return true
+    }
+    if Date() < createdAt.addingTimeInterval(Self.absentSessionGraceSeconds) { return true }
+    // No session and past the grace: only a loop the daemon keeps alive can still get
+    // there on its own — and not one its own display has already given up on (#215).
+    return runsUnattended && displayState != .failed
   }
 
   /// Whether this node has finished for good. Used to stop a resolved goal from being

@@ -99,6 +99,91 @@ struct AttentionRollupTests {
   }
 
   @Test
+  func anUpstreamThatWillNeverRunAgainStrandsWhatWaitsOnIt() {
+    // The quiet half of "can never clear on its own", and the one that shipped unreported:
+    // the upstream did not fail, it simply stopped. A sketch only ever runs because a
+    // human opened it, so an idle one with no session is not a hand-off in progress — it
+    // is a hand-off that will never be made, and reading it as unresolved-so-hopeful left
+    // the loop below it blocked for good with nothing anywhere saying so.
+    let upstream = LoopNode(
+      title: "Upstream", loopType: .sketch, presence: .absent, state: .idle,
+      createdAt: Date(timeIntervalSince1970: 0))
+    let downstream = LoopNode(title: "Downstream", state: .blocked)
+
+    let rollup = AttentionRollup.fullRollup(across: [
+      graph(
+        nodes: [upstream, downstream],
+        edges: [LoopEdge(from: upstream.id, to: downstream.id, fireCount: 0)])
+    ])
+
+    #expect(rollup.map(\.reason) == [.blocked])
+    #expect(rollup.first?.nodeTitle == "Downstream")
+  }
+
+  @Test
+  func anUpstreamStillLaunchingIsGivenItsGrace() {
+    // A session is ensured, not awaited, and a remote one crosses ssh first, so the first
+    // poll of a young loop reads absent while the launch is still in flight. Calling that
+    // stranded would put a false alarm in the queue seconds after a human wired the edge.
+    let upstream = LoopNode(
+      title: "Upstream", loopType: .sketch, presence: .absent, state: .idle)
+    let downstream = LoopNode(title: "Downstream", state: .blocked)
+
+    let rollup = AttentionRollup.fullRollup(across: [
+      graph(
+        nodes: [upstream, downstream],
+        edges: [LoopEdge(from: upstream.id, to: downstream.id, fireCount: 0)])
+    ])
+
+    #expect(rollup.isEmpty)
+  }
+
+  @Test
+  func anUpstreamWithASessionToFinishIsNotStranded() {
+    // Quiet is not gone. An open session can still exit, and exiting is what resolves a
+    // loop — so however long it has been sitting there, the hand-off remains possible.
+    let upstream = LoopNode(
+      title: "Upstream", loopType: .sketch,
+      presence: PresenceReading(presence: .idle, confidence: .reported), state: .idle,
+      createdAt: Date(timeIntervalSince1970: 0))
+    let downstream = LoopNode(title: "Downstream", state: .blocked)
+
+    let rollup = AttentionRollup.fullRollup(across: [
+      graph(
+        nodes: [upstream, downstream],
+        edges: [LoopEdge(from: upstream.id, to: downstream.id, fireCount: 0)])
+    ])
+
+    #expect(rollup.isEmpty)
+  }
+
+  @Test
+  func anUpstreamNothingHasObservedIsNeverCalledHopeless() {
+    // Copilot and Codex report no presence at all, and a session that has not been polled
+    // has no reading. Guessing "stuck" from silence would fill this queue with loops that
+    // are fine on every backend without hooks — the bury-the-real-problems failure again.
+    let unpolled = LoopNode(
+      title: "Unpolled", loopType: .sketch, state: .idle,
+      createdAt: Date(timeIntervalSince1970: 0))
+    let probeFailed = LoopNode(
+      title: "ProbeFailed", loopType: .sketch, presence: .unknown, state: .idle,
+      createdAt: Date(timeIntervalSince1970: 0))
+    let belowUnpolled = LoopNode(title: "BelowUnpolled", state: .blocked)
+    let belowProbeFailed = LoopNode(title: "BelowProbeFailed", state: .blocked)
+
+    let rollup = AttentionRollup.fullRollup(across: [
+      graph(
+        nodes: [unpolled, probeFailed, belowUnpolled, belowProbeFailed],
+        edges: [
+          LoopEdge(from: unpolled.id, to: belowUnpolled.id, fireCount: 0),
+          LoopEdge(from: probeFailed.id, to: belowProbeFailed.id, fireCount: 0),
+        ])
+    ])
+
+    #expect(rollup.isEmpty)
+  }
+
+  @Test
   func aNodeBlockedOnWorkThatCanNeverArriveIsStranded() {
     // The upstream resolved without firing this edge — an `.onSuccess` edge whose
     // source failed. Nothing will ever unblock the target, so it needs a human.
