@@ -321,13 +321,15 @@ function Invoke-RealMatrix {
     $terminalGate = Join-Path $repoRoot "Tools\windows\terminal-gate.ps1"
     & $pwsh -NoProfile -File $terminalGate -WinghosttyRoot $wing -ZmxRoot $zmxRoot `
       -Zig0152 $zig0152 -Zig0160 $zig0160 -SkipBuild -Stress
-    Assert-True ($LASTEXITCODE -eq 0) "real zmx/ConPTY terminal matrix failed"
+    Assert-True ($LASTEXITCODE -eq 0) `
+      "real zmx/ConPTY terminal matrix failed (exit=$LASTEXITCODE; hex=$($LASTEXITCODE.ToString('X8')))"
     $shellScript = Join-Path $repoRoot "Tools\windows\windows-shell.ps1"
     & $pwsh -NoProfile -File $shellScript -WinghosttyRoot $wing -ZmxRoot $zmxRoot `
       -Zig0152 $zig0152 -Zig0160 $zig0160 -SkipBuild -Stress -UseStubDaemon `
       -StubResponseDelayMilliseconds 150 `
       -SkipTrayLive:$SkipTrayLive -Version $shellVersion
-    Assert-True ($LASTEXITCODE -eq 0) "real GraphCode shell matrix failed"
+    Assert-True ($LASTEXITCODE -eq 0) `
+      "real GraphCode shell matrix failed (exit=$LASTEXITCODE; hex=$($LASTEXITCODE.ToString('X8')))"
     $productAfterWorkload = Get-ProductResourceSample $productRoots
     $productNewWorkload = Select-NewProductResourceSample $productAfterWorkload $productBaselinePids
     $realProductSamples.Add($productNewWorkload)

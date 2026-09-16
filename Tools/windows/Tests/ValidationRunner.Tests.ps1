@@ -74,6 +74,11 @@ try {
     throw "RED: full-pinned Windows CI does not provide an owned environment harness"
   }
   $hardeningSource = Get-Content (Join-Path $PSScriptRoot "Hardening.Tests.ps1") -Raw
+  foreach ($stage in @("real zmx/ConPTY terminal matrix", "real GraphCode shell matrix")) {
+    if ($hardeningSource -notmatch ([regex]::Escape($stage) + ' failed \(exit=\$LASTEXITCODE; hex=')) {
+      throw "Hardening stage failure omits the native exit code: $stage"
+    }
+  }
   & {
     $tokens = $null
     $errors = $null
