@@ -119,6 +119,15 @@ extension LoopState {
 
 }
 
+extension LoopNode {
+  /// What the agent tab's dot reports. A finished goal loop answering a follow-up shows its
+  /// work; otherwise `state`, because `displayState` also reads a turn that simply ended at
+  /// a prompt as a question, and the tab's "asks" must mean one was asked.
+  var tabState: LoopState {
+    answersPastResolution && displayState == .running ? .running : state
+  }
+}
+
 /// The state hues at their specified values, kept in one place so the pill, the
 /// indicator, and anything Phase 2 adds mix from the same paint.
 private enum StateTint {
