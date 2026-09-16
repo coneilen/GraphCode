@@ -35,6 +35,21 @@ $mainWindowSource = Get-Content (Join-Path $shellRoot "src\MainWindow.zig") -Raw
 $nativeFormsSource = Get-Content (Join-Path $shellRoot "src\NativeForms.zig") -Raw
 $inputSource = Get-Content (Join-Path $shellRoot "src\InputRouter.zig") -Raw
 $stubSource = Get-Content (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") -Raw
+Assert-Contract ($appSource -match
+  '(?s)app\.smoke_tick >= 16 and\s*app\.client\.connectionState\(\) == \.connected and\s*app\.currentProject\(\) != null and app\.model\.selected\(\) != null and\s*!app\.smoke_action_requested') `
+  "smoke graph command must wait for connection and selection instead of a single tick"
+Assert-Contract ($appSource -match
+  '(?s)app\.smoke_action_requested = true;\s*app\.smoke_idle_ticks = 0;\s*app\.sendSelectedNode\(\);') `
+  "a newly queued smoke command must prevent an idle exit in the same tick"
+Assert-Contract ($appSource -match
+  '(?s)smoke_tick >= 16 and !app\.smoke_input_requested.*?if \(app\.workspace\) \|workspace\| \{\s*app\.smoke_input_requested = true;') `
+  "smoke input must wait for its workspace instead of consuming the one-shot action early"
+Assert-Contract ($shellSource -match
+  '(?s)\$inputDeadline = .*?AddSeconds\(8\).*?\$inputApp = Start-Process.*?\$attachReady.*?pwsh.*?Write-OwnedResourceMetrics "windows-shell:large-paste".*?WaitForExit\(\$remainingMilliseconds\)') `
+  "large-paste sampling must observe the owned attach within the shared eight-second deadline"
+Assert-Contract ($shellSource -match
+  '(?s)while \(\[DateTime\]::UtcNow -lt \$inputDeadline.*?Write-OwnedResourceMetrics "windows-shell:large-paste".*?Start-Sleep -Milliseconds 50') `
+  "large-paste metrics must sample the active workload rather than one startup instant"
 Assert-Contract ($stubSource -match '\$bufferSize = if \(\$NonReading\) \{ 0 \} else \{ 64 \* 1024 \}' -and
   $stubSource -match '(?s)NamedPipeServerStream.*?\$bufferSize,\s*\$bufferSize') `
   "normal stub buffering must match production while non-reading mode retains backpressure"

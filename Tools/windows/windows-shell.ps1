@@ -336,16 +336,34 @@ try {
     $env:GRAPHCODE_SHELL_NONREADING_ATTACH = "1"
     $env:GRAPHCODE_SHELL_LARGE_PASTE = "1"
     Remove-Item -LiteralPath $inputError -Force -ErrorAction SilentlyContinue
+    $inputDeadline = [DateTime]::UtcNow.AddSeconds(8)
     $inputApp = Start-Process -FilePath $app -ArgumentList @("--smoke") -PassThru `
       -RedirectStandardError $inputError
     [void] $inputApp.Handle
     [void] $ownedProcessIds.Add($inputApp.Id)
     $shellProcess = $inputApp
-    Start-Sleep -Milliseconds 250
-    Record-TestOwnedSessions
-    Write-OwnedResourceMetrics "windows-shell:large-paste" @($inputApp.Id)
-    if (-not $inputApp.WaitForExit(8000)) {
-      Stop-Process -Id $inputApp.Id -Force
+    $attachReady = $false
+    while ([DateTime]::UtcNow -lt $inputDeadline -and -not $inputApp.HasExited) {
+      if (-not $attachReady) {
+        $attachReady = @(
+          Get-ProcessTreeIds @($inputApp.Id) | ForEach-Object {
+            Get-Process -Id $_ -ErrorAction SilentlyContinue
+          } | Where-Object ProcessName -eq "pwsh"
+        ).Count -gt 0
+      }
+      if ($attachReady) {
+        Record-TestOwnedSessions
+        Write-OwnedResourceMetrics "windows-shell:large-paste" @($inputApp.Id)
+      }
+      Start-Sleep -Milliseconds 50
+    }
+    if (-not $attachReady) {
+      throw "Large paste fixture did not start its owned pwsh attach within eight seconds"
+    }
+    $remainingMilliseconds = [Math]::Max(
+      0, [int]($inputDeadline - [DateTime]::UtcNow).TotalMilliseconds)
+    if ([DateTime]::UtcNow -ge $inputDeadline -or -not $inputApp.WaitForExit($remainingMilliseconds)) {
+      if (-not $inputApp.HasExited) { Stop-Process -Id $inputApp.Id -Force }
       throw "Large paste/non-reading attach smoke blocked the UI beyond the bounded timeout"
     }
     $inputApp.WaitForExit()

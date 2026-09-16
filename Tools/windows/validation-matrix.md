@@ -58,6 +58,13 @@ bounded by the existing 1.5-second negotiation interval. Explicit reconnect and
 close actions do not wait for that drain. The native tests also verify that
 repeated subscription changes cannot extend the deadline.
 
+Smoke actions wait for their connection/selection or workspace after the
+earliest action tick instead of being lost when that one tick arrives too
+early. Enqueuing an action resets the idle-exit counter. Large-paste resource
+sampling waits for the owned `pwsh` attach and continues through the active
+workload so the trend uses per-process peaks, not one startup instant.
+Readiness, sampling, and completion share the same eight-second budget.
+
 `STUB_DAEMON_EVIDENCE_JSON` records request/response counts, unanswered IDs and
 commands, and the stub error before assertions run. Failed repeated hardening
 prints its captured child output rather than discarding it. Session/resource

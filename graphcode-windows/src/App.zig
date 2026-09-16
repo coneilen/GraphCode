@@ -3754,17 +3754,21 @@ fn onWindowMessage(
             if (app.smoke and app.smoke_tick >= 12 and !app.smoke_workspace_actions_ran) {
                 runSmokeWorkspaceActions(app);
             }
-            if (app.smoke and app.smoke_tick == 16 and
-                app.client.connectionState() == .connected and !app.smoke_action_requested)
+            if (app.smoke and app.smoke_tick >= 16 and
+                app.client.connectionState() == .connected and
+                app.currentProject() != null and app.model.selected() != null and
+                !app.smoke_action_requested)
             {
                 app.smoke_action_requested = true;
+                app.smoke_idle_ticks = 0;
                 app.sendSelectedNode();
             }
-            if (app.smoke and app.smoke_tick == 16 and !app.smoke_input_requested and
+            if (app.smoke and app.smoke_tick >= 16 and !app.smoke_input_requested and
                 envFlag("GRAPHCODE_SHELL_LARGE_PASTE"))
             {
-                app.smoke_input_requested = true;
                 if (app.workspace) |workspace| {
+                    app.smoke_input_requested = true;
+                    app.smoke_idle_ticks = 0;
                     const paste = app.allocator.alloc(u8, 1024 * 1024) catch {
                         app.setStatus("Large paste allocation failed");
                         return true;
