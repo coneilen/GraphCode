@@ -235,7 +235,7 @@ struct LoopWorkspaceView: View {
               launchesAgent: tab.primary.launchesClaudeCode),
             // Only the agent tab has a loop state to report — a plain shell is a shell.
             // This is the fix for "a background tab asked a question and nothing said so".
-            state: tab.surfaces.contains(where: \.launchesClaudeCode) ? store.node.state : nil,
+            state: tab.surfaces.contains(where: \.launchesClaudeCode) ? store.node.tabState : nil,
             isSelected: tab.id == store.layout.selectedTabID,
             shortcutHint: index < 9 ? "⌘\(index + 1)" : nil,
             onSelect: { store.send(.tabSelected(tab.id)) },
