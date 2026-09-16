@@ -46,7 +46,7 @@ struct LoopWorkspaceLoopBar: View {
           Text(node.title)
             .font(.system(size: 13.5, weight: .semibold))
             .lineLimit(1)
-          LoopStatePill(state: node.state, loopType: node.loopType)
+          LoopStatePill(state: node.displayState, loopType: node.loopType)
         }
         if let line = card.liveLine {
           Text(line)

@@ -119,6 +119,14 @@ extension LoopState {
 
 }
 
+extension LoopNode {
+  /// What the agent tab's dot reports: a working session's RUNNING, and otherwise `state`,
+  /// so the tab's "asks" appears only once the graph has recorded a question.
+  var tabState: LoopState {
+    displayState == .running ? .running : state
+  }
+}
+
 /// The state hues at their specified values, kept in one place so the pill, the
 /// indicator, and anything Phase 2 adds mix from the same paint.
 private enum StateTint {

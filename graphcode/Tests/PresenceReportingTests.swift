@@ -375,12 +375,19 @@ struct PresenceReportingTests {
   }
 
   @Test
-  func nothingElseIsSecondGuessedByASessionReading() {
-    // Every remaining state is a fact about the loop's place in the graph that no poll
-    // improves on: a `.succeeded` node is finished whatever is still running in its pane.
-    for state in LoopState.allCases where state != .running && state != .blocked {
-      #expect(node(state, .busy).displayState == state)
-      #expect(node(state, .idle).displayState == state)
+  func aWorkingSessionReadsRunningWhateverTheGraphBelieves() {
+    // An IDLE main loop a human just asked something, a DONE loop answering a follow-up:
+    // the agent is working, and the card says so. Quiet leaves the graph's word alone.
+    for state in LoopState.allCases where state != .running {
+      for loopType in [LoopType.goalBased, .sketch, .timeBased, .turnBased] {
+        var working = node(state, .busy)
+        working.loopType = loopType
+        #expect(working.displayState == .running)
+        working.presence = PresenceReading(presence: .awaitingInput, confidence: .reported)
+        #expect(working.displayState == .awaitingInput)
+        working.presence = PresenceReading(presence: .idle, confidence: .reported)
+        #expect(working.displayState == state)
+      }
     }
   }
 
