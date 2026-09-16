@@ -84,7 +84,11 @@ struct GraphOverviewView: View {
           uniqueKeysWithValues: store.projects.map { ($0.id, $0.declaredEntryIDs) }),
         // Measured by the canvas's own `GeometryReader`, so resizing the window re-packs
         // the lanes instead of leaving a graph that runs off the bottom of it.
-        viewportHeight: viewport.height),
+        viewportHeight: viewport.height,
+        // Each lane in its sidebar's order, so the canvas and the list beside it agree
+        // about which loop comes next.
+        orders: Dictionary(
+          uniqueKeysWithValues: store.projects.map { ($0.id, $0.sidebarNodeOrder) })),
       attentionItems: store.attentionItems)
 
     return canvas(derived)

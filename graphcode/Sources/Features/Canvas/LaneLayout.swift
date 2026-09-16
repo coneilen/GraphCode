@@ -139,9 +139,14 @@ struct LaneLayout: Equatable {
   ///     them for their cards, and `CardEntryRole.roles(in:)` walks the whole edge list.
   ///   - rowHeight: the Graph view's pitch unless the caller needs a taller one — see
   ///     `rowHeight(for:)`.
+  ///   - order: the sidebar's arrangement of these loops (`sidebarNodeOrder`). Every
+  ///     choice the layout makes about what comes first — which beginning, which child of
+  ///     a parent, which loose loop — follows it, so the canvas reads top to bottom in the
+  ///     order the sidebar lists. Empty means the graph's own order.
   init(
     graph: LoopGraph, roles: [UUID: CardEntryRole], origin: CGPoint = Metrics.origin,
-    rowHeight: CGFloat = Metrics.rowHeight, rowBudget: Int = Metrics.displayRowBudget
+    rowHeight: CGFloat = Metrics.rowHeight, rowBudget: Int = Metrics.displayRowBudget,
+    order: [UUID] = []
   ) {
     // Everything nothing hands off to goes in level 0, one per row, and each chain flows
     // right into the next level along its own row. A level taller than
@@ -159,7 +164,16 @@ struct LaneLayout: Equatable {
       roles[$0.id] == .entry || roles[$0.id] == .unwired
     }
     let wired = Set(graph.edges.flatMap { [$0.from, $0.to] })
-    let starts = Array(graph.nodes).filter(hangsOffOrigin)
+    // The sidebar's order, with anything it does not list (a loop that arrived since)
+    // after everything it does, in graph order. Packing for space never reorders: a card
+    // that moved because a neighbour's fan-out was wide is a canvas that disagrees with
+    // the list beside it about which loop comes next.
+    let rank = Self.rank(order: order, in: graph)
+    let ranked: (LoopNode, LoopNode) -> Bool = {
+      rank[$0.id, default: .max] < rank[$1.id, default: .max]
+    }
+    let nodes = graph.nodes.sorted(by: ranked)
+    let starts = nodes.filter(hangsOffOrigin)
     let depths = Self.depths(in: graph, from: starts.map(\.id))
 
     var placed: [UUID: Slot] = [:]
@@ -179,8 +193,10 @@ struct LaneLayout: Equatable {
       occupied.insert(slot)
       takenRows.insert(candidate)
       // Walk this chain onward on the same row, so a hand-off reads as one line of work.
-      for edge in graph.edges where edge.from == node.id {
-        guard let next = graph.nodes[id: edge.to] else { continue }
+      let children = graph.edges.filter { $0.from == node.id }
+        .compactMap { graph.nodes[id: $0.to] }
+        .sorted(by: ranked)
+      for next in children {
         if placed[next.id] == nil { handedOffBy[next.id] = node.id }
         place(next, preferring: candidate)
       }
@@ -192,7 +208,7 @@ struct LaneLayout: Equatable {
       place(node, preferring: nextRow)
     }
     // Whatever a walk from a beginning never reached: a closed cycle, which has none.
-    for node in graph.nodes where placed[node.id] == nil && wired.contains(node.id) {
+    for node in nodes where placed[node.id] == nil && wired.contains(node.id) {
       while takenRows.contains(nextRow) { nextRow += 1 }
       place(node, preferring: nextRow)
     }
@@ -203,7 +219,7 @@ struct LaneLayout: Equatable {
     // Everything left has no edge in either direction, so it has no level to be at and no
     // chain to be read along: its own block below the chains, wrapped by the same rule.
     let chainRows = wrapped.values.map(\.row).max().map { $0 + 1 } ?? 0
-    for (index, node) in graph.nodes.filter({ !wired.contains($0.id) }).enumerated() {
+    for (index, node) in nodes.filter({ !wired.contains($0.id) }).enumerated() {
       wrapped[node.id] = Slot(
         column: 0, row: chainRows + index % rows,
         subColumn: min(index / rows, Metrics.maximumColumnsPerLevel - 1), isLoose: true)
@@ -300,6 +316,19 @@ struct LaneLayout: Equatable {
     return packed
   }
 
+  /// Each loop's position in `order`, then everything `order` does not mention in the
+  /// graph's own order after it.
+  private static func rank(order: [UUID], in graph: LoopGraph) -> [UUID: Int] {
+    var rank: [UUID: Int] = [:]
+    for id in order where graph.nodes[id: id] != nil && rank[id] == nil {
+      rank[id] = rank.count
+    }
+    for node in graph.nodes where rank[node.id] == nil {
+      rank[node.id] = rank.count
+    }
+    return rank
+  }
+
   /// A card's centre x: where its level starts, plus however far it wrapped within it.
   /// Levels are a table rather than a multiplication because one is as wide as the
   /// columns it wrapped into, and the gap after it depends on how many rows it holds —
@@ -337,11 +366,11 @@ struct LaneLayout: Equatable {
   /// levels are laid out over each other on purpose, since exactly one of them is ever on
   /// screen.
   static func positions(
-    forCanvas graph: LoopGraph, rowBudget: Int = Metrics.displayRowBudget
+    forCanvas graph: LoopGraph, rowBudget: Int = Metrics.displayRowBudget, order: [UUID] = []
   ) -> [UUID: CGPoint] {
     var placed = LaneLayout(
       graph: graph, roles: CardEntryRole.roles(in: graph), rowHeight: rowHeight(for: graph),
-      rowBudget: rowBudget
+      rowBudget: rowBudget, order: order
     ).positions
     for node in graph.nodes {
       guard let subGraph = node.subGraph else { continue }

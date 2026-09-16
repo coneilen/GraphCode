@@ -582,6 +582,8 @@ struct ProjectFeature {
       case .sidebarNodesReordered(let orderedIDs):
         let rest = state.sidebarNodeOrder.filter { !orderedIDs.contains($0) }
         state.sidebarNodeOrder = orderedIDs + rest
+        // Dragging a row in the sidebar reorders the canvas with it.
+        Self.relayOut(&state)
         return .none
 
       case .stopNodeTapped(let nodeID):
