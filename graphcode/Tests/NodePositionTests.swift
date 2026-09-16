@@ -96,7 +96,8 @@ struct NodePositionTests {
       nodes: [composite, downstream],
       edges: [LoopEdge(from: composite.id, to: downstream.id)])
 
-    let slots = LaneLayout(graph: wired, roles: CardEntryRole.roles(in: wired)).slots
+    let layout = LaneLayout(graph: wired, roles: CardEntryRole.roles(in: wired))
+    let slots = layout.slots
     let canvas = ProjectFeature.State(graph: wired).nodePositions
     let pitch = LaneLayout.rowHeight(for: wired)
     #expect(pitch > LaneLayout.Metrics.rowHeight)
@@ -105,7 +106,7 @@ struct NodePositionTests {
       #expect(
         canvas[id]
           == CGPoint(
-            x: LaneLayout.x(of: slot, from: LaneLayout.Metrics.origin),
+            x: layout.x(of: slot, from: LaneLayout.Metrics.origin),
             y: LaneLayout.Metrics.origin.y + CGFloat(slot.row) * pitch))
     }
   }

@@ -353,6 +353,33 @@ struct GraphOverviewTests {
   }
 
   @Test
+  func aDepthCarryingSeveralRowsPushesTheNextOneFurtherOut() {
+    // Several chains leaving one level fan their hand-offs across the same gap, and at
+    // the ordinary width those curves bunch into a braid. Width is the cheap axis here —
+    // the graph is read on a landscape monitor.
+    func step(chains: Int) -> CGFloat {
+      var nodes: [LoopNode] = []
+      var edges: [LoopEdge] = []
+      for index in 0..<chains {
+        let root = LoopNode(title: "root-\(index)")
+        let next = LoopNode(title: "next-\(index)")
+        nodes += [root, next]
+        edges.append(LoopEdge(from: root.id, to: next.id))
+      }
+      let overview = GraphOverview(graphs: [
+        LoopGraph(
+          project: Self.projectA, nodes: IdentifiedArray(uniqueElements: nodes),
+          edges: IdentifiedArray(uniqueElements: edges))
+      ])
+      let at = Dictionary(
+        uniqueKeysWithValues: overview.loops.map { ($0.node.title, $0.position.x) })
+      return (at["next-0"] ?? 0) - (at["root-0"] ?? 0)
+    }
+
+    #expect(step(chains: 2) > step(chains: 1))
+  }
+
+  @Test
   func lanesKeepOneWidthSoTheyReadAsATableOfProjects() {
     // A wrapped lane is wider than an unwrapped one, and bands cut each to their own
     // contents read as a collage. The widest lane sets the width for all of them.

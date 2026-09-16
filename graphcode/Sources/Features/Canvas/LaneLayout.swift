@@ -34,10 +34,17 @@ struct LaneLayout: Equatable {
     static let card = LoopCardView.Metrics.size
     /// Between two cards on the same depth — the loose grid's pitch.
     static let columnGap: CGFloat = 40
-    /// Between one depth and the next, and wider than `columnGap` on purpose: with both
-    /// the same, a lane of packed loose loops and a chain three hand-offs long are the
-    /// same picture, and the x axis stops meaning "how far from a beginning".
-    static let depthGap: CGFloat = 88
+    /// Between one depth and the next, and much wider than `columnGap` on purpose: with
+    /// both the same, a lane of packed loose loops and a chain three hand-offs long are
+    /// the same picture, and the x axis stops meaning "how far from a beginning". Width
+    /// is the cheap axis — the graph is read on a landscape monitor, and a lane that runs
+    /// wide is one that never ran tall.
+    static let depthGap: CGFloat = 140
+    /// The gap *after* a depth that holds more than one row. A level with several chains
+    /// leaving it fans several hand-offs into the next one, and they all cross the same
+    /// gap: at the ordinary width those curves bunch into a braid you cannot follow a
+    /// single strand of.
+    static let busyDepthGap: CGFloat = 230
     static let rowGap: CGFloat = 24
     /// How far right a chain runs before it folds back into the last column. A lane that
     /// grew without bound would push whatever is below it off the canvas, and four
@@ -84,6 +91,10 @@ struct LaneLayout: Equatable {
   /// How many rows the lane used — never zero, so a band around an empty graph is still
   /// one row tall rather than a caption-height sliver.
   private(set) var rowCount = 1
+  /// Where each depth's cards sit, as an offset from the lane's first card — index by a
+  /// slot's column. Not a single pitch, because a depth that holds several rows earns a
+  /// wider gap after it than one that holds a single hand-off (`Metrics.busyDepthGap`).
+  private(set) var depthOffsets: [CGFloat] = [0]
   /// How wide the lane came out, from the first card's leading edge to the last one's
   /// trailing edge — a band has to be drawn around it, and a lane that packed its loose
   /// loops is wider than the depths alone say.
@@ -156,21 +167,36 @@ struct LaneLayout: Equatable {
     }
 
     slots = placed
+    depthOffsets = Self.depthOffsets(for: placed)
     positions = placed.mapValues { slot in
       CGPoint(
-        x: Self.x(of: slot, from: origin),
+        x: x(of: slot, from: origin),
         y: origin.y + CGFloat(slot.row) * rowHeight)
     }
     rowCount = max(placed.values.map(\.row).max().map { $0 + 1 } ?? 1, 1)
-    contentWidth =
-      (placed.values.map { Self.x(of: $0, from: .zero) }.max() ?? 0) + Metrics.card.width
+    contentWidth = (placed.values.map { x(of: $0, from: .zero) }.max() ?? 0) + Metrics.card.width
   }
 
-  /// A card's centre x: its depth at the depth pitch, or its packed column at the tighter
-  /// one. The two pitches are the whole reason this isn't a multiplication at the call
-  /// site — see `Metrics.depthGap`.
-  static func x(of slot: Slot, from origin: CGPoint) -> CGFloat {
-    origin.x + CGFloat(slot.column) * (slot.isLoose ? Metrics.columnWidth : Metrics.depthWidth)
+  /// A card's centre x: where its depth starts, or its packed column at the tighter
+  /// pitch. Depths are a table rather than a multiplication because the gap between two
+  /// of them depends on how many rows the nearer one holds — see `Metrics.busyDepthGap`.
+  func x(of slot: Slot, from origin: CGPoint) -> CGFloat {
+    guard !slot.isLoose else { return origin.x + CGFloat(slot.column) * Metrics.columnWidth }
+    let depth = min(slot.column, depthOffsets.count - 1)
+    return origin.x + depthOffsets[max(depth, 0)]
+  }
+
+  /// One offset per depth, each pushed out by the width of the depth before it plus a gap
+  /// that widens when that depth holds more than one row.
+  private static func depthOffsets(for placed: [UUID: Slot]) -> [CGFloat] {
+    let rows = Dictionary(grouping: placed.values.filter { !$0.isLoose }, by: \.column)
+      .mapValues { Set($0.map(\.row)).count }
+    var offsets: [CGFloat] = [0]
+    for depth in 1..<Metrics.columns {
+      let gap = (rows[depth - 1] ?? 0) > 1 ? Metrics.busyDepthGap : Metrics.depthGap
+      offsets.append(offsets[depth - 1] + Metrics.card.width + gap)
+    }
+    return offsets
   }
 
   /// How wide to pack `count` loose loops: one column until they would out-run the lane's
