@@ -373,21 +373,30 @@ struct GraphStoreTests {
 
     async let firstResult = store.handle(.createNode(firstDraft))
     async let secondResult = store.handle(.createNode(secondDraft))
-    let results = [await firstResult, await secondResult]
-    let snapshots = results.compactMap { result -> LoopGraph? in
-      guard case .applied(let graph) = result else {
-        Issue.record("expected both concurrent commands to apply")
+    let resolvedFirst = await firstResult
+    let resolvedSecond = await secondResult
+    let firstSnapshot: LoopGraph? = {
+      guard case .applied(let graph) = resolvedFirst else {
+        Issue.record("expected the first concurrent command to apply")
         return nil
       }
       return graph
-    }
+    }()
+    let secondSnapshot: LoopGraph? = {
+      guard case .applied(let graph) = resolvedSecond else {
+        Issue.record("expected the second concurrent command to apply")
+        return nil
+      }
+      return graph
+    }()
+    let snapshots = [firstSnapshot, secondSnapshot].compactMap { $0 }
 
-    #expect(snapshots.count == 2)
-    #expect(snapshots.contains { $0.nodes.count == 1 && $0.nodes.contains { $0.title == "First" } })
+    #expect(firstSnapshot?.nodes.contains { $0.title == "First" } == true)
+    #expect(secondSnapshot?.nodes.contains { $0.title == "Second" } == true)
+    #expect(Set(snapshots.map(\.nodes.count)) == Set([1, 2]))
     #expect(
       snapshots.contains {
-        $0.nodes.count == 2
-          && Set($0.nodes.map(\.title)) == Set(["First", "Second"])
+        Set($0.nodes.map(\.title)) == Set(["First", "Second"])
       })
   }
 
