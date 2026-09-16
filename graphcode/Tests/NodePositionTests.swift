@@ -105,7 +105,7 @@ struct NodePositionTests {
       #expect(
         canvas[id]
           == CGPoint(
-            x: LaneLayout.Metrics.origin.x + CGFloat(slot.column) * LaneLayout.Metrics.columnWidth,
+            x: LaneLayout.x(of: slot, from: LaneLayout.Metrics.origin),
             y: LaneLayout.Metrics.origin.y + CGFloat(slot.row) * pitch))
     }
   }

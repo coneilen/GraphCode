@@ -40,7 +40,7 @@ struct LoopCardView: View {
   var onDetachTemplate: (() -> Void)?
 
   enum Metrics {
-    static let size = CGSize(width: 250, height: 106)
+    static let size = CGSize(width: 250, height: 96)
     static let radius: CGFloat = 11
     static let stripe: CGFloat = 4
     /// The entry port, half of it outside the card's leading edge.
@@ -57,15 +57,13 @@ struct LoopCardView: View {
 
   var body: some View {
     let card = LoopCardPresentation(node: node, now: now, reclaimOffer: reclaimOffer)
-    return VStack(alignment: .leading, spacing: 7) {
+    return VStack(alignment: .leading, spacing: 6) {
       titleRow
       if entryRole == .unwired {
-        // Its own sentence, in prose rather than mono: this is the card talking about
-        // the loop rather than quoting what the loop was handed.
-        Text("Nothing runs it and it hands to nothing.")
-          .font(.system(size: 11))
-          .foregroundStyle(.white.opacity(0.5))
-          .lineLimit(1)
+        // The sentence this used to carry — "Nothing runs it and it hands to nothing." —
+        // said what the dashed border, the desaturated stripe and these two verbs already
+        // say, and it said it on every card of a graph that is mostly unwired loops. The
+        // row it cost is worth more than the fourth telling.
         unwiredActions
       } else {
         liveLine(card.liveLine)
@@ -74,9 +72,9 @@ struct LoopCardView: View {
       Spacer(minLength: 0)
       metaRow(card.meta)
     }
-    .padding(.top, 9)
+    .padding(.top, 8)
     .padding(.horizontal, 11)
-    .padding(.bottom, 10)
+    .padding(.bottom, 8)
     .frame(width: Metrics.size.width, height: Metrics.size.height, alignment: .topLeading)
     .background(needsAttention ? Theme.loopCardAttention : Theme.loopCard)
     .overlay(alignment: .leading) {

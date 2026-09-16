@@ -135,6 +135,19 @@ struct CanvasBandView: View {
   /// The cost is the one the handoff named: N rootless loops is N lines. That is a real
   /// starburst at twenty, and the answer then is to wire the graph up — which is what
   /// the lines are for saying.
+  /// The ports the rail draws a line to: the ones in the block of cards beside it.
+  ///
+  /// A lane with more beginnings than fit in a column wraps into blocks laid side by
+  /// side (`LaneLayout`), and a connector reaching a card three columns out crosses every
+  /// card in between — which is what a hand-off between those cards looks like. Those
+  /// cards keep their port, which is what carries "this is a beginning" into greyscale
+  /// and zoom-out anyway, and lose the line.
+  private var tetheredPorts: [CGPoint] {
+    let firstColumn =
+      CanvasBand.originLane + CanvasBand.padding + LoopCardView.Metrics.size.width
+    return entryPorts.filter { $0.x - rect.minX < firstColumn }
+  }
+
   @ViewBuilder
   private var entryRail: some View {
     if !entryPorts.isEmpty {
@@ -146,7 +159,7 @@ struct CanvasBandView: View {
       let originX = CanvasBand.originLane / 2
       let originY = rect.height / 2
       ZStack(alignment: .topLeading) {
-        ForEach(Array(entryPorts.enumerated()), id: \.offset) { _, port in
+        ForEach(Array(tetheredPorts.enumerated()), id: \.offset) { _, port in
           connector(
             from: CGPoint(x: originX, y: originY),
             to: CGPoint(x: port.x - rect.minX, y: port.y - rect.minY))

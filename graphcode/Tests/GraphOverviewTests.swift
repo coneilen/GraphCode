@@ -300,6 +300,74 @@ struct GraphOverviewTests {
   }
 
   @Test
+  func aLaneOfLooseLoopsPacksIntoAGridRatherThanOneLongRibbon() throws {
+    // The shape a graph of loops-that-spawned-loops actually has: twenty loops nothing
+    // runs. A row each made the lane a card-wide ribbon several screens tall with its own
+    // width empty beside it, which is what "the graph is skewed" means.
+    let nodes = (0..<20).map { LoopNode(title: "loop-\($0)") }
+    let overview = GraphOverview(graphs: [
+      LoopGraph(project: Self.projectA, nodes: IdentifiedArray(uniqueElements: nodes))
+    ])
+
+    let columns = Set(overview.loops.map(\.position.x))
+    let rows = Set(overview.loops.map(\.position.y))
+    #expect(rows.count <= LaneLayout.Metrics.wrapAfterRows)
+    #expect(columns.count > 1)
+    // Every card still lands inside the band drawn around the lane — the band is sized
+    // to the lane it wrapped into, not to the four columns a chain can reach.
+    let band = try #require(overview.folders.first).band
+    #expect(
+      overview.loops.allSatisfy {
+        $0.position.x - GraphOverview.Metrics.card.width / 2 >= band.minX
+          && $0.position.x + GraphOverview.Metrics.card.width / 2 <= band.maxX
+      })
+  }
+
+  @Test
+  func packingLooseLoopsNeverCostsADepthItsOwnDistance() {
+    // The packed columns are a grid of cards with no depth between them; a hand-off is a
+    // level. If the two were the same pitch, a lane of loose loops and a chain three
+    // hand-offs long would be the same picture.
+    let root = LoopNode(title: "root")
+    let downstream = LoopNode(title: "downstream")
+    let loose = (0..<20).map { LoopNode(title: "loose-\($0)") }
+    let overview = GraphOverview(graphs: [
+      LoopGraph(
+        project: Self.projectA,
+        nodes: IdentifiedArray(uniqueElements: [root, downstream] + loose),
+        edges: [LoopEdge(from: root.id, to: downstream.id)])
+    ])
+
+    let at = Dictionary(uniqueKeysWithValues: overview.loops.map { ($0.node.title, $0.position) })
+    let depthStep = (at["downstream"]?.x ?? 0) - (at["root"]?.x ?? 0)
+    let packedColumns = Set(
+      overview.loops.filter { $0.node.title.hasPrefix("loose") }.map(\.position.x))
+    let packedStep = (packedColumns.sorted().dropFirst().first ?? 0) - (packedColumns.min() ?? 0)
+    #expect(packedStep > 0)
+    #expect(depthStep > packedStep)
+    // A chain still reads along its own row, and the loose ones sit below it.
+    #expect(at["downstream"]?.y == at["root"]?.y)
+    #expect(
+      overview.loops.filter { $0.node.title.hasPrefix("loose") }
+        .allSatisfy { $0.position.y > (at["root"]?.y ?? 0) })
+  }
+
+  @Test
+  func lanesKeepOneWidthSoTheyReadAsATableOfProjects() {
+    // A wrapped lane is wider than an unwrapped one, and bands cut each to their own
+    // contents read as a collage. The widest lane sets the width for all of them.
+    let wide = (0..<20).map { LoopNode(title: "wide-\($0)") }
+    let overview = GraphOverview(graphs: [
+      LoopGraph(project: Self.projectA, nodes: IdentifiedArray(uniqueElements: wide)),
+      LoopGraph(project: Self.projectB, nodes: [LoopNode(title: "alone")]),
+    ])
+
+    let widths = Set(overview.folders.map(\.band.width))
+    #expect(widths.count == 1)
+    #expect(overview.size.width >= (widths.first ?? 0))
+  }
+
+  @Test
   func theOriginDotHasALaneOfItsOwnLeftOfEveryCard() {
     // It used to sit 34pt left of the leading port, which put it outside the band and
     // clipped it and its caption against the edge.

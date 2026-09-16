@@ -49,6 +49,17 @@ struct GraphOverview: Equatable {
     var originPosition: CGPoint {
       CGPoint(x: band.minX + CanvasBand.originLane / 2, y: band.midY)
     }
+
+    /// The same lane, in a band of the width every other lane got. Bands are sized to
+    /// the widest lane rather than each to its own contents — ragged lanes read as a
+    /// collage, and one wrapped lane would otherwise make every lane above it look cut
+    /// short.
+    func widened(to width: CGFloat) -> Folder {
+      Folder(
+        path: path, name: name, loopCount: loopCount, caption: caption,
+        entryPorts: entryPorts, isGlobal: isGlobal,
+        band: CGRect(x: band.minX, y: band.minY, width: width, height: band.height))
+    }
   }
 
   /// One loop card. Always a loop the folder's graph owns directly — every card here has
@@ -126,14 +137,21 @@ struct GraphOverview: Equatable {
     guard !lanes.isEmpty else { return }
 
     var laneTop = Metrics.laneTop
+    var contentWidth =
+      CGFloat(LaneLayout.Metrics.columns - 1) * LaneLayout.Metrics.depthWidth
+      + Metrics.card.width
     for graph in lanes {
       let lane = Self.layOutLane(
         graph, top: laneTop, declaredEntries: declaredEntries[graph.project.path] ?? [])
       folders.append(lane.folder)
       loops.append(contentsOf: lane.loops)
       links.append(contentsOf: lane.links)
+      contentWidth = max(contentWidth, lane.contentWidth)
       laneTop = lane.folder.band.maxY + Metrics.laneGap
     }
+
+    let bandWidth = LaneLayout.Metrics.bandWidth(contentWidth: contentWidth)
+    folders = folders.map { $0.widened(to: bandWidth) }
 
     if !folders.isEmpty {
       let minY = folders.map(\.band.minY).min()!
@@ -142,7 +160,7 @@ struct GraphOverview: Equatable {
     }
 
     size = CGSize(
-      width: Metrics.bandX * 2 + Metrics.bandWidth,
+      width: Metrics.bandX * 2 + bandWidth,
       height: laneTop - Metrics.laneGap + Metrics.laneTop)
   }
 
@@ -151,6 +169,8 @@ struct GraphOverview: Equatable {
     let folder: Folder
     let loops: [Loop]
     let links: [Link]
+    /// How wide this lane's cards came out, so every band can be drawn to the widest.
+    let contentWidth: CGFloat
   }
 
   private static func layOutLane(
@@ -198,9 +218,12 @@ struct GraphOverview: Equatable {
       caption: caption(for: graph),
       entryPorts: loops.compactMap(\.entryPort),
       isGlobal: graph.isGlobal,
-      band: CGRect(x: Metrics.bandX, y: top, width: Metrics.bandWidth, height: height))
+      band: CGRect(
+        x: Metrics.bandX, y: top,
+        width: LaneLayout.Metrics.bandWidth(contentWidth: layout.contentWidth), height: height))
 
-    return Lane(folder: folder, loops: loops, links: links)
+    return Lane(
+      folder: folder, loops: loops, links: links, contentWidth: layout.contentWidth)
   }
 
   /// `"5 loops · 3 running"`.

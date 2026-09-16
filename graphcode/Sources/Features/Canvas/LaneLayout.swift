@@ -20,20 +20,39 @@ import GraphcodeKit
 struct LaneLayout: Equatable {
   /// One card's place in the lane, before it becomes a point.
   struct Slot: Hashable {
+    /// For a loop in a chain, how many hand-offs from a beginning it sits — its depth.
+    /// For a loose one, which packed column it landed in, which means nothing but "the
+    /// nth on this row".
     let column: Int
     let row: Int
+    /// A loop with no edge in either direction has no depth to be at, so it is packed at
+    /// the tighter pitch below the chains rather than given a level of its own.
+    var isLoose = false
   }
 
   enum Metrics {
     static let card = LoopCardView.Metrics.size
+    /// Between two cards on the same depth — the loose grid's pitch.
     static let columnGap: CGFloat = 40
+    /// Between one depth and the next, and wider than `columnGap` on purpose: with both
+    /// the same, a lane of packed loose loops and a chain three hand-offs long are the
+    /// same picture, and the x axis stops meaning "how far from a beginning".
+    static let depthGap: CGFloat = 88
     static let rowGap: CGFloat = 24
     /// How far right a chain runs before it folds back into the last column. A lane that
     /// grew without bound would push whatever is below it off the canvas, and four
     /// hand-offs is already deeper than a real graph goes.
     static let columns = 4
+    /// How many loose loops stack in one column before they wrap into a second beside
+    /// it. A graph of twenty loops that nothing runs is the common shape — loops that
+    /// spawned loops — and one row each made the lane a card-wide ribbon several screens
+    /// long with its whole width empty beside it. Only the loose ones wrap: a chain's
+    /// row is where its hand-offs are drawn, and folding those would put one chain's
+    /// beginning to the right of another chain's end.
+    static let wrapAfterRows = 6
 
     static let columnWidth = card.width + columnGap
+    static let depthWidth = card.width + depthGap
     static let rowHeight = card.height + rowGap
     /// Where a lane's band begins. On the Graph view that leaves the start node its own
     /// 60pt column plus a gap; a project's canvas has no start node, but it keeps the
@@ -41,9 +60,14 @@ struct LaneLayout: Equatable {
     static let bandX: CGFloat = 80
     /// Clear of the attention rail, which floats over both canvases' top-left corner.
     static let laneTop: CGFloat = 62
-    static let bandWidth =
-      CanvasBand.padding * 2 + CanvasBand.originLane + CGFloat(columns) * card.width
-      + CGFloat(columns - 1) * columnGap
+    static let bandWidth = bandWidth(contentWidth: CGFloat(columns - 1) * depthWidth + card.width)
+
+    /// A band around a lane whose cards span `contentWidth`, leading edge to trailing
+    /// edge. Taken from the lane rather than from a column count: a lane of packed loose
+    /// loops and a lane of chains are different widths for the same number of cards.
+    static func bandWidth(contentWidth: CGFloat) -> CGFloat {
+      CanvasBand.padding * 2 + CanvasBand.originLane + max(contentWidth, card.width)
+    }
     /// The first card's centre, inside the band and clear of the origin lane.
     static let firstLoopX =
       bandX + CanvasBand.padding + CanvasBand.originLane + card.width / 2
@@ -60,6 +84,10 @@ struct LaneLayout: Equatable {
   /// How many rows the lane used — never zero, so a band around an empty graph is still
   /// one row tall rather than a caption-height sliver.
   private(set) var rowCount = 1
+  /// How wide the lane came out, from the first card's leading edge to the last one's
+  /// trailing edge — a band has to be drawn around it, and a lane that packed its loose
+  /// loops is wider than the depths alone say.
+  private(set) var contentWidth = Metrics.card.width
 
   /// - Parameters:
   ///   - roles: passed in rather than resolved here because both callers already have
@@ -81,6 +109,7 @@ struct LaneLayout: Equatable {
     let hangsOffOrigin: (LoopNode) -> Bool = {
       roles[$0.id] == .entry || roles[$0.id] == .unwired
     }
+    let wired = Set(graph.edges.flatMap { [$0.from, $0.to] })
     let starts = Array(graph.nodes).filter(hangsOffOrigin)
     let depths = Self.depths(in: graph, from: starts.map(\.id))
 
@@ -105,23 +134,51 @@ struct LaneLayout: Equatable {
     }
 
     var nextRow = 0
-    for node in starts {
+    for node in starts where wired.contains(node.id) {
       while takenRows.contains(nextRow) { nextRow += 1 }
       place(node, preferring: nextRow)
     }
     // Whatever a walk from a beginning never reached: a closed cycle, which has none.
-    for node in graph.nodes where placed[node.id] == nil {
+    for node in graph.nodes where placed[node.id] == nil && wired.contains(node.id) {
       while takenRows.contains(nextRow) { nextRow += 1 }
       place(node, preferring: nextRow)
+    }
+
+    // Everything left has no edge in either direction, so it has no depth and no chain to
+    // be read along — it is packed below what does, in as many columns as it takes to
+    // keep the lane readable without scrolling.
+    let chainRows = placed.values.map(\.row).max().map { $0 + 1 } ?? 0
+    let loose = graph.nodes.filter { !wired.contains($0.id) }
+    let looseColumns = Self.looseColumns(for: loose.count)
+    for (index, node) in loose.enumerated() {
+      placed[node.id] = Slot(
+        column: index % looseColumns, row: chainRows + index / looseColumns, isLoose: true)
     }
 
     slots = placed
     positions = placed.mapValues { slot in
       CGPoint(
-        x: origin.x + CGFloat(slot.column) * Metrics.columnWidth,
+        x: Self.x(of: slot, from: origin),
         y: origin.y + CGFloat(slot.row) * rowHeight)
     }
-    rowCount = max((placed.values.map(\.row).max() ?? 0) + 1, 1)
+    rowCount = max(placed.values.map(\.row).max().map { $0 + 1 } ?? 1, 1)
+    contentWidth =
+      (placed.values.map { Self.x(of: $0, from: .zero) }.max() ?? 0) + Metrics.card.width
+  }
+
+  /// A card's centre x: its depth at the depth pitch, or its packed column at the tighter
+  /// one. The two pitches are the whole reason this isn't a multiplication at the call
+  /// site — see `Metrics.depthGap`.
+  static func x(of slot: Slot, from origin: CGPoint) -> CGFloat {
+    origin.x + CGFloat(slot.column) * (slot.isLoose ? Metrics.columnWidth : Metrics.depthWidth)
+  }
+
+  /// How wide to pack `count` loose loops: one column until they would out-run the lane's
+  /// height, then as many as it takes to stay within it. A handful stays a column, which
+  /// is the shape a small graph has always had.
+  private static func looseColumns(for count: Int) -> Int {
+    guard count > Metrics.wrapAfterRows else { return 1 }
+    return max(1, Int((Double(count) / Double(Metrics.wrapAfterRows)).rounded(.up)))
   }
 
   /// Every card one canvas can show: this graph's own loops, plus the insides of every
