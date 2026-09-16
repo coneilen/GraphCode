@@ -5,6 +5,9 @@ import GraphcodeKit
 import MailroomKit
 import UniformTypeIdentifiers
 
+// This reducer is split across focused extensions; its core declaration remains the
+// integration point for their shared state and actions.
+// swiftlint:disable file_length
 /// One open project's graph canvas — one of possibly several the sidebar shows at once
 /// (multi-project sidebar follow-up to Phase 4, docs/07-roadmap.md#phase-4--projects).
 ///
@@ -25,6 +28,7 @@ import UniformTypeIdentifiers
 /// daemon subscription for the app's whole lifetime and forwards this project's
 /// `DaemonEvent`s in via `.daemonEvent`.
 @Reducer
+// swiftlint:disable:next type_body_length
 struct ProjectFeature {
   @ObservableState
   struct State: Equatable, Identifiable {

@@ -16,6 +16,7 @@ import Testing
 /// routing behavior through the one other side effect it has: what ends up persisted
 /// on disk via `ProjectPersistence`.
 @Suite
+// swiftlint:disable:next type_body_length
 struct ProjectRegistryTests {
   /// The registry refuses a path that names no directory, so the folders these tests open
   /// have to be there. They were not, and the tests passed anyway — which is exactly how

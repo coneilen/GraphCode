@@ -16,6 +16,7 @@ import GraphcodeKit
 /// `detailSelection` (which canvas —
 /// a folder's, or Quick Chats' — is the fallback when no loop is open).
 @Reducer
+// swiftlint:disable:next type_body_length
 struct AppFeature {
   /// Which canvas the detail pane falls back to when no loop's workspace is open.
   ///

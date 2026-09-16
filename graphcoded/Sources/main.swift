@@ -1,5 +1,4 @@
 import Foundation
-
 import GraphcodeKit
 
 #if os(Windows)
@@ -190,6 +189,9 @@ import GraphcodeKit
     }
   #endif
 
+  // The handshake is one state machine kept together so permits, replay, and teardown
+  // cannot diverge between helper functions.
+  // swiftlint:disable:next cyclomatic_complexity function_body_length
   func handleWindowsConnection(_ connection: any DaemonConnection) {
     guard let handshakePermit = handshakeLimiter.tryAcquire() else {
       Task { try? await connection.close() }
