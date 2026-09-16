@@ -128,6 +128,44 @@ struct GraphOverviewLayoutTests {
   }
 
   @Test
+  func twoParentsFansNeverShareAColumn() {
+    // Reported: ten children of two different parents landed in one set, so the level
+    // read as children belonging to nobody in particular. A fan gets columns of its own.
+    let first = LoopNode(title: "first-parent")
+    let second = LoopNode(title: "second-parent")
+    var nodes = [first, second]
+    var edges: [LoopEdge] = []
+    for index in 0..<3 {
+      let child = LoopNode(title: "first-child-\(index)")
+      nodes.append(child)
+      edges.append(LoopEdge(from: first.id, to: child.id))
+    }
+    for index in 0..<4 {
+      let child = LoopNode(title: "second-child-\(index)")
+      nodes.append(child)
+      edges.append(LoopEdge(from: second.id, to: child.id))
+    }
+    let overview = GraphOverview(graphs: [
+      LoopGraph(
+        project: Self.projectA, nodes: IdentifiedArray(uniqueElements: nodes),
+        edges: IdentifiedArray(uniqueElements: edges))
+    ])
+
+    func columns(of prefix: String) -> Set<CGFloat> {
+      Set(overview.loops.filter { $0.node.title.hasPrefix(prefix) }.map(\.position.x))
+    }
+    let firstFan = columns(of: "first-child")
+    let secondFan = columns(of: "second-child")
+    #expect(!firstFan.isEmpty && !secondFan.isEmpty)
+    #expect(firstFan.isDisjoint(with: secondFan))
+    // Both fans are still one level out from their parents, not one level apart.
+    let parents = columns(of: "first-parent").union(columns(of: "second-parent"))
+    #expect(parents.count == 1)
+    #expect(firstFan.allSatisfy { $0 > (parents.first ?? 0) })
+    #expect(secondFan.allSatisfy { $0 > (parents.first ?? 0) })
+  }
+
+  @Test
   func aDepthCarryingSeveralRowsPushesTheNextOneFurtherOut() {
     // Several chains leaving one level fan their hand-offs across the same gap, and at
     // the ordinary width those curves bunch into a braid. Width is the cheap axis here —

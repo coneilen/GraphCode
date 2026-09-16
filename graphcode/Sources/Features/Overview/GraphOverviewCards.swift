@@ -77,11 +77,7 @@ extension GraphOverviewView {
   private func startConnector(from origin: CGPoint, to target: CGPoint) -> some View {
     Path { path in
       path.move(to: origin)
-      let reach = max((target.x - origin.x) * 0.5, 20)
-      path.addCurve(
-        to: target,
-        control1: CGPoint(x: origin.x + reach, y: origin.y),
-        control2: CGPoint(x: target.x - reach, y: target.y))
+      path.addLine(to: target)
     }
     .stroke(CanvasBand.railTint, lineWidth: 1.5)
     .allowsHitTesting(false)
