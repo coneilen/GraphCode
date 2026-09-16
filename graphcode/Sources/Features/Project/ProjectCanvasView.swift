@@ -33,6 +33,9 @@ struct ProjectCanvasView: View {
   @State private var now = Date()
   /// The in-flight edge drag. Not `private` because `connectorHandle` — which sets
   /// them — lives in `ProjectCanvasForms.swift`, and Swift scopes `private` to a file.
+  /// The edge a click has lit, if any — see `EdgeFocus`. Internal because the card layer
+  /// lives in `ProjectCanvasCards.swift`.
+  @State var edgeFocus: EdgeFocus?
   @State var dragSourceID: UUID?
   @State var dragLocation: CGPoint?
 
@@ -214,16 +217,22 @@ struct ProjectCanvasView: View {
 
   private func canvas(_ derived: Derived) -> some View {
     let content = contentSize(derived.subGraph)
+    // A focus on an edge this canvas no longer draws — deleted, or left behind by
+    // drilling into a composite — is no focus at all.
+    let focus = edgeFocus.flatMap { focus in
+      store.canvasGraph.edges.contains { $0.id.uuidString == focus.edgeID } ? focus : nil
+    }
     return GeometryReader { proxy in
       ZStack {
-        bandLayer(derived)
-        entryHandleLayer(derived)
-        edgesLayer
-        subGraphLinksLayer(derived.subGraph)
-        nodesLayer(derived.attentionReasons, roles: derived.entryRoles, now: now)
-        subGraphChipsLayer(derived.subGraph)
+        bandLayer(derived).opacity(focus.sceneryOpacity)
+        entryHandleLayer(derived).opacity(focus.sceneryOpacity)
+        edgesLayer(focus: focus)
+        subGraphLinksLayer(derived.subGraph).opacity(focus.sceneryOpacity)
+        nodesLayer(derived.attentionReasons, roles: derived.entryRoles, now: now, focus: focus)
+        subGraphChipsLayer(derived.subGraph).opacity(focus.sceneryOpacity)
         dragPreview
       }
+      .animation(.easeInOut(duration: 0.18), value: focus)
       .coordinateSpace(name: "canvas")
       .scaleEffect(transform.scale)
       .offset(liveOffset)
@@ -253,6 +262,9 @@ struct ProjectCanvasView: View {
       .background(Theme.canvasBackground)
     }
     .contentShape(Rectangle())
+    // Clicking empty canvas lets go of a focused edge. Cards and edges take their own
+    // clicks first, so only a click that landed on nothing reaches this.
+    .onTapGesture { edgeFocus = nil }
     // The canvas *is* the folder here, so right-clicking its background offers what
     // right-clicking the folder offers elsewhere. Cards and edges sit deeper in the
     // hierarchy, so their own menus still win over their areas.
@@ -409,11 +421,16 @@ struct ProjectCanvasView: View {
       originLane: entryPorts(derived).isEmpty ? 0 : CanvasBand.originLane)
   }
 
-  private var edgesLayer: some View {
+  private func edgesLayer(focus: EdgeFocus?) -> some View {
     ForEach(store.canvasGraph.edges) { edge in
       if let from = store.nodePositions[edge.from], let to = store.nodePositions[edge.to] {
         EdgeLineView(
-          from: from, to: to, kind: edge.kind, fired: edge.fired, label: edge.cycleLabel
+          from: from, to: to, kind: edge.kind, fired: edge.fired, label: edge.cycleLabel,
+          emphasis: focus.emphasis(forEdge: edge.id.uuidString),
+          onTap: {
+            edgeFocus = EdgeFocus.toggling(
+              edgeFocus, to: EdgeFocus(edgeID: edge.id.uuidString, from: edge.from, to: edge.to))
+          }
         )
         .contextMenu {
           Text(edge.canvasSummary)

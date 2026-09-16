@@ -16,7 +16,15 @@ extension ProjectFeature {
   static func repack(_ state: inout State, to budget: Int) {
     guard budget != state.canvasRowBudget else { return }
     state.canvasRowBudget = budget
-    state.nodePositions = LaneLayout.positions(forCanvas: state.graph, rowBudget: budget)
+    relayOut(&state)
+  }
+
+  /// Every position again, from the graph, the pane's row budget and the sidebar's order —
+  /// the three things a card's place depends on, read from one place so no caller can
+  /// pass two of them and forget the third.
+  static func relayOut(_ state: inout State) {
+    state.nodePositions = LaneLayout.positions(
+      forCanvas: state.graph, rowBudget: state.canvasRowBudget, order: state.sidebarNodeOrder)
   }
 
   /// Everything a fresh graph changes about the canvas around it: where the cards are,
@@ -28,8 +36,6 @@ extension ProjectFeature {
   /// reason to put near each other ran behind whatever sat between them, and wiring a
   /// graph up changed nothing about how it looked. See `LaneLayout`.
   static func absorb(_ newGraph: LoopGraph, into state: inout State) {
-    state.nodePositions = LaneLayout.positions(
-      forCanvas: newGraph, rowBudget: state.canvasRowBudget)
     state.graph = newGraph
     // An offer only makes sense while its loop exists, stays resolved, and still points
     // at the worktree — a restarted or deleted loop takes it with it.
@@ -43,5 +49,7 @@ extension ProjectFeature {
     for node in newGraph.nodes where !state.sidebarNodeOrder.contains(node.id) {
       state.sidebarNodeOrder.append(node.id)
     }
+    // Last, so the order it lays out by already knows about the loops this graph added.
+    relayOut(&state)
   }
 }

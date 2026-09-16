@@ -35,6 +35,9 @@ struct GraphOverviewView: View {
   /// The pane's size, kept so the zoom buttons and shortcuts — which have no gesture
   /// location to work from — can still zoom about its centre.
   @State private var viewport: CGSize = .zero
+  /// The edge a click has lit, if any — see `EdgeFocus`. Internal rather than private
+  /// because the link and card layers live in `GraphOverviewCards.swift`.
+  @State var edgeFocus: EdgeFocus?
   /// What the cards' elapsed labels are measured against, advanced by the window's one
   /// 30-second tick — see `CanvasClock`.
   @State private var now = Date()
@@ -81,7 +84,11 @@ struct GraphOverviewView: View {
           uniqueKeysWithValues: store.projects.map { ($0.id, $0.declaredEntryIDs) }),
         // Measured by the canvas's own `GeometryReader`, so resizing the window re-packs
         // the lanes instead of leaving a graph that runs off the bottom of it.
-        viewportHeight: viewport.height),
+        viewportHeight: viewport.height,
+        // Each lane in its sidebar's order, so the canvas and the list beside it agree
+        // about which loop comes next.
+        orders: Dictionary(
+          uniqueKeysWithValues: store.projects.map { ($0.id, $0.sidebarNodeOrder) })),
       attentionItems: store.attentionItems)
 
     return canvas(derived)
@@ -173,15 +180,21 @@ struct GraphOverviewView: View {
   private func layers(_ derived: Derived) -> some View {
     let overview = derived.overview
     return GeometryReader { proxy in
+      // A focus on an edge that a broadcast has since removed is no focus at all, rather
+      // than a canvas dimmed around nothing.
+      let focus = edgeFocus.flatMap { focus in
+        overview.links.contains { $0.id == focus.edgeID } ? focus : nil
+      }
       ZStack {
-        bandsLayer(overview)
-        startNodeLayer(overview)
-        linksLayer(overview)
-        loopsLayer(overview, reasons: derived.attentionReasons, now: now)
+        bandsLayer(overview).opacity(focus.sceneryOpacity)
+        startNodeLayer(overview).opacity(focus.sceneryOpacity)
+        linksLayer(overview, focus: focus)
+        loopsLayer(overview, reasons: derived.attentionReasons, now: now, focus: focus)
         // Above the cards and the links, since the handle it reveals hangs below the
         // origin dot and must not end up under a line drawn from it.
-        entryHandleLayer(overview)
+        entryHandleLayer(overview).opacity(focus.sceneryOpacity)
       }
+      .animation(.easeInOut(duration: 0.18), value: focus)
       .scaleEffect(transform.scale)
       .offset(liveOffset)
       // Nothing has been panned yet, so first paint should put the graph where the eye
@@ -215,6 +228,9 @@ struct GraphOverviewView: View {
       // this overlay half under the sidebar instead of in the middle of the canvas.
       .overlay { emptyState(derived.overview) }
       .contentShape(Rectangle())
+      // Clicking empty canvas lets go of a focused edge. Cards and edges take their own
+      // clicks first, so only a click that landed on nothing reaches this.
+      .onTapGesture { edgeFocus = nil }
       .gesture(
         DragGesture()
           .onChanged { value in dragOffset = value.translation }
