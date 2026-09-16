@@ -222,16 +222,19 @@ struct ProjectRegistryTests {
             firstInstruction: "Work"))),
       connectionID: connectionID)
 
-    let results = [await firstResult, await secondResult].compactMap { result -> LoopGraph? in
+    let responses = [("First", await firstResult), ("Second", await secondResult)]
+    let results = responses.compactMap { title, result -> LoopGraph? in
+      #expect(result?.error == nil)
       guard let response = result?.response, case .graphChanged(let graph) = response else {
         Issue.record("expected a correlated graph snapshot for each applied command")
         return nil
       }
+      #expect(graph.nodes.contains { $0.title == title })
       return graph
     }
 
-    #expect(results.count == 2)
-    #expect(results.contains { $0.nodes.count == 1 && $0.nodes.contains { $0.title == "First" } })
+    // Either async-let command can reach the store first; its response must precede the other mutation.
+    #expect(results.map { $0.nodes.count }.sorted() == [1, 2])
     #expect(
       results.contains {
         $0.nodes.count == 2
