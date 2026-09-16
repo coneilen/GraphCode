@@ -27,6 +27,10 @@ struct EdgeLineView: View {
   /// The card the head has to stop at. Passed rather than read so a canvas drawing
   /// something other than a loop card can say so.
   var targetSize: CGSize = LoopCardView.Metrics.size
+  /// Whether a clicked edge is lighting this one or dimming it — see `EdgeFocus`.
+  var emphasis: CanvasEmphasis = .normal
+  /// A click on the line. Nil where the line is not something to focus.
+  var onTap: (() -> Void)?
 
   /// Where the curve starts, ends, and bends. Computed once — the path, the hit target,
   /// the head, the pip and the label all read the same three points, and a second
@@ -51,7 +55,8 @@ struct EdgeLineView: View {
       // fat stroke is the hit target; the visible line is drawn on top of it.
       line.stroke(Color.clear.opacity(0.001), style: StrokeStyle(lineWidth: 12))
         .contentShape(line.stroke(style: StrokeStyle(lineWidth: 12)))
-      line.stroke(color, style: StrokeStyle(lineWidth: 1.5, dash: dashPattern))
+        .onTapGesture { onTap?() }
+      line.stroke(color, style: StrokeStyle(lineWidth: lineWidth, dash: dashPattern))
       head.fill(color)
       if fired {
         Circle()
@@ -72,6 +77,7 @@ struct EdgeLineView: View {
           .allowsHitTesting(false)
       }
     }
+    .opacity(emphasis.opacity)
   }
 
   private var line: Path {
@@ -98,12 +104,17 @@ struct EdgeLineView: View {
   /// worth finding across a zoomed-out graph.
   private var color: Color {
     if label != nil { return Self.guardTint }
+    // Lit is the ink every kind is a quieter version of: the kind still reads through
+    // the dash pattern, and the line you clicked is the brightest thing on the canvas.
+    if emphasis == .lit && kind != .spawn { return .white.opacity(0.9) }
     switch kind {
     case .handoff: return .white.opacity(0.45)
     case .message: return .white.opacity(0.28)
     case .spawn: return Self.spawnTint
     }
   }
+
+  private var lineWidth: CGFloat { emphasis == .lit ? 2.5 : 1.5 }
 
   private var dashPattern: [CGFloat] {
     if label != nil { return [5, 4] }

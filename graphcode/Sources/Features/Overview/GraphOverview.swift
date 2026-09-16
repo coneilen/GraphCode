@@ -219,7 +219,8 @@ struct GraphOverview: Equatable {
       links.append(
         Link(
           id: "edge-\(edge.id)", from: from, to: to,
-          kind: .edge(edge.kind, fired: edge.fired), label: edge.cycleLabel))
+          kind: .edge(edge.kind, fired: edge.fired), label: edge.cycleLabel,
+          fromID: edge.from, toID: edge.to))
     }
 
     // An empty folder still gets a band one row tall — that is how the overview says
