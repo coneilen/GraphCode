@@ -49,6 +49,17 @@ struct GraphOverview: Equatable {
     var originPosition: CGPoint {
       CGPoint(x: band.minX + CanvasBand.originLane / 2, y: band.midY)
     }
+
+    /// The same lane, in a band of the width every other lane got. Bands are sized to
+    /// the widest lane rather than each to its own contents — ragged lanes read as a
+    /// collage, and one wrapped lane would otherwise make every lane above it look cut
+    /// short.
+    func widened(to width: CGFloat) -> Folder {
+      Folder(
+        path: path, name: name, loopCount: loopCount, caption: caption,
+        entryPorts: entryPorts, isGlobal: isGlobal,
+        band: CGRect(x: band.minX, y: band.minY, width: width, height: band.height))
+    }
   }
 
   /// One loop card. Always a loop the folder's graph owns directly — every card here has
@@ -115,7 +126,13 @@ struct GraphOverview: Equatable {
 
   init() {}
 
-  init(graphs: [LoopGraph], declaredEntries: [String: Set<UUID>] = [:]) {
+  /// - Parameter viewportHeight: the pane this will be drawn in, when it has been
+  ///   measured. The lanes pack their loose loops to what that pane can show, so the graph
+  ///   widens rather than running off the bottom of it — and re-lays itself out when the
+  ///   window is resized. Zero falls back to what the main display could show.
+  init(
+    graphs: [LoopGraph], declaredEntries: [String: Set<UUID>] = [:], viewportHeight: CGFloat = 0
+  ) {
     // The global graph's lane goes first — it's the one that dispatches into the others,
     // so reading top-to-bottom follows the direction work actually travels. Stable
     // partition rather than a sort, so the remaining folders keep sidebar order. A global
@@ -125,15 +142,32 @@ struct GraphOverview: Equatable {
       graphs.filter { $0.isGlobal && !$0.nodes.isEmpty } + graphs.filter { !$0.isGlobal }
     guard !lanes.isEmpty else { return }
 
+    // Every lane is drawn in the same pane, so the budget is shared between them: four
+    // folders each packing to the full height is four lanes of scrolling.
+    let budget =
+      viewportHeight > 0
+      ? max(
+        LaneLayout.Metrics.minimumRowBudget,
+        LaneLayout.Metrics.rowBudget(forHeight: viewportHeight) / lanes.count)
+      : LaneLayout.Metrics.displayRowBudget
+
     var laneTop = Metrics.laneTop
+    var contentWidth =
+      CGFloat(LaneLayout.Metrics.columns - 1) * LaneLayout.Metrics.depthWidth
+      + Metrics.card.width
     for graph in lanes {
       let lane = Self.layOutLane(
-        graph, top: laneTop, declaredEntries: declaredEntries[graph.project.path] ?? [])
+        graph, top: laneTop, declaredEntries: declaredEntries[graph.project.path] ?? [],
+        rowBudget: budget)
       folders.append(lane.folder)
       loops.append(contentsOf: lane.loops)
       links.append(contentsOf: lane.links)
+      contentWidth = max(contentWidth, lane.contentWidth)
       laneTop = lane.folder.band.maxY + Metrics.laneGap
     }
+
+    let bandWidth = LaneLayout.Metrics.bandWidth(contentWidth: contentWidth)
+    folders = folders.map { $0.widened(to: bandWidth) }
 
     if !folders.isEmpty {
       let minY = folders.map(\.band.minY).min()!
@@ -142,7 +176,7 @@ struct GraphOverview: Equatable {
     }
 
     size = CGSize(
-      width: Metrics.bandX * 2 + Metrics.bandWidth,
+      width: Metrics.bandX * 2 + bandWidth,
       height: laneTop - Metrics.laneGap + Metrics.laneTop)
   }
 
@@ -151,10 +185,13 @@ struct GraphOverview: Equatable {
     let folder: Folder
     let loops: [Loop]
     let links: [Link]
+    /// How wide this lane's cards came out, so every band can be drawn to the widest.
+    let contentWidth: CGFloat
   }
 
   private static func layOutLane(
-    _ graph: LoopGraph, top: CGFloat, declaredEntries: Set<UUID> = []
+    _ graph: LoopGraph, top: CGFloat, declaredEntries: Set<UUID> = [],
+    rowBudget: Int = LaneLayout.Metrics.displayRowBudget
   ) -> Lane {
     let path = graph.project.path
     let roles = CardEntryRole.roles(in: graph, declaredEntries: declaredEntries)
@@ -165,7 +202,8 @@ struct GraphOverview: Equatable {
     // own canvas gets, so the two views can't drift on what a graph looks like.
     let layout = LaneLayout(
       graph: graph, roles: roles,
-      origin: CGPoint(x: Metrics.firstLoopX, y: top + Metrics.firstRowInset))
+      origin: CGPoint(x: Metrics.firstLoopX, y: top + Metrics.firstRowInset),
+      rowBudget: rowBudget)
     let positions = layout.positions
 
     for node in graph.nodes {
@@ -198,9 +236,12 @@ struct GraphOverview: Equatable {
       caption: caption(for: graph),
       entryPorts: loops.compactMap(\.entryPort),
       isGlobal: graph.isGlobal,
-      band: CGRect(x: Metrics.bandX, y: top, width: Metrics.bandWidth, height: height))
+      band: CGRect(
+        x: Metrics.bandX, y: top,
+        width: LaneLayout.Metrics.bandWidth(contentWidth: layout.contentWidth), height: height))
 
-    return Lane(folder: folder, loops: loops, links: links)
+    return Lane(
+      folder: folder, loops: loops, links: links, contentWidth: layout.contentWidth)
   }
 
   /// `"5 loops · 3 running"`.

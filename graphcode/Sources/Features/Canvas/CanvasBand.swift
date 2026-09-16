@@ -135,6 +135,12 @@ struct CanvasBandView: View {
   /// The cost is the one the handoff named: N rootless loops is N lines. That is a real
   /// starburst at twenty, and the answer then is to wire the graph up — which is what
   /// the lines are for saying.
+  /// How far into the band a port can sit and still be reached by a straight curve: the
+  /// first column of cards. Anything beyond it is routed instead — see `routed(from:to:)`.
+  private var firstColumnReach: CGFloat {
+    CanvasBand.originLane + CanvasBand.padding + LoopCardView.Metrics.size.width
+  }
+
   @ViewBuilder
   private var entryRail: some View {
     if !entryPorts.isEmpty {
@@ -174,19 +180,45 @@ struct CanvasBandView: View {
       }
   }
 
-  /// Curved, not straight, and quiet. A straight 1.5pt line between two cards is what an
-  /// edge looks like; this one bends out of the origin and flattens into the port, which
-  /// reads as structure rather than as a hand-off.
+  /// Straight and quiet — one line from the dot to the port, of a lighter weight than an
+  /// edge and with no arrowhead, because nothing travels it.
+  ///
+  /// It used to bow out of the origin and flatten into the port. One of those reads
+  /// nicely; a lane of them is a bundle of arcs that all leave the dot at a different
+  /// angle, and against the routed lines below they made the first row look like a
+  /// different kind of connection from the rest.
+  ///
+  /// A port past the first column is *routed* rather than curved to. A curve to a card
+  /// three columns out runs straight through the cards in between, and since they are
+  /// drawn over it, what shows is a line in each gap — which reads as those cards being
+  /// chained to each other. The route uses the lane's own empty corridors instead, so the
+  /// whole length of it stays visible.
   private func connector(from origin: CGPoint, to port: CGPoint) -> some View {
     Path { path in
-      path.move(to: origin)
-      let reach = max((port.x - origin.x) * 0.55, 20)
-      path.addCurve(
-        to: port,
-        control1: CGPoint(x: origin.x + reach, y: origin.y),
-        control2: CGPoint(x: port.x - reach, y: port.y))
+      if port.x - origin.x <= firstColumnReach {
+        path.move(to: origin)
+        path.addLine(to: port)
+      } else {
+        routed(from: origin, to: port, into: &path)
+      }
     }
-    .stroke(CanvasBand.railTint, lineWidth: 1.5)
+    .stroke(
+      CanvasBand.railTint,
+      style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+  }
+
+  /// Down the origin's own lane, along the gap above the port's row, down the gap beside
+  /// its column, and in. Every leg runs in space the layout leaves empty — the origin
+  /// lane, a row gap, a column gap — so the line never passes behind a card.
+  private func routed(from origin: CGPoint, to port: CGPoint, into path: inout Path) {
+    let corridorY = port.y - (LoopCardView.Metrics.size.height + LaneLayout.Metrics.rowGap) / 2
+    let gutterX = port.x - LaneLayout.Metrics.columnGap / 2
+
+    path.move(to: origin)
+    path.addLine(to: CGPoint(x: origin.x, y: corridorY))
+    path.addLine(to: CGPoint(x: gutterX, y: corridorY))
+    path.addLine(to: CGPoint(x: gutterX, y: port.y))
+    path.addLine(to: port)
   }
 
   // A chip with no name still earns the row: the project canvas draws its band

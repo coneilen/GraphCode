@@ -177,6 +177,11 @@ struct ProjectFeature {
     /// on its own `Worktrees…` menu item.
     var worktreeStats: WorktreeFolderStats?
 
+    /// How many rows this canvas's pane can show, which is what the layout packs loose
+    /// loops to. Held in state rather than read per layout because the pane is the view's
+    /// to measure and the positions are derived here — see `.canvasRowBudgetChanged`.
+    var canvasRowBudget = LaneLayout.Metrics.displayRowBudget
+
     var id: String { graph.project.path }
 
     init(graph: LoopGraph) {
@@ -205,6 +210,10 @@ struct ProjectFeature {
     /// sequences the new loop *after* the parent — under a long-running parent that
     /// meant a loop blocked indefinitely while its session already ran.
     case newChildLoopTapped(UUID)
+    /// The canvas measured its pane and the number of rows it can show has changed —
+    /// sent only when the *budget* changes, not on every resize frame, so a slow drag of
+    /// the window edge re-lays the cards out once per row rather than once per point.
+    case canvasRowBudgetChanged(Int)
     case createNodeConfirmed
     case cancelNewNodeForm
     case nodeTapped(UUID)
@@ -340,31 +349,17 @@ struct ProjectFeature {
       case .binding:
         return .none
 
+      case .canvasRowBudgetChanged(let budget):
+        Self.repack(&state, to: budget)
+        return .none
+
       case .daemonEvent(let event):
         switch event {
         case .graphChanged(let broadcast):
           state.connectionError = nil
           let (newGraph, boardChanged) = Self.carryingRoom(broadcast, over: state.graph)
           loopTitleDirectory.register(newGraph.project.path, newGraph)
-          // Every card placed again from the graph that just arrived, rather than only the
-          // ones that are new. Slots handed out at arrival time made the canvas a record of
-          // the order loops turned up in: a hand-off drawn between two cards the layout had
-          // no reason to put near each other ran behind whatever sat between them, and
-          // wiring a graph up changed nothing about how it looked. See `LaneLayout`.
-          state.nodePositions = LaneLayout.positions(forCanvas: newGraph)
-          state.graph = newGraph
-          // An offer only makes sense while its loop exists, stays resolved, and still
-          // points at the worktree — a restarted or deleted loop takes it with it.
-          state.worktreeReclaimOffers = state.worktreeReclaimOffers.filter { id, _ in
-            newGraph.nodes[id: id].map { $0.isResolved && $0.worktreeBinding != nil } == true
-          }
-          // Keep the human's sidebar arrangement across broadcasts: drop ids the graph
-          // no longer has, append ones it gained, and touch nothing else.
-          let currentIDs = Set(newGraph.nodes.map(\.id))
-          state.sidebarNodeOrder.removeAll { !currentIDs.contains($0) }
-          for node in newGraph.nodes where !state.sidebarNodeOrder.contains(node.id) {
-            state.sidebarNodeOrder.append(node.id)
-          }
+          Self.absorb(newGraph, into: &state)
           // The broadcast that delivers a form-created loop is what makes it openable —
           // switch to it now, the way tapping it would. Matched by id so an unrelated
           // broadcast (another loop finishing, a CLI edit) leaves the pending id waiting.
