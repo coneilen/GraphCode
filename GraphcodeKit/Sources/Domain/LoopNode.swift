@@ -428,9 +428,11 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// The state a surface should show, which is `state` corrected by what the session is
   /// actually doing.
   ///
-  /// Two states are corrected, and only where a session reading beats the graph's belief.
-  /// `.succeeded` is finished whatever is still running in its pane, and `.idle` is what
-  /// the graph decided; no poll improves on either. `.running` is set at *creation* and
+  /// Only a few states are corrected, and only where a session reading beats the graph's
+  /// belief. `.idle` is what the graph decided, and a turn-based `.succeeded` is finished
+  /// whatever is still running in its pane; no poll improves on either. A finished goal
+  /// loop is the exception: a human asking it a follow-up is work in flight, which
+  /// `displayStateForResolvedSession` shows. `.running` is set at *creation* and
   /// cleared only by resolution, so between those two moments it is a claim about the
   /// present tense that nothing was checking — a goal loop whose agent answered and
   /// stopped reads RUNNING, pulsing, until a human notices.
@@ -484,6 +486,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// untouched, which is exactly the behaviour every surface had before presence existed.
   public var displayState: LoopState {
     if state == .blocked { return displayStateForBlockedSession }
+    if answersPastResolution { return displayStateForResolvedSession }
     guard state == .running, let presence = presence?.presence else { return state }
     if let exitCode = self.presence?.exitCode {
       return exitCode == 0 ? .idle : .failed
@@ -514,6 +517,25 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     case .busy: return .running
     case .awaitingInput: return .awaitingInput
     case .idle, .absent, .unknown, nil: return .blocked
+    }
+  }
+
+  /// A goal loop that met or missed its goal whose session is still there to be asked a
+  /// follow-up. Its presence keeps being read (`GraphStore.refreshPresence`) so the card can
+  /// say when that session is working again.
+  public var answersPastResolution: Bool {
+    loopType == .goalBased && (state == .succeeded || state == .failed)
+  }
+
+  /// A finished goal loop whose session is answering a follow-up shows RUNNING until the
+  /// turn ends, then its resolution again. Reopening is a new goal's job (`updateNode`):
+  /// `state` stays resolved, so its edges do not fire twice and no goal poller re-arms.
+  private var displayStateForResolvedSession: LoopState {
+    guard presence?.exitCode == nil else { return state }
+    switch presence?.presence {
+    case .busy: return .running
+    case .awaitingInput: return .awaitingInput
+    case .idle, .absent, .unknown, nil: return state
     }
   }
 

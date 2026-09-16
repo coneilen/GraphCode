@@ -62,23 +62,31 @@ struct PresencePollingTests {
   }
 
   @Test
-  func aFinishedLoopIsNeverAsked() async {
-    // Resolved loops are over by definition: nothing about a session can change what the
-    // graph believes, so probing one is a subprocess spent on an answer nobody reads.
+  func aFinishedLoopIsAskedOnlyWhileItsSessionCouldBeAnsweringAFollowUp() async {
+    // Resolved loops are over, so probing one is a subprocess spent on an answer nobody
+    // reads — except a finished goal loop whose session a human may be asking something,
+    // and only until a reading finds that session gone.
     let probe = Probe()
+    var turn = node("turn", .succeeded)
+    turn.loopType = .turnBased
     let store = GraphStore(
       graph: graph([
         node("running", .running), node("succeeded", .succeeded),
         node("failed", .failed), node("stopped", .stopped), node("stalled", .stalled),
-        node("blocked", .blocked),
+        node("blocked", .blocked), turn,
       ]),
       onReadPresence: { node, _ in await probe.read(node) })
     let descriptor = await attach(to: store)
     defer { close(descriptor) }
 
     await store.pollPresence()
+    #expect(Set(await probe.asked) == ["running", "blocked", "succeeded", "failed"])
 
-    #expect(Set(await probe.asked) == ["running", "blocked"])
+    await probe.answer("succeeded", with: .absent)
+    await store.pollPresence()
+    await probe.reset()
+    await store.pollPresence()
+    #expect(Set(await probe.asked) == ["running", "blocked", "failed"])
   }
 
   @Test
