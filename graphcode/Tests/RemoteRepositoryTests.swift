@@ -33,7 +33,9 @@ struct RemoteRepositoryTests {
         == "ssh://dev@[2001:db8::1]:2200/repo%20name/%23q%3Fx%25%E9%9B%AA")
     #expect(RemoteProjectLocation.parse(projectPath: special.projectPath) == special)
     let components = URLComponents(string: special.projectPath)
-    #expect(components?.host == "2001:db8::1")
+    #expect(
+      components?.host?.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        == "2001:db8::1")
     #expect(components?.path == "/repo name/#q?x%雪")
   }
 

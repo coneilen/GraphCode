@@ -29,6 +29,7 @@ private final class ReaderToken: @unchecked Sendable {
   private let lock = NSLock()
   private var readerID: UInt64?
   private var connection: (any DaemonConnection)?
+  private var closeRequested = false
 
   func set(_ readerID: UInt64) {
     lock.lock()
@@ -38,15 +39,27 @@ private final class ReaderToken: @unchecked Sendable {
 
   func setConnection(_ connection: any DaemonConnection) {
     lock.lock()
-    self.connection = connection
+    let shouldClose = closeRequested
+    if !shouldClose {
+      self.connection = connection
+    }
     lock.unlock()
+    if shouldClose {
+      close(connection)
+    }
   }
 
   func closeConnection() {
     lock.lock()
+    closeRequested = true
     let connection = self.connection
+    self.connection = nil
     lock.unlock()
     guard let connection else { return }
+    close(connection)
+  }
+
+  private func close(_ connection: any DaemonConnection) {
     if let unixConnection = connection as? UnixSocketConnection {
       unixConnection.closeSync()
     } else {

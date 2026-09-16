@@ -43,6 +43,8 @@ jobs:
         run: mise exec -- swift test --package-path investigation/spikes/swift-portable
       - name: Install Tuist dependencies
         run: mise exec -- tuist install
+      - name: Build and install zmx
+        run: mise exec -- make install-zmx
       - name: Validate macOS app, daemon, and CLI
         timeout-minutes: 30
         run: mise exec -- make test
