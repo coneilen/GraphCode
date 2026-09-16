@@ -50,13 +50,34 @@ struct LaneLayout: Equatable {
     /// grew without bound would push whatever is below it off the canvas, and four
     /// hand-offs is already deeper than a real graph goes.
     static let columns = 4
-    /// How many loose loops stack in one column before they wrap into a second beside
-    /// it. A graph of twenty loops that nothing runs is the common shape — loops that
-    /// spawned loops — and one row each made the lane a card-wide ribbon several screens
-    /// long with its whole width empty beside it. Only the loose ones wrap: a chain's
-    /// row is where its hand-offs are drawn, and folding those would put one chain's
-    /// beginning to the right of another chain's end.
-    static let wrapAfterRows = 6
+    /// The fewest rows a lane ever packs to, however small the pane. Below this the grid
+    /// is wider than it is tall for no gain — the cards start running off the side
+    /// instead of the bottom.
+    static let minimumRowBudget = 3
+    /// The most columns a grid of loose loops spreads into. Width is the cheap axis, but
+    /// it is not free: past this the lane is wider than any display and the wrapping has
+    /// only traded a scroll down for a scroll across.
+    static let maximumLooseColumns = 8
+
+    /// How many rows fit in `height` points of pane, at the scale a canvas settles at
+    /// when it opens (`CanvasTransform.defaultFitFloor`) and after the lane's own
+    /// furniture — caption, padding, the rail's top margin — has taken its share.
+    ///
+    /// This is what makes the wrap dynamic: the budget is what the pane can actually
+    /// show, not a number picked once. A taller display packs fewer, wider columns; a
+    /// short window spreads the same loops further across.
+    static func rowBudget(forHeight height: CGFloat) -> Int {
+      let furniture = laneTop + CanvasBand.captionHeight + CanvasBand.padding * 2
+      let usable = height / CanvasTransform.defaultFitFloor - furniture
+      return max(minimumRowBudget, Int(usable / rowHeight))
+    }
+
+    /// The budget when no pane has been measured yet — what the main display could show.
+    /// The graph is opened on a monitor whether or not a `GeometryReader` has run.
+    static var displayRowBudget: Int {
+      let height = CGDisplayBounds(CGMainDisplayID()).height
+      return rowBudget(forHeight: height > 0 ? height : 900)
+    }
 
     static let columnWidth = card.width + columnGap
     static let depthWidth = card.width + depthGap
@@ -107,7 +128,7 @@ struct LaneLayout: Equatable {
   ///     `rowHeight(for:)`.
   init(
     graph: LoopGraph, roles: [UUID: CardEntryRole], origin: CGPoint = Metrics.origin,
-    rowHeight: CGFloat = Metrics.rowHeight
+    rowHeight: CGFloat = Metrics.rowHeight, rowBudget: Int = Metrics.displayRowBudget
   ) {
     // Everything nothing hands off to goes in column 0, one per row, and each chain flows
     // right along its own row.
@@ -160,7 +181,7 @@ struct LaneLayout: Equatable {
     // keep the lane readable without scrolling.
     let chainRows = placed.values.map(\.row).max().map { $0 + 1 } ?? 0
     let loose = graph.nodes.filter { !wired.contains($0.id) }
-    let looseColumns = Self.looseColumns(for: loose.count)
+    let looseColumns = Self.looseColumns(for: loose.count, rowBudget: rowBudget - chainRows)
     for (index, node) in loose.enumerated() {
       placed[node.id] = Slot(
         column: index % looseColumns, row: chainRows + index / looseColumns, isLoose: true)
@@ -199,12 +220,14 @@ struct LaneLayout: Equatable {
     return offsets
   }
 
-  /// How wide to pack `count` loose loops: one column until they would out-run the lane's
-  /// height, then as many as it takes to stay within it. A handful stays a column, which
-  /// is the shape a small graph has always had.
-  private static func looseColumns(for count: Int) -> Int {
-    guard count > Metrics.wrapAfterRows else { return 1 }
-    return max(1, Int((Double(count) / Double(Metrics.wrapAfterRows)).rounded(.up)))
+  /// How wide to pack `count` loose loops: one column until they would out-run the rows
+  /// the pane can show, then as many as it takes to stay within them. A handful stays a
+  /// column, which is the shape a small graph has always had.
+  private static func looseColumns(for count: Int, rowBudget: Int) -> Int {
+    let rows = max(Metrics.minimumRowBudget, rowBudget)
+    guard count > rows else { return 1 }
+    return min(
+      Metrics.maximumLooseColumns, max(1, Int((Double(count) / Double(rows)).rounded(.up))))
   }
 
   /// Every card one canvas can show: this graph's own loops, plus the insides of every
@@ -216,13 +239,16 @@ struct LaneLayout: Equatable {
   /// Node ids are unique across the whole tree, so one flat table serves every level; the
   /// levels are laid out over each other on purpose, since exactly one of them is ever on
   /// screen.
-  static func positions(forCanvas graph: LoopGraph) -> [UUID: CGPoint] {
+  static func positions(
+    forCanvas graph: LoopGraph, rowBudget: Int = Metrics.displayRowBudget
+  ) -> [UUID: CGPoint] {
     var placed = LaneLayout(
-      graph: graph, roles: CardEntryRole.roles(in: graph), rowHeight: rowHeight(for: graph)
+      graph: graph, roles: CardEntryRole.roles(in: graph), rowHeight: rowHeight(for: graph),
+      rowBudget: rowBudget
     ).positions
     for node in graph.nodes {
       guard let subGraph = node.subGraph else { continue }
-      placed.merge(positions(forCanvas: subGraph)) { current, _ in current }
+      placed.merge(positions(forCanvas: subGraph, rowBudget: rowBudget)) { current, _ in current }
     }
     return placed
   }

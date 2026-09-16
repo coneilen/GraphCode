@@ -305,13 +305,15 @@ struct GraphOverviewTests {
     // runs. A row each made the lane a card-wide ribbon several screens tall with its own
     // width empty beside it, which is what "the graph is skewed" means.
     let nodes = (0..<20).map { LoopNode(title: "loop-\($0)") }
-    let overview = GraphOverview(graphs: [
-      LoopGraph(project: Self.projectA, nodes: IdentifiedArray(uniqueElements: nodes))
-    ])
+    let pane: CGFloat = 900
+    let overview = GraphOverview(
+      graphs: [LoopGraph(project: Self.projectA, nodes: IdentifiedArray(uniqueElements: nodes))],
+      viewportHeight: pane)
 
     let columns = Set(overview.loops.map(\.position.x))
     let rows = Set(overview.loops.map(\.position.y))
-    #expect(rows.count <= LaneLayout.Metrics.wrapAfterRows)
+    // Packed to what the pane can show, not to a number picked once.
+    #expect(rows.count <= LaneLayout.Metrics.rowBudget(forHeight: pane))
     #expect(columns.count > 1)
     // Every card still lands inside the band drawn around the lane — the band is sized
     // to the lane it wrapped into, not to the four columns a chain can reach.
@@ -350,6 +352,27 @@ struct GraphOverviewTests {
     #expect(
       overview.loops.filter { $0.node.title.hasPrefix("loose") }
         .allSatisfy { $0.position.y > (at["root"]?.y ?? 0) })
+  }
+
+  @Test
+  func ashorterPaneSpreadsTheSameLoopsWiderRatherThanTaller() {
+    // The dynamic half: the same graph in half the pane is the same graph laid out
+    // wider. Height is what runs out on a display; width is what there is spare.
+    let nodes = (0..<24).map { LoopNode(title: "loop-\($0)") }
+    func lane(inPaneOf height: CGFloat) -> (rows: Int, columns: Int) {
+      let overview = GraphOverview(
+        graphs: [
+          LoopGraph(project: Self.projectA, nodes: IdentifiedArray(uniqueElements: nodes))
+        ], viewportHeight: height)
+      return (
+        Set(overview.loops.map(\.position.y)).count, Set(overview.loops.map(\.position.x)).count
+      )
+    }
+
+    let tall = lane(inPaneOf: 1600)
+    let short = lane(inPaneOf: 700)
+    #expect(short.rows < tall.rows)
+    #expect(short.columns > tall.columns)
   }
 
   @Test

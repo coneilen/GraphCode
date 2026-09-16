@@ -135,17 +135,10 @@ struct CanvasBandView: View {
   /// The cost is the one the handoff named: N rootless loops is N lines. That is a real
   /// starburst at twenty, and the answer then is to wire the graph up — which is what
   /// the lines are for saying.
-  /// The ports the rail draws a line to: the ones in the block of cards beside it.
-  ///
-  /// A lane with more beginnings than fit in a column wraps into blocks laid side by
-  /// side (`LaneLayout`), and a connector reaching a card three columns out crosses every
-  /// card in between — which is what a hand-off between those cards looks like. Those
-  /// cards keep their port, which is what carries "this is a beginning" into greyscale
-  /// and zoom-out anyway, and lose the line.
-  private var tetheredPorts: [CGPoint] {
-    let firstColumn =
-      CanvasBand.originLane + CanvasBand.padding + LoopCardView.Metrics.size.width
-    return entryPorts.filter { $0.x - rect.minX < firstColumn }
+  /// How far into the band a port can sit and still be reached by a straight curve: the
+  /// first column of cards. Anything beyond it is routed instead — see `routed(from:to:)`.
+  private var firstColumnReach: CGFloat {
+    CanvasBand.originLane + CanvasBand.padding + LoopCardView.Metrics.size.width
   }
 
   @ViewBuilder
@@ -159,7 +152,7 @@ struct CanvasBandView: View {
       let originX = CanvasBand.originLane / 2
       let originY = rect.height / 2
       ZStack(alignment: .topLeading) {
-        ForEach(Array(tetheredPorts.enumerated()), id: \.offset) { _, port in
+        ForEach(Array(entryPorts.enumerated()), id: \.offset) { _, port in
           connector(
             from: CGPoint(x: originX, y: originY),
             to: CGPoint(x: port.x - rect.minX, y: port.y - rect.minY))
@@ -190,17 +183,54 @@ struct CanvasBandView: View {
   /// Curved, not straight, and quiet. A straight 1.5pt line between two cards is what an
   /// edge looks like; this one bends out of the origin and flattens into the port, which
   /// reads as structure rather than as a hand-off.
+  ///
+  /// A port past the first column is *routed* rather than curved to. A curve to a card
+  /// three columns out runs straight through the cards in between, and since they are
+  /// drawn over it, what shows is a line in each gap — which reads as those cards being
+  /// chained to each other. The route uses the lane's own empty corridors instead, so the
+  /// whole length of it stays visible.
   private func connector(from origin: CGPoint, to port: CGPoint) -> some View {
     Path { path in
-      path.move(to: origin)
-      let reach = max((port.x - origin.x) * 0.55, 20)
-      path.addCurve(
-        to: port,
-        control1: CGPoint(x: origin.x + reach, y: origin.y),
-        control2: CGPoint(x: port.x - reach, y: port.y))
+      if port.x - origin.x <= firstColumnReach {
+        path.move(to: origin)
+        let reach = max((port.x - origin.x) * 0.55, 20)
+        path.addCurve(
+          to: port,
+          control1: CGPoint(x: origin.x + reach, y: origin.y),
+          control2: CGPoint(x: port.x - reach, y: port.y))
+      } else {
+        routed(from: origin, to: port, into: &path)
+      }
     }
-    .stroke(CanvasBand.railTint, lineWidth: 1.5)
+    .stroke(
+      CanvasBand.railTint,
+      style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
   }
+
+  /// Down the origin's own lane, along the gap above the port's row, down the gap beside
+  /// its column, and in. Every leg runs in space the layout leaves empty — the origin
+  /// lane, a row gap, a column gap — so the line never passes behind a card.
+  private func routed(from origin: CGPoint, to port: CGPoint, into path: inout Path) {
+    let corridorY = port.y - (LoopCardView.Metrics.size.height + LaneLayout.Metrics.rowGap) / 2
+    let gutterX = port.x - LaneLayout.Metrics.columnGap / 2
+    let corner = min(CGFloat(10), abs(port.y - corridorY) / 2)
+
+    path.move(to: origin)
+    path.addLine(to: CGPoint(x: origin.x, y: corridorY - sign(corridorY - origin.y) * corner))
+    path.addQuadCurve(
+      to: CGPoint(x: origin.x + corner, y: corridorY),
+      control: CGPoint(x: origin.x, y: corridorY))
+    path.addLine(to: CGPoint(x: gutterX - corner, y: corridorY))
+    path.addQuadCurve(
+      to: CGPoint(x: gutterX, y: corridorY + corner),
+      control: CGPoint(x: gutterX, y: corridorY))
+    path.addLine(to: CGPoint(x: gutterX, y: port.y - corner))
+    path.addQuadCurve(
+      to: CGPoint(x: gutterX + corner, y: port.y), control: CGPoint(x: gutterX, y: port.y))
+    path.addLine(to: port)
+  }
+
+  private func sign(_ value: CGFloat) -> CGFloat { value < 0 ? -1 : 1 }
 
   // A chip with no name still earns the row: the project canvas draws its band
   // unlabelled — the pane already *is* the folder — but the worktree count is a fact

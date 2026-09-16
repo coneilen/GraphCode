@@ -78,7 +78,10 @@ struct GraphOverviewView: View {
       overview: GraphOverview(
         graphs: store.projects.map(\.graph),
         declaredEntries: Dictionary(
-          uniqueKeysWithValues: store.projects.map { ($0.id, $0.declaredEntryIDs) })),
+          uniqueKeysWithValues: store.projects.map { ($0.id, $0.declaredEntryIDs) }),
+        // Measured by the canvas's own `GeometryReader`, so resizing the window re-packs
+        // the lanes instead of leaving a graph that runs off the bottom of it.
+        viewportHeight: viewport.height),
       attentionItems: store.attentionItems)
 
     return canvas(derived)

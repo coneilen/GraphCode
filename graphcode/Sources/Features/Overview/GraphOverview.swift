@@ -126,7 +126,13 @@ struct GraphOverview: Equatable {
 
   init() {}
 
-  init(graphs: [LoopGraph], declaredEntries: [String: Set<UUID>] = [:]) {
+  /// - Parameter viewportHeight: the pane this will be drawn in, when it has been
+  ///   measured. The lanes pack their loose loops to what that pane can show, so the graph
+  ///   widens rather than running off the bottom of it — and re-lays itself out when the
+  ///   window is resized. Zero falls back to what the main display could show.
+  init(
+    graphs: [LoopGraph], declaredEntries: [String: Set<UUID>] = [:], viewportHeight: CGFloat = 0
+  ) {
     // The global graph's lane goes first — it's the one that dispatches into the others,
     // so reading top-to-bottom follows the direction work actually travels. Stable
     // partition rather than a sort, so the remaining folders keep sidebar order. A global
@@ -136,13 +142,23 @@ struct GraphOverview: Equatable {
       graphs.filter { $0.isGlobal && !$0.nodes.isEmpty } + graphs.filter { !$0.isGlobal }
     guard !lanes.isEmpty else { return }
 
+    // Every lane is drawn in the same pane, so the budget is shared between them: four
+    // folders each packing to the full height is four lanes of scrolling.
+    let budget =
+      viewportHeight > 0
+      ? max(
+        LaneLayout.Metrics.minimumRowBudget,
+        LaneLayout.Metrics.rowBudget(forHeight: viewportHeight) / lanes.count)
+      : LaneLayout.Metrics.displayRowBudget
+
     var laneTop = Metrics.laneTop
     var contentWidth =
       CGFloat(LaneLayout.Metrics.columns - 1) * LaneLayout.Metrics.depthWidth
       + Metrics.card.width
     for graph in lanes {
       let lane = Self.layOutLane(
-        graph, top: laneTop, declaredEntries: declaredEntries[graph.project.path] ?? [])
+        graph, top: laneTop, declaredEntries: declaredEntries[graph.project.path] ?? [],
+        rowBudget: budget)
       folders.append(lane.folder)
       loops.append(contentsOf: lane.loops)
       links.append(contentsOf: lane.links)
@@ -174,7 +190,8 @@ struct GraphOverview: Equatable {
   }
 
   private static func layOutLane(
-    _ graph: LoopGraph, top: CGFloat, declaredEntries: Set<UUID> = []
+    _ graph: LoopGraph, top: CGFloat, declaredEntries: Set<UUID> = [],
+    rowBudget: Int = LaneLayout.Metrics.displayRowBudget
   ) -> Lane {
     let path = graph.project.path
     let roles = CardEntryRole.roles(in: graph, declaredEntries: declaredEntries)
@@ -185,7 +202,8 @@ struct GraphOverview: Equatable {
     // own canvas gets, so the two views can't drift on what a graph looks like.
     let layout = LaneLayout(
       graph: graph, roles: roles,
-      origin: CGPoint(x: Metrics.firstLoopX, y: top + Metrics.firstRowInset))
+      origin: CGPoint(x: Metrics.firstLoopX, y: top + Metrics.firstRowInset),
+      rowBudget: rowBudget)
     let positions = layout.positions
 
     for node in graph.nodes {
