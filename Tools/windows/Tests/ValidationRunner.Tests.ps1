@@ -166,8 +166,8 @@ try {
       $windowsWorkflow -notmatch "Hardening\.Tests\.ps1 -Environment -SkipTrayLive") {
     throw "RED: hosted Windows CI does not explicitly declare unsupported interactive or WSL fixtures"
   }
-  if ($windowsShellWorkflow -notmatch "Tools/windows/uia-live-gate\.ps1") {
-    throw "RED: Windows shell CI does not include the UI Automation live gate"
+  if ($windowsShellWorkflow -notmatch '(?m)^\s*run:\s*\./Tools/windows/validate\.ps1 -Task windows-shell\b') {
+    throw "RED: Windows shell CI does not invoke the shell task containing live UI Automation"
   }
   $runnerSource = Get-Content $runner -Raw
   foreach ($source in @($runnerSource, $hardeningSource)) {
@@ -198,6 +198,21 @@ try {
       $macWorkflow -notmatch "mise install" -or
       $macWorkflow -notmatch "mise exec -- make test") {
     throw "RED: macOS CI does not install and execute pinned mise.toml tools"
+  }
+  $requiredWorkflows = [ordered]@{
+    "macos-shared-regression.yml" = $macWorkflow
+    "windows-shell.yml" = $windowsShellWorkflow
+    "windows-port-validation.yml" = $windowsPortWorkflow
+    "windows-hardening.yml" = $windowsWorkflow
+  }
+  foreach ($entry in $requiredWorkflows.GetEnumerator()) {
+    $trigger = [regex]::Match(
+      $entry.Value,
+      '(?ms)^  pull_request:(?<settings>.*?)(?=^[^\s#]|^  [A-Za-z_][A-Za-z0-9_-]*:|\z)')
+    $settings = [regex]::Replace($trigger.Groups["settings"].Value, '(?m)#.*$', '').Trim()
+    if (-not $trigger.Success -or $settings -notin @("", "{}")) {
+      throw "RED: $($entry.Key) must report required checks for every PR, including documentation-only changes"
+    }
   }
 } finally {
   Remove-Item -LiteralPath $foreignJunction -Recurse -Force -ErrorAction SilentlyContinue

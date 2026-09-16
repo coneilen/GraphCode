@@ -3,18 +3,6 @@ name: Windows port validation
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - ".github/workflows/windows-port-validation.yml"
-      - "Package.swift"
-      - "Package.resolved"
-      - "MailroomKit/**"
-      - "GraphcodeKit/**"
-      - "graphcode-cli/**"
-      - "graphcoded/**"
-      - "graphcode-windows/**"
-      - "windows-tests/**"
-      - "Tools/windows/**"
-      - "investigation/**"
 
 permissions:
   contents: read

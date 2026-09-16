@@ -21,6 +21,18 @@ The Windows port must have runnable commands before implementation fleets begin.
 | macOS format/lint | `make check` |
 | DCO commit range | `git log --format=%B <base>..HEAD` plus trailer validation |
 
+## Required PR checks
+
+The macOS shared-regression, Windows shell, Windows port, and Windows hardening
+workflows run on every pull request, including documentation-only changes.
+Workflow-level path/branch filters must not prevent their required check contexts
+from being reported. `ValidationRunner.Tests.ps1` guards the unfiltered triggers.
+This deliberately trades additional CI usage for reliable branch protection.
+
+Check names and job behavior are unchanged. Full-pinned and owned-environment
+hardening remain dispatch/schedule-gated as defined in the workflow; they are
+separate evidence, not required PR contexts. No merge-queue support is introduced.
+
 ## Winghostty fork
 
 `Tools/windows/bootstrap.ps1` checks out the public provider at the exact commit in

@@ -3,30 +3,6 @@ name: Windows shell validation
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - ".github/workflows/windows-shell.yml"
-      - "Package.swift"
-      - "Package.resolved"
-      - "MailroomKit/**"
-      - "GraphcodeKit/**"
-      - "graphcode-cli/**"
-      - "graphcoded/**"
-      - "windows-tests/**"
-      - "graphcode-windows/**"
-      - "Tools/windows/bootstrap.ps1"
-      - "Tools/windows/windows-shell.ps1"
-      - "Tools/windows/uia-live-gate.ps1"
-      - "Tools/windows/validate.ps1"
-      - "Tools/windows/Tests/WindowsShell.Tests.ps1"
-      - "Tools/windows/Tests/TrayDaemon.Tests.ps1"
-      - "Tools/windows/Tests/TrayLive.Tests.ps1"
-      - "Tools/windows/Tests/ValidationRunner.Tests.ps1"
-      - "Tools/windows/package.ps1"
-      - "Tools/windows/PACKAGING.md"
-      - "Tools/windows/Tests/Packaging.Tests.ps1"
-      - "Tools/windows/Tests/Packaging.RealLifecycle.Tests.ps1"
-      - "graphcode-windows/package-metadata.json"
-      - "investigation/windows-implementation-plan.md"
 
 permissions:
   contents: read
