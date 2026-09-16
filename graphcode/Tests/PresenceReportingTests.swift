@@ -379,8 +379,12 @@ struct PresenceReportingTests {
     // Every remaining state is a fact about the loop's place in the graph that no poll
     // improves on: a `.succeeded` node is finished whatever is still running in its pane.
     for state in LoopState.allCases where state != .running && state != .blocked {
-      #expect(node(state, .busy).displayState == state)
+      var attended = node(state, .busy)
+      attended.loopType = .turnBased
+      #expect(attended.displayState == state)
       #expect(node(state, .idle).displayState == state)
+      guard state != .succeeded && state != .failed else { continue }
+      #expect(node(state, .busy).displayState == state)
     }
   }
 

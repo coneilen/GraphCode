@@ -3,6 +3,10 @@ import Foundation
 import GraphcodeKit
 import Testing
 
+#if canImport(Darwin)
+  import Darwin
+#endif
+
 /// A resolved loop's session is ended to free the machine; the loop and its transcript
 /// stay, and opening it brings the conversation back (#346).
 @Suite
@@ -176,6 +180,82 @@ struct ResolvedSessionTests {
 
     #expect(await store.graph.nodes[id: id]?.state == .succeeded)
     #expect(errors.value.contains { $0.contains("may not hand itself a new goal") })
+  }
+
+  private func reading(_ state: LoopState, _ presence: Presence?) -> LoopNode {
+    LoopNode(
+      title: "Docs", loopType: .goalBased, goal: GoalSpec(summary: "Write it"),
+      presence: presence.map { PresenceReading(presence: $0, confidence: .reported) },
+      state: state)
+  }
+
+  @Test
+  func aFinishedGoalLoopAnsweringAFollowUpShowsRunningUntilTheTurnEnds() {
+    for state in [LoopState.succeeded, .failed] {
+      #expect(reading(state, .busy).displayState == .running)
+      #expect(reading(state, .awaitingInput).displayState == .awaitingInput)
+      #expect(reading(state, .idle).displayState == state)
+      #expect(reading(state, .absent).displayState == state)
+      #expect(reading(state, nil).displayState == state)
+      #expect(reading(state, .busy).isResolved)
+    }
+    for state in [LoopState.stalled, .stopped] {
+      #expect(reading(state, .busy).displayState == state)
+    }
+    var exited = reading(.succeeded, .busy)
+    exited.presence?.exitCode = 0
+    #expect(exited.displayState == .succeeded)
+  }
+
+  @Test
+  func aFollowUpToAFinishedLoopShowsRunningUntilItsSessionGoesQuietOrAway() async throws {
+    let answer = LockIsolated(Presence.busy)
+    let reads = LockIsolated(0)
+    let store = GraphStore(
+      onReadPresence: { _, _ in
+        reads.withValue { $0 += 1 }
+        return PresenceReading(presence: answer.value, confidence: .reported)
+      },
+      onSessionAlive: { _, _ in true },
+      onResumeSession: { _, _ in true })
+    var pair: [Int32] = [0, 0]
+    #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
+    defer {
+      OutboundChannels.close(pair[0])
+      close(pair[1])
+    }
+    await store.addConnection(id: UUID(), fileDescriptor: pair[0])
+    await store.handle(
+      .createNode(
+        NodeDraft(title: "Docs", loopType: .goalBased, goal: GoalSpec(summary: "Write it"))))
+    let id = await store.graph.nodes[0].id
+    await store.handle(.completeNode(id, result: nil, from: id))
+
+    await store.pollPresence()
+    var node = try #require(await store.graph.nodes[id: id])
+    #expect(node.state == .succeeded)
+    #expect(node.displayState == .running)
+
+    answer.withValue { $0 = .idle }
+    await store.pollPresence()
+    #expect(await store.graph.nodes[id: id]?.displayState == .succeeded)
+
+    answer.withValue { $0 = .absent }
+    await store.pollPresence()
+    let readsOnceGone = reads.value
+    await store.pollPresence()
+    #expect(reads.value == readsOnceGone)
+
+    await store.handle(.resumeSession(id))
+    let readsBeforeResume = reads.value
+    await store.pollPresence()
+    await store.pollPresence()
+    #expect(reads.value == readsBeforeResume + 2)
+    answer.withValue { $0 = .busy }
+    await store.pollPresence()
+    node = try #require(await store.graph.nodes[id: id])
+    #expect(node.displayState == .running)
+    #expect(node.state == .succeeded)
   }
 
   @Test

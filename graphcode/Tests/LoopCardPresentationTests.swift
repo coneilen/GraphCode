@@ -153,6 +153,21 @@ struct LoopCardPresentationTests {
   }
 
   @Test
+  func aFinishedLoopAnsweringAFollowUpSaysWhatItIsDoing() {
+    var met = LoopNode(
+      title: "a", loopType: .goalBased, goal: GoalSpec(summary: "the suite is green"),
+      state: .succeeded)
+    met.resolution = LoopResolution(basis: .nativeGoal)
+    met.activity = "reading GraphStore.swift"
+    met.presence = PresenceReading(presence: .busy, confidence: .reported)
+    #expect(LoopCardPresentation(node: met).word == LoopState.running.displayWord(for: .goalBased))
+    #expect(LoopCardPresentation(node: met).liveLine == "reading GraphStore.swift")
+
+    met.presence = PresenceReading(presence: .idle, confidence: .reported)
+    #expect(LoopCardPresentation(node: met).liveLine == "goal met")
+  }
+
+  @Test
   func aHeldLeadersCardSaysWhatItIsWaitingOn() {
     var leader = LoopNode(
       title: "Lead", loopType: .goalBased, goal: GoalSpec(summary: "Merge"), state: .running)

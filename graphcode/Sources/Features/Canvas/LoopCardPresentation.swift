@@ -102,6 +102,9 @@ struct LoopCardPresentation: Equatable {
     if node.displayState == .stalled, let why = collapsed(node.stallReason) { return why }
     if node.displayState == .stopped, let failure = node.launchFailure { return failure.title }
     if node.isResolved, let resolution = node.resolution {
+      if node.displayState == .running, let reported = collapsed(node.activity) {
+        return reported
+      }
       return collapsed(resolution.displayLine)
     }
     if !node.isResolved, let held = node.pendingCompletion {

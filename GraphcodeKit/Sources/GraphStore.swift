@@ -281,6 +281,11 @@ public actor GraphStore {
   private var pendingResolutionNudges: [(nodeID: UUID, text: String)] = []
   private var resolvedSessionEnders: [UUID: Task<Void, Never>] = [:]
   private var sessionEndCandidates: Set<UUID> = []
+  /// When a human last opened a resolved loop, so its session is read again even though the
+  /// last reading found none. Cleared by the first reading that finds it live; a resume over
+  /// ssh can take minutes, so absent readings before that do not end the watch.
+  private var resolvedSessionsOpened: [UUID: Date] = [:]
+  static let resolvedSessionOpenWindow: TimeInterval = 600
   /// A reopened loop's new goal on its way to the session: `nil` while the delivery is
   /// being arranged, then the follow-up carrying it. A `node done` sent before it lands
   /// is about the old goal.
@@ -1162,7 +1167,8 @@ public actor GraphStore {
     guard let onReadActivity else { return false }
     var changed = false
     for node in graph.nodes {
-      let working = !node.isResolved && node.presence?.presence == .busy
+      let working =
+        (!node.isResolved || node.answersPastResolution) && node.presence?.presence == .busy
       let reported = working ? await onReadActivity(node, graph.project.path) : nil
       guard graph.nodes[id: node.id]?.activity != reported else { continue }
       graph.nodes[id: node.id]?.activity = reported
@@ -1344,28 +1350,49 @@ public actor GraphStore {
   /// ago keeps claiming to be working — which is the whole failure this reading exists to
   /// end, and it would be perverse to reintroduce it here.
   ///
-  /// Resolved nodes are skipped. Their work is over by definition, nothing is going to
-  /// change what the graph believes about them, and probing a session per resolved node
-  /// costs a subprocess for an answer no surface reads.
+  /// Resolved nodes are skipped, except a finished goal loop whose session may be answering
+  /// a follow-up (`LoopNode.answersPastResolution`). Those are read until a reading finds
+  /// the session gone or cannot be taken, and again once someone opens the loop, so a graph
+  /// of long-finished loops costs no subprocess per tick — and a hung backend does not
+  /// spend a read deadline per finished loop on every tick.
   /// Returns whether any reading actually changed, which is what keeps the poller from
   /// telling every client the graph moved when nothing did.
   @discardableResult
   private func refreshPresence() async -> Bool {
     guard onReadPresence != nil else { return false }
     var changed = false
-    for node in graph.nodes where !node.isResolved {
+    for node in graph.nodes where readsPresence(of: node) {
       guard let reading = await presenceReading(of: node) else { continue }
       guard graph.nodes[id: node.id]?.presence != reading else { continue }
       graph.nodes[id: node.id]?.presence = reading
       changed = true
+      if node.isResolved, graph.nodes[id: node.id]?.presenceShowsLiveSession == true {
+        resolvedSessionsOpened.removeValue(forKey: node.id)
+      }
       // The backstop for a session no launch of ours checked: a zsh that exits 127 could
       // not find its command, and the probe says whether that command was the agent.
-      if reading.exitCode == ProviderPath.commandNotFoundStatus, onFindMissingProvider != nil {
+      if reading.exitCode == ProviderPath.commandNotFoundStatus, onFindMissingProvider != nil,
+        !node.isResolved
+      {
         Task { await self.stopIfProviderMissing(node) }
       }
     }
     if refreshActiveDependents() { changed = true }
     return changed
+  }
+
+  private func readsPresence(of node: LoopNode) -> Bool {
+    guard node.isResolved else { return true }
+    guard node.answersPastResolution else { return false }
+    if let opened = resolvedSessionsOpened[node.id],
+      Date().timeIntervalSince(opened) < Self.resolvedSessionOpenWindow
+    {
+      return true
+    }
+    switch node.presence?.presence {
+    case .absent, .unknown: return false
+    case .busy, .idle, .awaitingInput, nil: return true
+    }
   }
 
   private func refreshActiveDependents() -> Bool {
@@ -1932,6 +1959,7 @@ public actor GraphStore {
     guard let node = graph.nodes[id: nodeID], node.isResolved, node.state != .stopped,
       let onResumeSession
     else { return }
+    resolvedSessionsOpened[nodeID] = Date()
     let path = graph.project.path
     if await onSessionAlive?(node, path) == true { return }
     var quiet = node
@@ -3838,6 +3866,7 @@ public actor GraphStore {
     if graph.nodes[id: nodeID]?.isResolved == false {
       resolvedSessionEnders.removeValue(forKey: nodeID)?.cancel()
       sessionEndCandidates.remove(nodeID)
+      resolvedSessionsOpened.removeValue(forKey: nodeID)
     }
   }
 
