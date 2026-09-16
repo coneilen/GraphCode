@@ -62,10 +62,9 @@ struct PresencePollingTests {
   }
 
   @Test
-  func aFinishedLoopIsAskedOnlyWhileItsSessionCouldBeAnsweringAFollowUp() async {
-    // Resolved loops are over, so probing one is a subprocess spent on an answer nobody
-    // reads — except a finished goal loop whose session a human may be asking something,
-    // and only until a reading finds that session gone.
+  func aFinishedLoopIsAskedOnlyUntilItsSessionIsGone() async {
+    // A finished loop's session may be answering a follow-up, so it is read — but only
+    // until a reading finds that session gone or unreadable.
     let probe = Probe()
     var turn = node("turn", .succeeded)
     turn.loopType = .turnBased
@@ -80,10 +79,15 @@ struct PresencePollingTests {
     defer { close(descriptor) }
 
     await store.pollPresence()
-    #expect(Set(await probe.asked) == ["running", "blocked", "succeeded", "failed"])
+    #expect(
+      Set(await probe.asked)
+        == ["running", "blocked", "succeeded", "failed", "stopped", "stalled", "turn"])
 
     await probe.answer("succeeded", with: .absent)
     await probe.answer("failed", with: .unknown)
+    await probe.answer("stopped", with: .absent)
+    await probe.answer("stalled", with: .absent)
+    await probe.answer("turn", with: .absent)
     await store.pollPresence()
     await probe.reset()
     await store.pollPresence()

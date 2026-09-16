@@ -1168,7 +1168,7 @@ public actor GraphStore {
     var changed = false
     for node in graph.nodes {
       let working =
-        (!node.isResolved || node.answersPastResolution) && node.presence?.presence == .busy
+        node.presence?.presence == .busy
       let reported = working ? await onReadActivity(node, graph.project.path) : nil
       guard graph.nodes[id: node.id]?.activity != reported else { continue }
       graph.nodes[id: node.id]?.activity = reported
@@ -1350,11 +1350,11 @@ public actor GraphStore {
   /// ago keeps claiming to be working — which is the whole failure this reading exists to
   /// end, and it would be perverse to reintroduce it here.
   ///
-  /// Resolved nodes are skipped, except a finished goal loop whose session may be answering
-  /// a follow-up (`LoopNode.answersPastResolution`). Those are read until a reading finds
-  /// the session gone or cannot be taken, and again once someone opens the loop, so a graph
-  /// of long-finished loops costs no subprocess per tick — and a hung backend does not
-  /// spend a read deadline per finished loop on every tick.
+  /// Resolved nodes are read too, because a finished loop's session may be answering a
+  /// follow-up (`LoopNode.displayState`) — but only until a reading finds the session gone
+  /// or cannot be taken, and again once someone opens the loop, so a graph of long-finished
+  /// loops costs no subprocess per tick — and a hung backend does not spend a read
+  /// deadline per finished loop on every tick.
   /// Returns whether any reading actually changed, which is what keeps the poller from
   /// telling every client the graph moved when nothing did.
   @discardableResult
@@ -1383,7 +1383,6 @@ public actor GraphStore {
 
   private func readsPresence(of node: LoopNode) -> Bool {
     guard node.isResolved else { return true }
-    guard node.answersPastResolution else { return false }
     if let opened = resolvedSessionsOpened[node.id],
       Date().timeIntervalSince(opened) < Self.resolvedSessionOpenWindow
     {

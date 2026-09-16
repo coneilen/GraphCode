@@ -120,11 +120,10 @@ extension LoopState {
 }
 
 extension LoopNode {
-  /// What the agent tab's dot reports. A finished goal loop answering a follow-up shows its
-  /// work; otherwise `state`, because `displayState` also reads a turn that simply ended at
-  /// a prompt as a question, and the tab's "asks" must mean one was asked.
+  /// What the agent tab's dot reports: a working session's RUNNING, and otherwise `state`,
+  /// so the tab's "asks" appears only once the graph has recorded a question.
   var tabState: LoopState {
-    answersPastResolution && displayState == .running ? .running : state
+    displayState == .running ? .running : state
   }
 }
 
