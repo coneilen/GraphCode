@@ -46,6 +46,24 @@ provider rather than a placeholder implementation:
 | Windows CLI compatibility | `pwsh Tools/windows/validate.ps1 -Task hardening` |
 | Agent/session compatibility | `pwsh Tools/windows/validate.ps1 -Task all -SkipTrayLive -SkipWslRemoteE2E` on hosted runners |
 
+## Shell request correlation
+
+The shell gate and real-product hardening delay stub replies by 150 ms to exercise
+project-subscription changes with requests still outstanding. The normal stub uses
+the production listener's 64 KiB pipe buffers; the separate non-reading fixture
+retains zero-sized buffers to exercise backpressure.
+
+Subscription reconnects drain pending v1/v2 responses before closing the pipe,
+bounded by the existing 1.5-second negotiation interval. Explicit reconnect and
+close actions do not wait for that drain. The native tests also verify that
+repeated subscription changes cannot extend the deadline.
+
+`STUB_DAEMON_EVIDENCE_JSON` records request/response counts, unanswered IDs and
+commands, and the stub error before assertions run. Failed repeated hardening
+prints its captured child output rather than discarding it. Session/resource
+tracking uses exact test-owned CIM process matches and their descendants, not a
+global `zmx list` that can hang on unrelated sessions.
+
 ## Remote SSH
 
 Remote validation uses controlled POSIX hosts and sanitized fixtures:

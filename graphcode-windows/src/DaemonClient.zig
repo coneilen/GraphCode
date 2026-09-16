@@ -3,6 +3,7 @@ const FrameBuffer = @import("FrameBuffer.zig").FrameBuffer;
 const Wire = @import("Wire.zig");
 const Forms = @import("Forms.zig");
 const c = @import("Win32.zig").c;
+const ReconnectDecision = enum { none, ready, drain_timeout };
 
 pub const EventCallback = *const fn (
     context: ?*anyopaque,
@@ -25,6 +26,8 @@ pub const DaemonClient = struct {
     stop_worker: bool = false,
     want_connected: bool = false,
     reconnect_requested: bool = false,
+    subscription_reconnect_requested: bool = false,
+    subscription_reconnect_deadline_ms: i64 = 0,
     retry_now: bool = false,
     outbound: [outbound_capacity][]u8 = undefined,
     outbound_request_ids: [outbound_capacity]? [36]u8 = [_]? [36]u8{null} ** outbound_capacity,
@@ -114,11 +117,15 @@ pub const DaemonClient = struct {
 
         if (self.subscription_path.len != 0) self.allocator.free(self.subscription_path);
         self.subscription_path = copy;
-        self.reconnect_requested = true;
+        if (!self.subscription_reconnect_requested) {
+            self.subscription_reconnect_deadline_ms = nowMilliseconds() + negotiation_timeout_ms;
+        }
+        self.subscription_reconnect_requested = true;
         self.retry_now = true;
+        self.state = .reconnecting;
+        self.last_error = "";
         self.condition.signal();
         self.mutex.unlock();
-        self.publishState(.reconnecting, "");
     }
 
     pub fn setSubgraphAddress(self: *DaemonClient, node_id: ?[]const u8) void {
@@ -242,6 +249,8 @@ pub const DaemonClient = struct {
         self.mutex.lock();
         self.want_connected = false;
         self.reconnect_requested = false;
+        self.subscription_reconnect_requested = false;
+        self.subscription_reconnect_deadline_ms = 0;
         self.clearOutboundLocked();
         self.condition.signal();
         self.mutex.unlock();
@@ -616,9 +625,7 @@ pub const DaemonClient = struct {
             self.mutex.lock();
             const stop = self.stop_worker;
             const want_connected = self.want_connected;
-            const reconnect_pending = self.reconnect_requested;
             const retry_immediately = self.retry_now;
-            self.reconnect_requested = false;
             self.retry_now = false;
             self.mutex.unlock();
             if (stop) break;
@@ -631,12 +638,16 @@ pub const DaemonClient = struct {
                 continue;
             }
 
-            if (reconnect_pending) {
+            const reconnect_decision = self.takeReconnect(nowMilliseconds());
+            if (reconnect_decision != .none) {
                 self.closeHandleOnly();
                 self.clearPendingRequests();
                 self.retry_at_ms = nowMilliseconds();
                 self.retry_delay_ms = reconnect_initial_ms;
-                self.publishState(.reconnecting, "");
+                self.publishState(
+                    .reconnecting,
+                    if (reconnect_decision == .drain_timeout) "daemon subscription drain timed out" else "",
+                );
             }
             if (retry_immediately) self.retry_at_ms = 0;
 
@@ -667,6 +678,23 @@ pub const DaemonClient = struct {
         self.clearPendingRequests();
         self.clearQueues();
         self.publishState(.disconnected, "");
+    }
+
+    fn takeReconnect(self: *DaemonClient, now: i64) ReconnectDecision {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (!self.reconnect_requested and !self.subscription_reconnect_requested) return .none;
+        var decision: ReconnectDecision = .ready;
+        const pending = self.pending_request_count != 0 or self.v1_pending_expectation != null or self.worker_busy;
+        // A subscription change must not abandon replies already being written by the daemon.
+        if (!self.reconnect_requested and self.pipe != c.INVALID_HANDLE_VALUE and pending) {
+            if (now < self.subscription_reconnect_deadline_ms) return .none;
+            decision = .drain_timeout;
+        }
+        self.reconnect_requested = false;
+        self.subscription_reconnect_requested = false;
+        self.subscription_reconnect_deadline_ms = 0;
+        return decision;
     }
 
     fn waitForWork(self: *DaemonClient, milliseconds: u64) bool {
@@ -1158,6 +1186,86 @@ fn writeAll(handle: c.HANDLE, bytes: []const u8) !void {
 
 test "daemon client startup state fits the default stack" {
     try std.testing.expect(@sizeOf(DaemonClient) < 1024 * 1024);
+}
+
+test "subscription reconnect drains correlated responses before closing the connection" {
+    var client = try DaemonClient.init(std.testing.allocator);
+    defer client.deinit();
+    client.pipe = c.CreateEventW(null, 1, 0, null);
+    try std.testing.expect(client.pipe != null);
+    defer client.closeHandleOnly();
+    client.state = .connected;
+    var request_id: [36]u8 = undefined;
+    makeRequestID(&request_id, 1);
+    try std.testing.expect(client.trackRequest(&request_id));
+
+    client.setSubscription("C:\\next-project");
+    try std.testing.expectEqual(ReconnectDecision.none, client.takeReconnect(nowMilliseconds()));
+    try std.testing.expectEqual(@as(usize, 1), client.pending_request_count);
+    const response = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"success\":true}}",
+        .{request_id},
+    );
+    defer std.testing.allocator.free(response);
+    try std.testing.expect(client.handleFrame(response));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_request_count);
+    try std.testing.expectEqual(ReconnectDecision.ready, client.takeReconnect(nowMilliseconds()));
+    try std.testing.expectEqual(ReconnectDecision.none, client.takeReconnect(nowMilliseconds()));
+}
+
+test "subscription drain is bounded and an explicit reconnect bypasses it" {
+    var client = try DaemonClient.init(std.testing.allocator);
+    defer client.deinit();
+    client.pipe = c.CreateEventW(null, 1, 0, null);
+    try std.testing.expect(client.pipe != null);
+    defer client.closeHandleOnly();
+    client.state = .connected;
+    client.pending_request_count = 1;
+    client.setSubscription("C:\\next-project");
+    try std.testing.expectEqual(ReconnectDecision.none, client.takeReconnect(nowMilliseconds()));
+    try std.testing.expectEqual(ReconnectDecision.drain_timeout, client.takeReconnect(std.math.maxInt(i64)));
+
+    client.setSubscription("C:\\another-project");
+    client.reconnect();
+    try std.testing.expectEqual(ReconnectDecision.ready, client.takeReconnect(nowMilliseconds()));
+}
+
+test "closing the client cancels a deferred subscription reconnect" {
+    var client = try DaemonClient.init(std.testing.allocator);
+    defer client.deinit();
+    client.pending_request_count = 1;
+    client.setSubscription("C:\\next-project");
+    client.close();
+    try std.testing.expectEqual(ReconnectDecision.none, client.takeReconnect(nowMilliseconds()));
+}
+
+test "repeated subscription changes do not extend the drain deadline" {
+    var client = try DaemonClient.init(std.testing.allocator);
+    defer client.deinit();
+    client.setSubscription("C:\\first-project");
+    const deadline = client.subscription_reconnect_deadline_ms;
+    client.setSubscription("C:\\latest-project");
+    try std.testing.expectEqual(deadline, client.subscription_reconnect_deadline_ms);
+    try std.testing.expectEqualStrings("C:\\latest-project", client.subscription_path);
+}
+
+test "subscription reconnect also waits for legacy response accounting" {
+    var client = try DaemonClient.init(std.testing.allocator);
+    defer client.deinit();
+    client.pipe = c.CreateEventW(null, 1, 0, null);
+    try std.testing.expect(client.pipe != null);
+    defer client.closeHandleOnly();
+    client.mode = .v1;
+    client.state = .connected;
+    client.v1_pending_count = 1;
+    client.v1_pending_expectation = .graph_changed;
+    client.setSubscription("C:\\next-project");
+    try std.testing.expectEqual(ReconnectDecision.none, client.takeReconnect(nowMilliseconds()));
+    try std.testing.expect(client.handleFrame(
+        "{\"version\":1,\"kind\":\"event\",\"event\":{\"graphChanged\":{}}}",
+    ));
+    try std.testing.expectEqual(ReconnectDecision.ready, client.takeReconnect(nowMilliseconds()));
 }
 
 test "new negotiations reset legacy fallback state to v2 framing" {

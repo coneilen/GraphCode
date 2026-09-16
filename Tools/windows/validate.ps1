@@ -646,6 +646,7 @@ function Invoke-Task([string] $name) {
           -Zig0160 $zig0160 `
           -DaemonRuntimeDirectory $daemonRuntime `
           -UseStubDaemon `
+          -StubResponseDelayMilliseconds 150 `
           -SkipTrayLive:$SkipTrayLive `
           -Stress
       }

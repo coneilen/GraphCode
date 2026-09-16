@@ -11,6 +11,8 @@ param(
   [switch] $SkipTrayLive,
   [switch] $Stress,
   [switch] $UseStubDaemon,
+  [ValidateRange(0, 1000)]
+  [int] $StubResponseDelayMilliseconds = 0,
   [string] $Version
 )
 
@@ -79,21 +81,27 @@ function Test-TestSessionProcess([object] $process) {
 }
 
 function Get-ZmxSessionRecords {
-  @(& $env:GRAPHCODE_ZMX list 2>$null | ForEach-Object {
-    if ($_ -match "name=([^\s]+)\s+pid=(\d+)") {
-      [pscustomobject]@{ Name = $Matches[1]; Pid = [int] $Matches[2] }
+  $names = @($testSessionIds | ForEach-Object { [regex]::Escape($_) })
+  $names += [regex]::Escape($sessionPrefix) + "-[A-Za-z0-9_-]+"
+  $pattern = "(?<![A-Za-z0-9_-])(?:" + ($names -join "|") + ")(?![A-Za-z0-9_-])"
+  foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name = 'zmx.exe'" -ErrorAction Stop)) {
+    if (-not $process.CommandLine) { continue }
+    foreach ($match in [regex]::Matches($process.CommandLine, $pattern)) {
+      [pscustomobject]@{ Name = $match.Value; Pid = [int] $process.ProcessId }
     }
-  })
+  }
 }
 
 function Record-TestOwnedSessions {
-  foreach ($record in @(Get-ZmxSessionRecords)) {
-    if (($testSessionIds -contains $record.Name) -or
-        $record.Name.StartsWith($sessionPrefix, [StringComparison]::Ordinal)) {
-      [void] $ownedSessionNames.Add($record.Name)
-      [void] $ownedProcessIds.Add($record.Pid)
+  $records = @(Get-ZmxSessionRecords)
+  foreach ($record in $records) {
+    [void] $ownedSessionNames.Add($record.Name)
+    [void] $ownedProcessIds.Add($record.Pid)
+  }
+  if ($records.Count -gt 0) {
+    foreach ($processId in @(Get-ProcessTreeIds @($records.Pid))) {
+      [void] $ownedProcessIds.Add($processId)
     }
-
   }
 }
 
@@ -234,7 +242,9 @@ try {
       "-PipeName",
       $pipeName,
       "-ResultPath",
-      $stubResult
+      $stubResult,
+      "-ResponseDelayMilliseconds",
+      $StubResponseDelayMilliseconds
     )
     $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\$pipeName"
     $env:GRAPHCODE_SHELL_REQUIRE_DAEMON = "1"
@@ -267,6 +277,7 @@ try {
       throw "Stub daemon did not write protocol evidence"
     }
     $evidence = Get-Content -LiteralPath $stubResult -Raw | ConvertFrom-Json
+    Write-Host ("STUB_DAEMON_EVIDENCE_JSON=" + ($evidence | ConvertTo-Json -Compress -Depth 6))
     foreach ($property in @(
         "protocolConnected",
         "correlatedRequests",

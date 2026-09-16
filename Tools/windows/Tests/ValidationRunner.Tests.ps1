@@ -75,6 +75,10 @@ try {
   }
   $hardeningSource = Get-Content (Join-Path $PSScriptRoot "Hardening.Tests.ps1") -Raw
   if ($hardeningSource -notmatch
+      '(?s)if \(\$LASTEXITCODE -ne 0\) \{\s*\$output \| Write-Output\s*throw "hardening repeated run') {
+    throw "RED: failed repeated hardening discards its child diagnostics"
+  }
+  if ($hardeningSource -notmatch
       '(?s)\$shellVersion\s*=\s*\(& \$shell --version.*?-Version \$shellVersion') {
     throw "RED: post-release hardening does not preserve the built shell version"
   }
@@ -102,6 +106,11 @@ try {
     throw "RED: Windows shell CI does not include the UI Automation live gate"
   }
   $runnerSource = Get-Content $runner -Raw
+  foreach ($source in @($runnerSource, $hardeningSource)) {
+    if ($source -notmatch '-StubResponseDelayMilliseconds 150') {
+      throw "RED: shell validation does not exercise delayed correlated responses"
+    }
+  }
   if ($runnerSource -notmatch '(?s)Pinned GraphCode Windows shell build and smoke.*?Native UI Automation live gate.*?uia-live-gate\.ps1') {
     throw "RED: Windows shell validation does not execute the UI Automation live gate"
   }

@@ -4,6 +4,8 @@ param(
   [string] $PipeName,
   [Parameter(Mandatory)]
   [string] $ResultPath,
+  [ValidateRange(0, 1000)]
+  [int] $ResponseDelayMilliseconds = 0,
   [switch] $NonReading
 )
 
@@ -82,7 +84,9 @@ function Write-Result {
     protocolConnected = $connectionCount -gt 0
     correlatedRequests = $seenRequests.Count -ge 2 -and
       (@($seenRequests | Where-Object { -not $seenResponses.Contains($_) }).Count -eq 0)
+    connectionCount = $connectionCount
     requestCount = $seenRequests.Count
+    responseCount = $seenResponses.Count
     unansweredRequests = @($seenRequests | Where-Object { -not $seenResponses.Contains($_) })
     unansweredCommands = @($seenRequests | Where-Object {
         -not $seenResponses.Contains($_)
@@ -99,12 +103,15 @@ function Write-Result {
 
 try {
   while ($connectionCount -lt 32) {
+    $bufferSize = if ($NonReading) { 0 } else { 64 * 1024 }
     $server = [IO.Pipes.NamedPipeServerStream]::new(
       $PipeName,
       [IO.Pipes.PipeDirection]::InOut,
       1,
       [IO.Pipes.PipeTransmissionMode]::Byte,
-      [IO.Pipes.PipeOptions]::None
+      [IO.Pipes.PipeOptions]::None,
+      $bufferSize,
+      $bufferSize
     )
     try {
       $server.WaitForConnection()
@@ -146,6 +153,9 @@ try {
           $quickChats.Replace("{0}", [string]$frame.requestID)
         } else {
           $success.Replace("{0}", [string]$frame.requestID)
+        }
+        if ($ResponseDelayMilliseconds -gt 0) {
+          Start-Sleep -Milliseconds $ResponseDelayMilliseconds
         }
         if (-not (Send-Frame $server $response)) { break }
         [void] $seenResponses.Add([string]$frame.requestID)

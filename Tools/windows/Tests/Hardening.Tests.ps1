@@ -300,6 +300,7 @@ function Invoke-RealMatrix {
     $shellScript = Join-Path $repoRoot "Tools\windows\windows-shell.ps1"
     & $pwsh -NoProfile -File $shellScript -WinghosttyRoot $wing -ZmxRoot $zmxRoot `
       -Zig0152 $zig0152 -Zig0160 $zig0160 -SkipBuild -Stress -UseStubDaemon `
+      -StubResponseDelayMilliseconds 150 `
       -SkipTrayLive:$SkipTrayLive -Version $shellVersion
     Assert-True ($LASTEXITCODE -eq 0) "real GraphCode shell matrix failed"
     $productAfterWorkload = Get-ProductResourceSample $productRoots
@@ -485,6 +486,7 @@ if ($Run -eq 0) {
     if ($SkipTrayLive) { $childArgs += "-SkipTrayLive" }
     $output = & $pwsh @childArgs
     if ($LASTEXITCODE -ne 0) {
+      $output | Write-Output
       throw "hardening repeated run $index failed with exit code $LASTEXITCODE"
     }
     $runs.Add(($output -join "`n"))

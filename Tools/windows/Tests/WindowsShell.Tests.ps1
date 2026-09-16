@@ -34,6 +34,45 @@ $appSource = Get-Content (Join-Path $shellRoot "src\App.zig") -Raw
 $mainWindowSource = Get-Content (Join-Path $shellRoot "src\MainWindow.zig") -Raw
 $nativeFormsSource = Get-Content (Join-Path $shellRoot "src\NativeForms.zig") -Raw
 $inputSource = Get-Content (Join-Path $shellRoot "src\InputRouter.zig") -Raw
+$stubSource = Get-Content (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") -Raw
+Assert-Contract ($stubSource -match '\$bufferSize = if \(\$NonReading\) \{ 0 \} else \{ 64 \* 1024 \}' -and
+  $stubSource -match '(?s)NamedPipeServerStream.*?\$bufferSize,\s*\$bufferSize') `
+  "normal stub buffering must match production while non-reading mode retains backpressure"
+Assert-Contract ($stubSource -match 'Start-Sleep -Milliseconds \$ResponseDelayMilliseconds') `
+  "stub cannot exercise delayed request completion"
+Assert-Contract ($shellSource -match '(?s)\$evidence = .*?STUB_DAEMON_EVIDENCE_JSON=.*?foreach \(\$property') `
+  "stub protocol evidence is not emitted before validation can fail"
+Assert-Contract ($shellSource -notmatch '\$env:GRAPHCODE_ZMX list') `
+  "session tracking must not block on unrelated zmx namespaces"
+& {
+  $sessionPrefix = "gs-owned"
+  $testSessionIds = @("11111111-1111-4111-8111-111111111111")
+  $processFixtures = @(
+    [pscustomobject]@{ ProcessId = 101; CommandLine = 'zmx.exe --daemon gs-owned-pane' },
+    [pscustomobject]@{ ProcessId = 102; CommandLine = 'zmx.exe attach "11111111-1111-4111-8111-111111111111"' },
+    [pscustomobject]@{ ProcessId = 103; CommandLine = 'zmx.exe --daemon gs-other-pane' },
+    [pscustomobject]@{ ProcessId = 104; CommandLine = 'zmx.exe --daemon prefix-gs-owned-pane' },
+    [pscustomobject]@{ ProcessId = 105; CommandLine = 'zmx.exe --daemon 11111111-1111-4111-8111-111111111111-suffix' },
+    [pscustomobject]@{ ProcessId = 106; CommandLine = $null }
+  )
+  function Get-CimInstance { $processFixtures }
+  $tokens = $null
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseInput(
+    $shellSource, [ref]$tokens, [ref]$errors)
+  $function = $ast.Find({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Get-ZmxSessionRecords"
+    }, $true)
+  . ([scriptblock]::Create($function.Extent.Text))
+  $records = @(Get-ZmxSessionRecords)
+  Assert-Contract (($records.Pid -join ",") -eq "101,102") `
+    "session tracking included a foreign or partial-match process"
+  Assert-Contract (($records.Name -join ",") -eq
+    "gs-owned-pane,11111111-1111-4111-8111-111111111111") `
+    "session tracking did not preserve exact owned names"
+}
 if ($shellSource -match '(?m)^\s*Write-OwnedResourceMetrics\s*$') {
   throw "Windows shell contract: empty resource metric phase"
 }
