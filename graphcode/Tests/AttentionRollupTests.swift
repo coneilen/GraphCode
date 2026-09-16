@@ -184,6 +184,32 @@ struct AttentionRollupTests {
   }
 
   @Test
+  func aStrandedLoopThatIsAlsoAskingSomethingGetsOneRow() {
+    // Both readings are true at once: the session is asking a question, and the hand-off
+    // it waits on will never come. `AttentionItem` is `Identifiable` on `nodeID`, so
+    // reporting both puts two rows with one id into the rail's `ForEach`. The worse
+    // reason wins — `.blocked` ranks last in `AttentionReason` precisely because it is
+    // the one that is not, on its own, an error.
+    let upstream = LoopNode(
+      title: "Upstream", loopType: .sketch, presence: .absent, state: .idle,
+      createdAt: Date(timeIntervalSince1970: 0))
+    let asking = LoopNode(
+      title: "Asking", loopType: .sketch,
+      presence: PresenceReading(presence: .awaitingInput, confidence: .reported),
+      state: .blocked, createdAt: Date(timeIntervalSince1970: 0))
+
+    let rollup = AttentionRollup.fullRollup(across: [
+      graph(
+        nodes: [upstream, asking],
+        edges: [LoopEdge(from: upstream.id, to: asking.id, fireCount: 0)])
+    ])
+
+    #expect(rollup.count == 1)
+    #expect(rollup.map(\.nodeID) == Array(Set(rollup.map(\.nodeID))))
+    #expect(rollup.first?.reason == .awaitingInput)
+  }
+
+  @Test
   func aNodeBlockedOnWorkThatCanNeverArriveIsStranded() {
     // The upstream resolved without firing this edge — an `.onSuccess` edge whose
     // source failed. Nothing will ever unblock the target, so it needs a human.

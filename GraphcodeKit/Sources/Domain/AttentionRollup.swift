@@ -159,9 +159,18 @@ public enum AttentionRollup {
   /// identify.
   public static func fullRollup(across graphs: [LoopGraph]) -> [AttentionItem] {
     var items = self.items(across: graphs)
+    // One row per loop. A blocked node whose session is asking something reaches
+    // `reason(for:)` as `.awaitingInput` *and* strands here, and two rows for one loop is
+    // not a louder warning — `AttentionItem` is `Identifiable` on `nodeID`, so a
+    // duplicate is a broken `ForEach` before it is a confusing queue. `.blocked` ranks
+    // last in `AttentionReason` by design, so keeping what is already there always keeps
+    // the worse of the two reasons.
+    var reported = Set(items.map(\.nodeID))
     for graph in graphs {
       for nodeID in strandedNodeIDs(in: graph) {
-        guard let node = graph.nodes[id: nodeID] else { continue }
+        guard let node = graph.nodes[id: nodeID], reported.insert(nodeID).inserted else {
+          continue
+        }
         items.append(
           AttentionItem(
             nodeID: node.id, nodeTitle: node.title, projectPath: graph.project.path,
