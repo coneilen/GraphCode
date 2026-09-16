@@ -428,21 +428,16 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// The state a surface should show, which is `state` corrected by what the session is
   /// actually doing.
   ///
-  /// Only a few states are corrected, and only where a session reading beats the graph's
-  /// belief. `.idle` is what the graph decided, and a turn-based `.succeeded` is finished
-  /// whatever is still running in its pane; no poll improves on either. A finished goal
-  /// loop is the exception: a human asking it a follow-up is work in flight, which
-  /// `displayStateForResolvedSession` shows. `.running` is set at *creation* and
+  /// **A working session always wins.** Whatever the graph believes — an IDLE main loop, a
+  /// BLOCKED child, a DONE goal loop a human asked a follow-up — an agent that is busy reads
+  /// RUNNING and one that asked a question reads NEEDS YOU, because that is the one reading
+  /// a human watching the pane cannot argue with. Quiet, absent and unknown sessions leave
+  /// every state but `.running` as the graph has it.
+  ///
+  /// `.running` is corrected further because it *overstates*: it is set at creation and
   /// cleared only by resolution, so between those two moments it is a claim about the
   /// present tense that nothing was checking — a goal loop whose agent answered and
   /// stopped reads RUNNING, pulsing, until a human notices.
-  ///
-  /// `.blocked` is corrected for the opposite reason: it *understates*. A blocked loop is
-  /// not necessarily parked — `opensOnHumanTap` lets a human open an attended one, and an
-  /// unattended child's session starts before the follow-up hand-off marks it blocked. In
-  /// both cases an agent is working in a pane the card labels BLOCKED, which is the one
-  /// reading a human cannot argue with. Only a live session overrides it: quiet, absent
-  /// and unknown all stay BLOCKED, because then the edge really is the whole story.
   ///
   /// Deliberately derived rather than written back into `state`. `state` is what the graph
   /// believes, and edge firing, `MessageBus.deliverability` and resolution all read it; a
@@ -485,57 +480,24 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// A backend that reports nothing leaves `presence` nil and this returns `state`
   /// untouched, which is exactly the behaviour every surface had before presence existed.
   public var displayState: LoopState {
-    if state == .blocked { return displayStateForBlockedSession }
-    if answersPastResolution { return displayStateForResolvedSession }
+    if presence?.exitCode == nil {
+      switch presence?.presence {
+      case .busy: return .running
+      case .awaitingInput: return .awaitingInput
+      case .idle, .absent, .unknown, nil: break
+      }
+    }
     guard state == .running, let presence = presence?.presence else { return state }
     if let exitCode = self.presence?.exitCode {
       return exitCode == 0 ? .idle : .failed
     }
     switch presence {
-    case .busy: return .running
     case .idle: return hasActiveDependents ? .waiting : .idle
     case .absent: return displayStateForAbsentSession
-    // The combination `Presence` was written for: running in the graph, waiting on a
-    // human in its session.
-    case .awaitingInput: return .awaitingInput
     // A probe that failed in transport observed nothing — the graph's own belief is
-    // the only honest thing left to show, exactly as if no reading existed.
-    case .unknown: return state
-    }
-  }
-
-  /// What a `.blocked` node shows once its session is live and doing something. Waiting on
-  /// an edge and working in a pane are both true at once here, and the pane is the half a
-  /// human can see; a card that says BLOCKED over a session running `grep` is telling them
-  /// the graph's plan instead of what is happening.
-  ///
-  /// `state` itself is untouched, exactly as for `.running`: edge firing and resolution
-  /// still read a blocked node as blocked, because it is.
-  private var displayStateForBlockedSession: LoopState {
-    guard presence?.exitCode == nil else { return .blocked }
-    switch presence?.presence {
-    case .busy: return .running
-    case .awaitingInput: return .awaitingInput
-    case .idle, .absent, .unknown, nil: return .blocked
-    }
-  }
-
-  /// A goal loop that met or missed its goal whose session is still there to be asked a
-  /// follow-up. Its presence keeps being read (`GraphStore.refreshPresence`) so the card can
-  /// say when that session is working again.
-  public var answersPastResolution: Bool {
-    loopType == .goalBased && (state == .succeeded || state == .failed)
-  }
-
-  /// A finished goal loop whose session is answering a follow-up shows RUNNING until the
-  /// turn ends, then its resolution again. Reopening is a new goal's job (`updateNode`):
-  /// `state` stays resolved, so its edges do not fire twice and no goal poller re-arms.
-  private var displayStateForResolvedSession: LoopState {
-    guard presence?.exitCode == nil else { return state }
-    switch presence?.presence {
-    case .busy: return .running
-    case .awaitingInput: return .awaitingInput
-    case .idle, .absent, .unknown, nil: return state
+    // the only honest thing left to show, exactly as if no reading existed. A busy or
+    // asking session only reaches here having exited, which the check above answered.
+    case .busy, .awaitingInput, .unknown: return state
     }
   }
 

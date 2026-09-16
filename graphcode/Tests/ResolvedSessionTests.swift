@@ -200,7 +200,8 @@ struct ResolvedSessionTests {
       #expect(reading(state, .busy).isResolved)
     }
     for state in [LoopState.stalled, .stopped] {
-      #expect(reading(state, .busy).displayState == state)
+      #expect(reading(state, .busy).displayState == .running)
+      #expect(reading(state, .idle).displayState == state)
     }
     var exited = reading(.succeeded, .busy)
     exited.presence?.exitCode = 0
