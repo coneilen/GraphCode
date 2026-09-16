@@ -180,13 +180,9 @@ struct CanvasBandView: View {
       }
   }
 
-  /// Straight and quiet — one line from the dot to the port, of a lighter weight than an
-  /// edge and with no arrowhead, because nothing travels it.
-  ///
-  /// It used to bow out of the origin and flatten into the port. One of those reads
-  /// nicely; a lane of them is a bundle of arcs that all leave the dot at a different
-  /// angle, and against the routed lines below they made the first row look like a
-  /// different kind of connection from the rest.
+  /// Curved, not straight, and quiet. A straight 1.5pt line between two cards is what an
+  /// edge looks like; this one bends out of the origin and flattens into the port, which
+  /// reads as structure rather than as a hand-off.
   ///
   /// A port past the first column is *routed* rather than curved to. A curve to a card
   /// three columns out runs straight through the cards in between, and since they are
@@ -197,7 +193,11 @@ struct CanvasBandView: View {
     Path { path in
       if port.x - origin.x <= firstColumnReach {
         path.move(to: origin)
-        path.addLine(to: port)
+        let reach = max((port.x - origin.x) * 0.55, 20)
+        path.addCurve(
+          to: port,
+          control1: CGPoint(x: origin.x + reach, y: origin.y),
+          control2: CGPoint(x: port.x - reach, y: port.y))
       } else {
         routed(from: origin, to: port, into: &path)
       }
@@ -213,13 +213,24 @@ struct CanvasBandView: View {
   private func routed(from origin: CGPoint, to port: CGPoint, into path: inout Path) {
     let corridorY = port.y - (LoopCardView.Metrics.size.height + LaneLayout.Metrics.rowGap) / 2
     let gutterX = port.x - LaneLayout.Metrics.columnGap / 2
+    let corner = min(CGFloat(10), abs(port.y - corridorY) / 2)
 
     path.move(to: origin)
-    path.addLine(to: CGPoint(x: origin.x, y: corridorY))
-    path.addLine(to: CGPoint(x: gutterX, y: corridorY))
-    path.addLine(to: CGPoint(x: gutterX, y: port.y))
+    path.addLine(to: CGPoint(x: origin.x, y: corridorY - sign(corridorY - origin.y) * corner))
+    path.addQuadCurve(
+      to: CGPoint(x: origin.x + corner, y: corridorY),
+      control: CGPoint(x: origin.x, y: corridorY))
+    path.addLine(to: CGPoint(x: gutterX - corner, y: corridorY))
+    path.addQuadCurve(
+      to: CGPoint(x: gutterX, y: corridorY + corner),
+      control: CGPoint(x: gutterX, y: corridorY))
+    path.addLine(to: CGPoint(x: gutterX, y: port.y - corner))
+    path.addQuadCurve(
+      to: CGPoint(x: gutterX + corner, y: port.y), control: CGPoint(x: gutterX, y: port.y))
     path.addLine(to: port)
   }
+
+  private func sign(_ value: CGFloat) -> CGFloat { value < 0 ? -1 : 1 }
 
   // A chip with no name still earns the row: the project canvas draws its band
   // unlabelled — the pane already *is* the folder — but the worktree count is a fact
