@@ -46,13 +46,13 @@ enum Theme {
   /// Heavier than the chrome scrim on purpose — this is the pane you *read*, and a
   /// canvas thin enough to show every wallpaper detail behind a tether is a canvas you
   /// squint at.
-  static let canvasBackground = canvasTone.opacity(0.62)
+  static let canvasBackground = canvasTone.opacity(0.74)
 
   /// The canvas tone at full strength, for the few places that need to *occlude*
   /// rather than tint: the start marker's knockout ring, chips floating over the
   /// canvas. A translucent knockout isn't a knockout — the tether it exists to hide
   /// shows straight through it.
-  static let canvasTone = Color(white: 0.095)
+  static let canvasTone = Color(white: 0.068)
 
   /// The canvas's notebook ruling. One step off `canvasBackground` and no further: the
   /// grid is there to give panning something to move against and to make the empty
@@ -60,7 +60,7 @@ enum Theme {
   ///
   /// It moves *with* the canvas — a ruling is only ever "one step off" whatever it is
   /// drawn on, which is why it darkened in step when the canvas did.
-  static let canvasGridLine = Color(white: 0.155)
+  static let canvasGridLine = Color(white: 0.122)
 
   /// A loop workspace's tab strip — painted gloss on a 40pt strip: one light source
   /// above, most of the falloff near it.
