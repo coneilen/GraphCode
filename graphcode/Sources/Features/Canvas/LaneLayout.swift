@@ -20,13 +20,19 @@ import GraphcodeKit
 struct LaneLayout: Equatable {
   /// One card's place in the lane, before it becomes a point.
   struct Slot: Hashable {
-    /// For a loop in a chain, how many hand-offs from a beginning it sits — its depth.
-    /// For a loose one, which packed column it landed in, which means nothing but "the
-    /// nth on this row".
+    /// How many hand-offs from a beginning this loop sits — its level. A loop nothing
+    /// hands off to is at level 0, wired or loose.
     let column: Int
     let row: Int
-    /// A loop with no edge in either direction has no depth to be at, so it is packed at
-    /// the tighter pitch below the chains rather than given a level of its own.
+    /// Which column *within* its level the card wrapped into. A level holds at most
+    /// `Metrics.maximumRowsPerLevel` rows; past that it grows sideways rather than down,
+    /// and this is how far sideways. Levels are still laid out in order, so column 1 of
+    /// level 0 is nowhere near level 1.
+    var subColumn = 0
+    /// A loop with no edge in either direction has no level to be at. It goes in the
+    /// block below the chains, wrapped by the same rule but measured from the lane's own
+    /// left edge — never *between* two levels, where the hand-offs crossing from one to
+    /// the next would run over it.
     var isLoose = false
   }
 
@@ -54,10 +60,16 @@ struct LaneLayout: Equatable {
     /// is wider than it is tall for no gain — the cards start running off the side
     /// instead of the bottom.
     static let minimumRowBudget = 3
-    /// The most columns a grid of loose loops spreads into. Width is the cheap axis, but
-    /// it is not free: past this the lane is wider than any display and the wrapping has
-    /// only traded a scroll down for a scroll across.
-    static let maximumLooseColumns = 8
+    /// The most columns a level spreads into. Width is the cheap axis, but it is not
+    /// free: past this the lane is wider than any display and the wrapping has only
+    /// traded a scroll down for a scroll across.
+    static let maximumColumnsPerLevel = 8
+    /// The most rows a level ever stacks before it wraps into the column beside it,
+    /// however much room the pane has. Six loops one under another already read as a
+    /// list rather than as a level, and a level you have to scroll is one you cannot
+    /// compare across. The pane's own budget can lower this on a short window; nothing
+    /// raises it.
+    static let maximumRowsPerLevel = 5
 
     /// How many rows fit in `height` points of pane, at the scale a canvas settles at
     /// when it opens (`CanvasTransform.defaultFitFloor`) and after the lane's own
@@ -112,13 +124,14 @@ struct LaneLayout: Equatable {
   /// How many rows the lane used — never zero, so a band around an empty graph is still
   /// one row tall rather than a caption-height sliver.
   private(set) var rowCount = 1
-  /// Where each depth's cards sit, as an offset from the lane's first card — index by a
-  /// slot's column. Not a single pitch, because a depth that holds several rows earns a
-  /// wider gap after it than one that holds a single hand-off (`Metrics.busyDepthGap`).
+  /// Where each level's cards start, as an offset from the lane's first card — index by
+  /// a slot's column. Not a single pitch: a level is as wide as the columns it wrapped
+  /// into, and one holding several rows earns a wider gap after it than one holding a
+  /// single hand-off (`Metrics.busyDepthGap`).
   private(set) var depthOffsets: [CGFloat] = [0]
   /// How wide the lane came out, from the first card's leading edge to the last one's
-  /// trailing edge — a band has to be drawn around it, and a lane that packed its loose
-  /// loops is wider than the depths alone say.
+  /// trailing edge — a band has to be drawn around it, and a lane whose levels wrapped is
+  /// wider than the levels alone say.
   private(set) var contentWidth = Metrics.card.width
 
   /// - Parameters:
@@ -130,8 +143,12 @@ struct LaneLayout: Equatable {
     graph: LoopGraph, roles: [UUID: CardEntryRole], origin: CGPoint = Metrics.origin,
     rowHeight: CGFloat = Metrics.rowHeight, rowBudget: Int = Metrics.displayRowBudget
   ) {
-    // Everything nothing hands off to goes in column 0, one per row, and each chain flows
-    // right along its own row.
+    // Everything nothing hands off to goes in level 0, one per row, and each chain flows
+    // right into the next level along its own row. A level taller than
+    // `maximumRowsPerLevel` then wraps into the column beside it — every level by the same
+    // rule, so a fan of twenty children reads as a block the same way a pile of twenty
+    // loose loops does. Wrapping the loose ones only was the visible version of this
+    // being two rules: the bottom of a lane wrapped and the top of it did not.
     //
     // Filling rows left-to-right put all four rootless cards of a real graph side by side,
     // which hid the origin's fan behind them — cards draw over the lines, so the connectors
@@ -176,58 +193,78 @@ struct LaneLayout: Equatable {
       place(node, preferring: nextRow)
     }
 
-    // Everything left has no edge in either direction, so it has no depth and no chain to
-    // be read along — it is packed below what does, in as many columns as it takes to
-    // keep the lane readable without scrolling.
-    let chainRows = placed.values.map(\.row).max().map { $0 + 1 } ?? 0
-    let loose = graph.nodes.filter { !wired.contains($0.id) }
-    let looseColumns = Self.looseColumns(for: loose.count, rowBudget: rowBudget - chainRows)
-    for (index, node) in loose.enumerated() {
-      placed[node.id] = Slot(
-        column: index % looseColumns, row: chainRows + index / looseColumns, isLoose: true)
+    let rows = Self.rowsPerLevel(within: rowBudget)
+    var wrapped = Self.wrapLevels(placed, rowsPerLevel: rows)
+
+    // Everything left has no edge in either direction, so it has no level to be at and no
+    // chain to be read along: its own block below the chains, wrapped by the same rule.
+    let chainRows = wrapped.values.map(\.row).max().map { $0 + 1 } ?? 0
+    for (index, node) in graph.nodes.filter({ !wired.contains($0.id) }).enumerated() {
+      wrapped[node.id] = Slot(
+        column: 0, row: chainRows + index % rows,
+        subColumn: min(index / rows, Metrics.maximumColumnsPerLevel - 1), isLoose: true)
     }
 
-    slots = placed
-    depthOffsets = Self.depthOffsets(for: placed)
-    positions = placed.mapValues { slot in
+    slots = wrapped
+    depthOffsets = Self.depthOffsets(for: slots)
+    positions = slots.mapValues { slot in
       CGPoint(
         x: x(of: slot, from: origin),
         y: origin.y + CGFloat(slot.row) * rowHeight)
     }
-    rowCount = max(placed.values.map(\.row).max().map { $0 + 1 } ?? 1, 1)
-    contentWidth = (placed.values.map { x(of: $0, from: .zero) }.max() ?? 0) + Metrics.card.width
+    rowCount = max(slots.values.map(\.row).max().map { $0 + 1 } ?? 1, 1)
+    contentWidth = (slots.values.map { x(of: $0, from: .zero) }.max() ?? 0) + Metrics.card.width
   }
 
-  /// A card's centre x: where its depth starts, or its packed column at the tighter
-  /// pitch. Depths are a table rather than a multiplication because the gap between two
-  /// of them depends on how many rows the nearer one holds — see `Metrics.busyDepthGap`.
+  /// How many rows a level stacks before it wraps: the pane's own budget, never more than
+  /// `Metrics.maximumRowsPerLevel`. The cap is what makes the wrap unconditional — a
+  /// level of twenty wraps on a tall display too, where there was room to just keep
+  /// stacking and the result was a column nobody could compare across.
+  static func rowsPerLevel(within rowBudget: Int) -> Int {
+    max(1, min(rowBudget, Metrics.maximumRowsPerLevel))
+  }
+
+  /// Folds every level's rows at `rowsPerLevel`, the same rule for all of them.
+  ///
+  /// The fold is on the row index rather than per level's own count, which is what keeps
+  /// a hand-off level with its parent: two loops on one chain share a row, so they fold
+  /// into the same column of their own levels and stay side by side.
+  private static func wrapLevels(_ placed: [UUID: Slot], rowsPerLevel rows: Int)
+    -> [UUID: Slot]
+  {
+    placed.mapValues { slot in
+      Slot(
+        column: slot.column, row: slot.row % rows,
+        subColumn: min(slot.row / rows, Metrics.maximumColumnsPerLevel - 1))
+    }
+
+  }
+
+  /// A card's centre x: where its level starts, plus however far it wrapped within it.
+  /// Levels are a table rather than a multiplication because one is as wide as the
+  /// columns it wrapped into, and the gap after it depends on how many rows it holds —
+  /// see `Metrics.busyDepthGap`.
   func x(of slot: Slot, from origin: CGPoint) -> CGFloat {
-    guard !slot.isLoose else { return origin.x + CGFloat(slot.column) * Metrics.columnWidth }
-    let depth = min(slot.column, depthOffsets.count - 1)
-    return origin.x + depthOffsets[max(depth, 0)]
+    guard !slot.isLoose else { return origin.x + CGFloat(slot.subColumn) * Metrics.columnWidth }
+    let depth = max(min(slot.column, depthOffsets.count - 1), 0)
+    return origin.x + depthOffsets[depth] + CGFloat(slot.subColumn) * Metrics.columnWidth
   }
 
-  /// One offset per depth, each pushed out by the width of the depth before it plus a gap
-  /// that widens when that depth holds more than one row.
+  /// One offset per level, each pushed out by however wide the level before it came out —
+  /// the columns it wrapped into — plus a gap that widens when that level holds more than
+  /// one row.
   private static func depthOffsets(for placed: [UUID: Slot]) -> [CGFloat] {
-    let rows = Dictionary(grouping: placed.values.filter { !$0.isLoose }, by: \.column)
-      .mapValues { Set($0.map(\.row)).count }
+    let levels = Dictionary(grouping: placed.values.filter { !$0.isLoose }, by: \.column)
     var offsets: [CGFloat] = [0]
     for depth in 1..<Metrics.columns {
-      let gap = (rows[depth - 1] ?? 0) > 1 ? Metrics.busyDepthGap : Metrics.depthGap
-      offsets.append(offsets[depth - 1] + Metrics.card.width + gap)
+      let previous = levels[depth - 1] ?? []
+      let columns = (previous.map(\.subColumn).max() ?? 0) + 1
+      let width =
+        CGFloat(columns) * Metrics.card.width + CGFloat(columns - 1) * Metrics.columnGap
+      let gap = Set(previous.map(\.row)).count > 1 ? Metrics.busyDepthGap : Metrics.depthGap
+      offsets.append(offsets[depth - 1] + width + gap)
     }
     return offsets
-  }
-
-  /// How wide to pack `count` loose loops: one column until they would out-run the rows
-  /// the pane can show, then as many as it takes to stay within them. A handful stays a
-  /// column, which is the shape a small graph has always had.
-  private static func looseColumns(for count: Int, rowBudget: Int) -> Int {
-    let rows = max(Metrics.minimumRowBudget, rowBudget)
-    guard count > rows else { return 1 }
-    return min(
-      Metrics.maximumLooseColumns, max(1, Int((Double(count) / Double(rows)).rounded(.up))))
   }
 
   /// Every card one canvas can show: this graph's own loops, plus the insides of every
