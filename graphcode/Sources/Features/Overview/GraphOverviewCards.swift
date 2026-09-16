@@ -8,12 +8,18 @@ import SwiftUI
 /// The overview and the attention rollup are built once per body pass and passed in —
 /// see `GraphOverviewView.Derived` for why these don't compute their own.
 extension GraphOverviewView {
-  func linksLayer(_ overview: GraphOverview) -> some View {
+  func linksLayer(_ overview: GraphOverview, focus: EdgeFocus?) -> some View {
     ForEach(overview.links) { link in
       switch link.kind {
       case .edge(let kind, let fired):
         EdgeLineView(
-          from: link.from, to: link.to, kind: kind, fired: fired, label: link.label)
+          from: link.from, to: link.to, kind: kind, fired: fired, label: link.label,
+          emphasis: focus.emphasis(forEdge: link.id),
+          onTap: {
+            guard let from = link.fromID, let to = link.toID else { return }
+            edgeFocus = EdgeFocus.toggling(
+              edgeFocus, to: EdgeFocus(edgeID: link.id, from: from, to: to))
+          })
       case .containment:
         // The overview never emits one — sub-graphs are expanded on a folder's own
         // canvas, not here — but the renderer covers every kind the shared type has.
@@ -133,7 +139,7 @@ extension GraphOverviewView {
   /// One card per loop, all of them clickable — a composite is drawn as the single loop
   /// it is, not expanded into its sub-graph. See `GraphOverview` for why.
   func loopsLayer(
-    _ overview: GraphOverview, reasons: [UUID: AttentionReason], now: Date
+    _ overview: GraphOverview, reasons: [UUID: AttentionReason], now: Date, focus: EdgeFocus?
   ) -> some View {
     ForEach(overview.loops) { loop in
       HoverRevealingCard {
@@ -141,6 +147,7 @@ extension GraphOverviewView {
       } handle: {
         connectorHandle(for: loop)
       }
+      .opacity(focus.emphasis(forNode: loop.node.id).opacity)
       .position(loop.position)
     }
   }

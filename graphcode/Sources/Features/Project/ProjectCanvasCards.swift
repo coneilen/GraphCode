@@ -7,7 +7,8 @@ import SwiftUI
 /// the Graph view; the layers still land as siblings in the canvas's `ZStack`.
 extension ProjectCanvasView {
   func nodesLayer(
-    _ reasons: [UUID: AttentionReason], roles: [UUID: CardEntryRole], now: Date
+    _ reasons: [UUID: AttentionReason], roles: [UUID: CardEntryRole], now: Date,
+    focus: EdgeFocus?
   ) -> some View {
     ForEach(store.canvasGraph.nodes) { node in
       HoverRevealingCard(isDragSource: dragSourceID == node.id) {
@@ -16,6 +17,7 @@ extension ProjectCanvasView {
       } handle: {
         connectorHandle(for: node.id)
       }
+      .opacity(focus.emphasis(forNode: node.id).opacity)
       .position(store.nodePositions[node.id] ?? .zero)
     }
   }

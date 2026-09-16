@@ -131,7 +131,8 @@ struct GraphOverview: Equatable {
   ///   widens rather than running off the bottom of it — and re-lays itself out when the
   ///   window is resized. Zero falls back to what the main display could show.
   init(
-    graphs: [LoopGraph], declaredEntries: [String: Set<UUID>] = [:], viewportHeight: CGFloat = 0
+    graphs: [LoopGraph], declaredEntries: [String: Set<UUID>] = [:], viewportHeight: CGFloat = 0,
+    orders: [String: [UUID]] = [:]
   ) {
     // The global graph's lane goes first — it's the one that dispatches into the others,
     // so reading top-to-bottom follows the direction work actually travels. Stable
@@ -158,7 +159,7 @@ struct GraphOverview: Equatable {
     for graph in lanes {
       let lane = Self.layOutLane(
         graph, top: laneTop, declaredEntries: declaredEntries[graph.project.path] ?? [],
-        rowBudget: budget)
+        rowBudget: budget, order: orders[graph.project.path] ?? [])
       folders.append(lane.folder)
       loops.append(contentsOf: lane.loops)
       links.append(contentsOf: lane.links)
@@ -191,7 +192,7 @@ struct GraphOverview: Equatable {
 
   private static func layOutLane(
     _ graph: LoopGraph, top: CGFloat, declaredEntries: Set<UUID> = [],
-    rowBudget: Int = LaneLayout.Metrics.displayRowBudget
+    rowBudget: Int = LaneLayout.Metrics.displayRowBudget, order: [UUID] = []
   ) -> Lane {
     let path = graph.project.path
     let roles = CardEntryRole.roles(in: graph, declaredEntries: declaredEntries)
@@ -203,7 +204,7 @@ struct GraphOverview: Equatable {
     let layout = LaneLayout(
       graph: graph, roles: roles,
       origin: CGPoint(x: Metrics.firstLoopX, y: top + Metrics.firstRowInset),
-      rowBudget: rowBudget)
+      rowBudget: rowBudget, order: order)
     let positions = layout.positions
 
     for node in graph.nodes {
@@ -219,7 +220,8 @@ struct GraphOverview: Equatable {
       links.append(
         Link(
           id: "edge-\(edge.id)", from: from, to: to,
-          kind: .edge(edge.kind, fired: edge.fired), label: edge.cycleLabel))
+          kind: .edge(edge.kind, fired: edge.fired), label: edge.cycleLabel,
+          fromID: edge.from, toID: edge.to))
     }
 
     // An empty folder still gets a band one row tall — that is how the overview says

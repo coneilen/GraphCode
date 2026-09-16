@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import GraphcodeKit
 
 /// What a line on a canvas means. Two kinds, because they mean two different things and
@@ -26,4 +27,8 @@ struct CanvasLink: Identifiable, Equatable {
   let kind: GraphLinkKind
   /// A guarded back-edge's pass count — see `LoopEdge.cycleLabel`.
   var label: String?
+  /// The loops an `.edge` joins, so clicking it can light them (`EdgeFocus`). Absent on a
+  /// containment line, which is not something you click.
+  var fromID: UUID?
+  var toID: UUID?
 }
