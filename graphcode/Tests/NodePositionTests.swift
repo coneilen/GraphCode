@@ -112,6 +112,39 @@ struct NodePositionTests {
   }
 
   @Test
+  func aShorterPaneRepacksAFoldersCanvasRatherThanLettingItRunOffTheBottom() async throws {
+    // The Graph view packs to the pane it measured; a folder's own canvas has to do the
+    // same, or the two views disagree about what the same graph looks like — which is
+    // the whole thing `LaneLayout` exists to prevent.
+    let loose = (0..<24).map { node("loose-\($0)") }
+    let store = await TestStore(initialState: ProjectFeature.State(graph: graph(nodes: loose))) {
+      ProjectFeature()
+    }
+
+    await store.send(.canvasRowBudgetChanged(12)) {
+      $0.canvasRowBudget = 12
+      $0.nodePositions = LaneLayout.positions(forCanvas: $0.graph, rowBudget: 12)
+    }
+    let tall = store.state.nodePositions.values
+    let tallRows = Set(tall.map(\.y)).count
+    let tallColumns = Set(tall.map(\.x)).count
+
+    await store.send(.canvasRowBudgetChanged(4)) {
+      $0.canvasRowBudget = 4
+      $0.nodePositions = LaneLayout.positions(forCanvas: $0.graph, rowBudget: 4)
+    }
+    let short = store.state.nodePositions.values
+    #expect(Set(short.map(\.y)).count < tallRows)
+    #expect(Set(short.map(\.x)).count > tallColumns)
+    #expect(Set(short.map(\.y)).count <= 4)
+
+    // The same budget again changes nothing, so dragging a window edge across a pane
+    // that still shows the same number of rows doesn't re-lay the canvas out under the
+    // pointer.
+    await store.send(.canvasRowBudgetChanged(4))
+  }
+
+  @Test
   func aChainRunsLeftToRightAlongOneRow() {
     // The reported difference between the two views: on the Graph view A → B → C is a line
     // of work; on a folder's canvas it was three cards in whatever order they synced, with

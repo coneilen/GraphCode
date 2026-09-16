@@ -193,6 +193,14 @@ struct ProjectCanvasView: View {
     return CGSize(width: right + 160, height: max(bottom, chipBottom) + 120)
   }
 
+  /// Tells the layout how many rows this pane can show, so a folder with more loose
+  /// loops than fit spreads them wider instead of running off the bottom. The reducer
+  /// ignores a budget it already has, so this costs nothing until the pane crosses a row.
+  private func packToPane(_ size: CGSize) {
+    guard size.height > 0 else { return }
+    store.send(.canvasRowBudgetChanged(LaneLayout.Metrics.rowBudget(forHeight: size.height)))
+  }
+
   /// Centres the graph, but only while the canvas is still where it started: once
   /// someone has panned or zoomed, their view is theirs and nothing here moves it.
   // Floored at `defaultFitFloor` like the Graph view's own opening fit — an automatic
@@ -221,10 +229,12 @@ struct ProjectCanvasView: View {
       .offset(liveOffset)
       .onAppear {
         viewport = proxy.size
+        packToPane(proxy.size)
         centreIfUntouched(in: proxy.size, content: content)
       }
       .onChange(of: proxy.size) { _, size in
         viewport = size
+        packToPane(size)
         centreIfUntouched(in: size, content: content)
       }
       // The graph arrives from the daemon a beat after this view does, so the first
