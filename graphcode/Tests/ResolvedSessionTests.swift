@@ -247,6 +247,10 @@ struct ResolvedSessionTests {
     #expect(reads.value == readsOnceGone)
 
     await store.handle(.resumeSession(id))
+    let readsBeforeResume = reads.value
+    await store.pollPresence()
+    await store.pollPresence()
+    #expect(reads.value == readsBeforeResume + 2)
     answer.withValue { $0 = .busy }
     await store.pollPresence()
     node = try #require(await store.graph.nodes[id: id])

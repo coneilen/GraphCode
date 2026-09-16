@@ -282,8 +282,10 @@ public actor GraphStore {
   private var resolvedSessionEnders: [UUID: Task<Void, Never>] = [:]
   private var sessionEndCandidates: Set<UUID> = []
   /// When a human last opened a resolved loop, so its session is read again even though the
-  /// last reading found none — the session opening it resumes takes a moment to exist.
+  /// last reading found none. Cleared by the first reading that finds it live; a resume over
+  /// ssh can take minutes, so absent readings before that do not end the watch.
   private var resolvedSessionsOpened: [UUID: Date] = [:]
+  static let resolvedSessionOpenWindow: TimeInterval = 600
   /// A reopened loop's new goal on its way to the session: `nil` while the delivery is
   /// being arranged, then the follow-up carrying it. A `node done` sent before it lands
   /// is about the old goal.
@@ -1350,8 +1352,9 @@ public actor GraphStore {
   ///
   /// Resolved nodes are skipped, except a finished goal loop whose session may be answering
   /// a follow-up (`LoopNode.answersPastResolution`). Those are read until a reading finds
-  /// the session gone, and again once someone opens the loop, so a graph of long-finished
-  /// loops costs no subprocess per tick.
+  /// the session gone or cannot be taken, and again once someone opens the loop, so a graph
+  /// of long-finished loops costs no subprocess per tick — and a hung backend does not
+  /// spend a read deadline per finished loop on every tick.
   /// Returns whether any reading actually changed, which is what keeps the poller from
   /// telling every client the graph moved when nothing did.
   @discardableResult
@@ -1363,6 +1366,9 @@ public actor GraphStore {
       guard graph.nodes[id: node.id]?.presence != reading else { continue }
       graph.nodes[id: node.id]?.presence = reading
       changed = true
+      if node.isResolved, graph.nodes[id: node.id]?.presenceShowsLiveSession == true {
+        resolvedSessionsOpened.removeValue(forKey: node.id)
+      }
       // The backstop for a session no launch of ours checked: a zsh that exits 127 could
       // not find its command, and the probe says whether that command was the agent.
       if reading.exitCode == ProviderPath.commandNotFoundStatus, onFindMissingProvider != nil,
@@ -1378,9 +1384,15 @@ public actor GraphStore {
   private func readsPresence(of node: LoopNode) -> Bool {
     guard node.isResolved else { return true }
     guard node.answersPastResolution else { return false }
-    if node.presence?.presence != .absent { return true }
-    guard let opened = resolvedSessionsOpened[node.id] else { return false }
-    return Date().timeIntervalSince(opened) < LoopNode.absentSessionGraceSeconds
+    if let opened = resolvedSessionsOpened[node.id],
+      Date().timeIntervalSince(opened) < Self.resolvedSessionOpenWindow
+    {
+      return true
+    }
+    switch node.presence?.presence {
+    case .absent, .unknown: return false
+    case .busy, .idle, .awaitingInput, nil: return true
+    }
   }
 
   private func refreshActiveDependents() -> Bool {

@@ -83,10 +83,11 @@ struct PresencePollingTests {
     #expect(Set(await probe.asked) == ["running", "blocked", "succeeded", "failed"])
 
     await probe.answer("succeeded", with: .absent)
+    await probe.answer("failed", with: .unknown)
     await store.pollPresence()
     await probe.reset()
     await store.pollPresence()
-    #expect(Set(await probe.asked) == ["running", "blocked", "failed"])
+    #expect(Set(await probe.asked) == ["running", "blocked"])
   }
 
   @Test
