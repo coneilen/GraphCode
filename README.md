@@ -56,6 +56,8 @@ brew install --cask scgopi/graphcode/graphcode
 Or drag **GraphCode** to Applications from the [latest `.dmg`](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg).
 Releases are Developer ID signed and notarized.
 
+If GraphCode runs a loop you'd otherwise have babysat, a ⭐ on the repo helps other people find it.
+
 ## Using it
 
 1. **Add a project** — the sidebar's ⊕ menu: a local folder, a clone from a URL, or a remote repository
