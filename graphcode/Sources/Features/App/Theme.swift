@@ -38,21 +38,20 @@ enum Theme {
   /// content reads against it, thin enough that the desktop glows through.
   static let windowBackground = windowTone.opacity(0.55)
 
-  /// Graph canvas fill — both canvases, the Graph overview and a project's. A scrim
-  /// over the window's glass, a touch deeper than `windowBackground` so the ordering
-  /// that survived the sidebar's move to glass survives this one too: sidebar bare
-  /// glass, canvas a shade denser, cards and chrome on top.
+  /// Graph canvas fill — both canvases, the Graph overview and a project's. The one
+  /// pane that is paint rather than a scrim: the ordering still reads (sidebar bare
+  /// glass, canvas denser, cards and chrome on top), but the canvas now carries it by
+  /// being darker than everything around it instead of by being a heavier veil.
   ///
-  /// Heavier than the chrome scrim on purpose — this is the pane you *read*, and a
-  /// canvas thin enough to show every wallpaper detail behind a tether is a canvas you
-  /// squint at.
-  static let canvasBackground = canvasTone.opacity(0.62)
+  /// Opaque on purpose — this is the pane you *read*, and a canvas that lets every
+  /// wallpaper detail through behind a tether is a canvas you squint at.
+  static let canvasBackground = canvasTone
 
-  /// The canvas tone at full strength, for the few places that need to *occlude*
-  /// rather than tint: the start marker's knockout ring, chips floating over the
-  /// canvas. A translucent knockout isn't a knockout — the tether it exists to hide
-  /// shows straight through it.
-  static let canvasTone = Color(white: 0.095)
+  /// The canvas tone — near-black with a trace of green, so a long session against it
+  /// reads warmer than dead neutral does. The one tone in the app *not* mixed from
+  /// `windowTone`, and also what the few places that need to *occlude* rather than
+  /// tint use: the start marker's knockout ring, chips floating over the canvas.
+  static let canvasTone = Color(red: 0.040, green: 0.048, blue: 0.044)
 
   /// The canvas's notebook ruling. One step off `canvasBackground` and no further: the
   /// grid is there to give panning something to move against and to make the empty
@@ -60,7 +59,7 @@ enum Theme {
   ///
   /// It moves *with* the canvas — a ruling is only ever "one step off" whatever it is
   /// drawn on, which is why it darkened in step when the canvas did.
-  static let canvasGridLine = Color(white: 0.155)
+  static let canvasGridLine = Color(red: 0.082, green: 0.094, blue: 0.086)
 
   /// A loop workspace's tab strip — painted gloss on a 40pt strip: one light source
   /// above, most of the falloff near it.
