@@ -34,15 +34,12 @@ struct EdgeLineView: View {
   private var route: Route {
     let start = CanvasEdgeGeometry.exit(from: from, toward: to, cardSize: targetSize)
     let end = CanvasEdgeGeometry.entry(at: to, from: from, cardSize: targetSize)
-    let controls = CanvasEdgeGeometry.controls(from: start, to: end)
-    return Route(start: start, end: end, outControl: controls.0, inControl: controls.1)
+    return Route(start: start, end: end)
   }
 
   private struct Route {
     let start: CGPoint
     let end: CGPoint
-    let outControl: CGPoint
-    let inControl: CGPoint
   }
 
   var body: some View {
@@ -74,17 +71,24 @@ struct EdgeLineView: View {
     }
   }
 
+  /// Straight, middle to middle.
+  ///
+  /// It used to be a Bézier bowed out of the source and flattened into the target, which
+  /// reads well for one hand-off and badly for a lane of them: a level fans a dozen
+  /// curves across the same gap and they braid, and no two of them leave at the same
+  /// angle, so which card a line came from is a question you answer by tracing it. A
+  /// straight line between two anchors is the same statement with nothing to trace.
   private var line: Path {
     let route = route
     return Path { path in
       path.move(to: route.start)
-      path.addCurve(to: route.end, control1: route.outControl, control2: route.inControl)
+      path.addLine(to: route.end)
     }
   }
 
   private var head: Path {
     let route = route
-    let approach = CanvasEdgeGeometry.arrivalTangent(control: route.inControl, end: route.end)
+    let approach = route.start
     return Path { path in
       let corners = CanvasEdgeGeometry.arrowhead(at: route.end, from: approach)
       guard let first = corners.first else { return }

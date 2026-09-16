@@ -165,6 +165,9 @@ struct LaneLayout: Equatable {
     var placed: [UUID: Slot] = [:]
     var takenRows: Set<Int> = []
     var occupied: Set<Slot> = []
+    // Who handed off to each card, so a level can keep one parent's children together
+    // rather than running two parents' fans into one block — see `wrapLevels`.
+    var handedOffBy: [UUID: UUID] = [:]
 
     func place(_ node: LoopNode, preferring row: Int) {
       guard placed[node.id] == nil else { return }
@@ -178,6 +181,7 @@ struct LaneLayout: Equatable {
       // Walk this chain onward on the same row, so a hand-off reads as one line of work.
       for edge in graph.edges where edge.from == node.id {
         guard let next = graph.nodes[id: edge.to] else { continue }
+        if placed[next.id] == nil { handedOffBy[next.id] = node.id }
         place(next, preferring: candidate)
       }
     }
@@ -194,7 +198,7 @@ struct LaneLayout: Equatable {
     }
 
     let rows = Self.rowsPerLevel(within: rowBudget)
-    var wrapped = Self.wrapLevels(placed, rowsPerLevel: rows)
+    var wrapped = Self.wrapLevels(placed, rowsPerLevel: rows, handedOffBy: handedOffBy)
 
     // Everything left has no edge in either direction, so it has no level to be at and no
     // chain to be read along: its own block below the chains, wrapped by the same rule.
@@ -224,20 +228,76 @@ struct LaneLayout: Equatable {
     max(1, min(rowBudget, Metrics.maximumRowsPerLevel))
   }
 
-  /// Folds every level's rows at `rowsPerLevel`, the same rule for all of them.
+  /// Packs each level into a block of at most `rows` rows and wraps into the column
+  /// beside it after that, keeping one parent's children together.
   ///
-  /// The fold is on the row index rather than per level's own count, which is what keeps
-  /// a hand-off level with its parent: two loops on one chain share a row, so they fold
-  /// into the same column of their own levels and stay side by side.
-  private static func wrapLevels(_ placed: [UUID: Slot], rowsPerLevel rows: Int)
-    -> [UUID: Slot]
-  {
-    placed.mapValues { slot in
-      Slot(
-        column: slot.column, row: slot.row % rows,
-        subColumn: min(slot.row / rows, Metrics.maximumColumnsPerLevel - 1))
-    }
+  /// Packed *densely*: a level's own cards are renumbered 0, 1, 2… before the fold rather
+  /// than folded on whatever row a chain happened to reach. Folding the raw row left a
+  /// level of five cards scattered over four columns and twenty cells, because a fan-out
+  /// upstream had already spent those rows — that was the ragged, half-empty lane, and
+  /// most of the width it took up.
+  ///
+  /// Dense is not enough on its own, though: packed straight through, two parents' fans
+  /// run into one another mid-column and the level reads as a single set of children
+  /// belonging to nobody in particular. So a group that would be split starts the next
+  /// column instead, and the block of cards under one parent is a block you can point at.
+  /// A fan longer than a column still spans as many as it needs.
+  ///
+  /// Order is preserved, which is what keeps the simple cases lined up: two chains side
+  /// by side stay level with each other, and a 1:1 hand-off stays on its parent's row.
+  private static func wrapLevels(
+    _ placed: [UUID: Slot], rowsPerLevel rows: Int, handedOffBy: [UUID: UUID]
+  ) -> [UUID: Slot] {
+    var packed: [UUID: Slot] = [:]
+    for (level, members) in Dictionary(grouping: placed.map { ($0.key, $0.value) }, by: \.1.column)
+    {
+      // One group per parent, each in the order the chain walk reached it, and the groups
+      // themselves in that order too.
+      let ordered = members.sorted { $0.1.row < $1.1.row }
+      var groups: [[(UUID, Slot)]] = []
+      var index: [UUID: Int] = [:]
+      for member in ordered {
+        let key = handedOffBy[member.0] ?? UUID.zeroParent
+        if let existing = index[key] {
+          groups[existing].append(member)
+        } else {
+          index[key] = groups.count
+          groups.append([member])
+        }
+      }
 
+      var column = 0
+      var row = 0
+      for group in groups {
+        // A fan gets columns of its own — opened before it and closed after it — so the
+        // cards under one parent are a block you can point at. Two parents' fans packed
+        // into one column is the thing this is for: it reads as a single set of children
+        // belonging to nobody, whichever way the lines are drawn.
+        //
+        // A parent with one child is not a fan and shares the column, which is what keeps
+        // a lane of 1:1 chains one column wide and level with itself.
+        let isFan = group.count > 1
+        if isFan && row > 0 {
+          column += 1
+          row = 0
+        }
+        for member in group {
+          packed[member.0] = Slot(
+            column: level, row: row,
+            subColumn: min(column, Metrics.maximumColumnsPerLevel - 1))
+          row += 1
+          if row == rows {
+            column += 1
+            row = 0
+          }
+        }
+        if isFan && row > 0 {
+          column += 1
+          row = 0
+        }
+      }
+    }
+    return packed
   }
 
   /// A card's centre x: where its level starts, plus however far it wrapped within it.
@@ -318,4 +378,10 @@ struct LaneLayout: Equatable {
     }
     return depths
   }
+}
+
+extension UUID {
+  /// The key a card with no parent groups under: every beginning is a sibling of the
+  /// lane's origin, so they share one group rather than each earning a column.
+  fileprivate static let zeroParent = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
 }
