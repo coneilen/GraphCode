@@ -173,6 +173,9 @@ try {
   if ($runnerSource -notmatch '(?s)"packaging" \{\s*& .*?Packaging\.Signing\.Tests\.ps1.*?Packaging\.Tests\.ps1') {
     throw "RED: packaging validation does not run signed catalog integrity contracts"
   }
+  if ($runnerSource -notmatch '(?s)"terminal-gate" \{\s*& .*?ProviderPins\.Tests\.ps1.*?TerminalGate\.Tests\.ps1') {
+    throw "RED: terminal validation does not run provider pin no-divergence contracts"
+  }
   foreach ($source in @($runnerSource, $hardeningSource)) {
     if ($source -notmatch '-StubResponseDelayMilliseconds 150') {
       throw "RED: shell validation does not exercise delayed correlated responses"

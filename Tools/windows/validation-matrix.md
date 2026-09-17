@@ -17,6 +17,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 | Production Swift platform package | `pwsh Tools/windows/validate.ps1 -Task swift-production` |
 | Deterministic release hardening fixtures | `pwsh Tools/windows/validate.ps1 -Task hardening` |
 | Signed catalog integrity and publisher policy | `pwsh Tools\windows\Tests\Packaging.Signing.Tests.ps1` |
+| Product/investigation provider pin consistency | `pwsh Tools\windows\Tests\ProviderPins.Tests.ps1` |
 | Real-product packaging/install/upgrade/rollback | `pwsh Tools\windows\validate.ps1 -Task packaging` |
 | Shared Swift package | `swift test --package-path <shared-package>` once extracted |
 | macOS app/daemon/CLI | `make test` |
