@@ -7,9 +7,12 @@ param(
   [string] $Package,
   [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA "GraphCode\current"),
   [string] $Version,
+  [ValidatePattern("^[0-9a-fA-F]{40}$")]
   [string] $SignCertificate,
   [string] $SignTimestampUrl,
   [string] $SignToolPath,
+  [ValidatePattern("^[0-9a-fA-F]{40}$")]
+  [string] $TrustedSignerThumbprint,
   [string] $WinghosttyRoot,
   [string] $ZmxRoot,
   [string] $Zig0152 = $env:GRAPHCODE_ZIG0152,
@@ -61,7 +64,7 @@ function Restore-Shortcut([string] $source) {
 }
 function Copy-Tree([string] $source, [string] $destination) {
   New-Item -ItemType Directory -Force -Path $destination | Out-Null
-  Get-ChildItem -LiteralPath $source -File -Recurse | ForEach-Object {
+  Get-ChildItem -LiteralPath $source -File -Recurse -Force | ForEach-Object {
     $relative = $_.FullName.Substring($source.Length).TrimStart("\", "/")
     $target = Join-Path $destination $relative
     New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) | Out-Null
@@ -69,10 +72,11 @@ function Copy-Tree([string] $source, [string] $destination) {
   }
 }
 function Get-Manifest([string] $root) {
-  @(Get-ChildItem -LiteralPath $root -File -Recurse |
+  @(Get-ChildItem -LiteralPath $root -File -Recurse -Force |
     Where-Object {
       $_.FullName -ne (Join-Path $root "manifest.json") -and
-      $_.FullName -ne (Join-Path $root "checksums.sha256")
+      $_.FullName -ne (Join-Path $root "checksums.sha256") -and
+      $_.FullName -ne (Join-Path $root "package.cat")
     } |
     ForEach-Object {
       $relative = $_.FullName.Substring($root.Length).TrimStart("\", "/").Replace("\", "/")
@@ -93,16 +97,17 @@ function Normalize-ManifestPath([string] $path) {
   $leaf = $parts[-1]
   Require ($parts -notcontains "" -and $parts -notcontains "." -and $parts -notcontains "..") `
     "manifest contains an unsafe path: $path"
-  Require ($leaf -notin @("manifest.json", "checksums.sha256")) `
+  Require ($leaf -notin @("manifest.json", "checksums.sha256", "package.cat")) `
     "manifest contains a reserved filename: $path"
   Require ($normalized -notmatch "[<>:`"|?*]") "manifest contains an invalid path: $path"
   return $normalized
 }
 function Get-ActualPackageFiles([string] $root) {
-  @(Get-ChildItem -LiteralPath $root -File -Recurse |
+  @(Get-ChildItem -LiteralPath $root -File -Recurse -Force |
     Where-Object {
       $_.FullName -ne (Join-Path $root "manifest.json") -and
-      $_.FullName -ne (Join-Path $root "checksums.sha256")
+      $_.FullName -ne (Join-Path $root "checksums.sha256") -and
+      $_.FullName -ne (Join-Path $root "package.cat")
     } |
     ForEach-Object {
       Normalize-ManifestPath $_.FullName.Substring($root.Length).TrimStart("\", "/")
@@ -160,7 +165,7 @@ function Verify-Manifest([string] $root) {
     $normalizedEntries += $normalized.ToLowerInvariant()
     $file = Join-Path $root ($normalized -replace "/", "\")
     Require (Test-Path -LiteralPath $file -PathType Leaf) "manifest file is missing: $($entry.path)"
-    $item = Get-Item -LiteralPath $file
+    $item = Get-Item -LiteralPath $file -Force
     Require ($item.Length -eq [int64]$entry.size) "size mismatch: $normalized"
     $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
     Require ($actual -eq ([string]$entry.sha256).ToLowerInvariant()) "checksum mismatch: $normalized"
@@ -192,18 +197,52 @@ function Read-ProviderProvenance([string] $root) {
   }
   return $provenance
 }
-function Verify-SignedPackage([string] $root, [object] $metadata) {
-  if ($metadata.signing -ne "signed") { return }
+function Verify-SignedPackage(
+  [string] $root,
+  [object] $metadata,
+  [string] $trustedSigner = $TrustedSignerThumbprint
+) {
+  $catalogPath = Join-Path $root "package.cat"
+  if ($metadata.signing -ne "signed") {
+    Require (-not $trustedSigner) "trusted publisher verification requires a signed package"
+    Require (-not (Test-Path -LiteralPath $catalogPath)) "unsigned package contains a signing catalog"
+    return
+  }
+  Require ([bool]$trustedSigner) "trusted publisher thumbprint is required for signed packages"
+  Require ($trustedSigner -match "^[0-9a-fA-F]{40}$") "trusted publisher thumbprint is invalid"
+  Require (Test-Path -LiteralPath $catalogPath -PathType Leaf) "signed package has no catalog"
+  $signature = Get-AuthenticodeSignature -FilePath $catalogPath
+  Require ($signature.Status -eq "Valid") "catalog Authenticode verification failed"
+  Require ($signature.SignerCertificate.Thumbprint -eq $trustedSigner) "catalog publisher does not match trusted thumbprint"
+  $catalog = Test-FileCatalog -CatalogFilePath $catalogPath -Path $root -Detailed
+  Require ($catalog.HashAlgorithm -eq "SHA256") "catalog must use SHA256"
+  Require ($catalog.Status -eq "Valid") "catalog contents do not match package files"
   Require (Test-Path (Join-Path $root "SIGNATURES.txt")) "signed package has no signature record"
   $tool = if ($SignToolPath) { $SignToolPath } else { (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
-  foreach ($file in @(Get-ChildItem (Join-Path $root "bin") -Filter *.exe)) {
+  foreach ($file in @(Get-ChildItem (Join-Path $root "bin") -Filter *.exe -File -Recurse -Force)) {
     $authenticode = Get-AuthenticodeSignature -FilePath $file.FullName
     Require ($authenticode.Status -eq "Valid") "clean-machine Authenticode verification failed: $($file.Name)"
+    Require ($authenticode.SignerCertificate.Thumbprint -eq $trustedSigner) "executable publisher does not match: $($file.Name)"
     if ($tool -and (Test-Path $tool)) {
       & $tool verify /pa $file.FullName *> $null
       Require ($LASTEXITCODE -eq 0) "optional signtool diagnostic failed: $($file.Name)"
     }
   }
+}
+function Verify-PackageContents([string] $root, [string] $trustedSigner = $TrustedSignerThumbprint) {
+  $root = (Resolve-Path -LiteralPath $root).Path
+  $metadata = Assert-Package $root
+  Verify-Manifest $root | Out-Null
+  Read-ProviderProvenance $root | Out-Null
+  Verify-SignedPackage $root $metadata $trustedSigner
+  return $metadata
+}
+function Sign-PackageFile([string] $tool, [string] $path) {
+  $arguments = @("sign", "/sha1", $SignCertificate, "/fd", "sha256")
+  if ($SignTimestampUrl) { $arguments += @("/tr", $SignTimestampUrl, "/td", "sha256") }
+  $arguments += $path
+  & $tool @arguments
+  Require ($LASTEXITCODE -eq 0) "signtool failed for $(Split-Path $path -Leaf)"
 }
 function Get-TaskIdentity([string] $support) {
   $sid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
@@ -217,6 +256,13 @@ function Xml-Escape([string] $value) {
 }
 function Build-Package {
   Require ($Version -and $Version -notin @("dev", "0.0.0-dev")) "release packaging requires a non-dev package version"
+  if ($SignCertificate) {
+    Require ($SignCertificate -match "^[0-9a-fA-F]{40}$") "signing certificate thumbprint is invalid"
+    Require (-not $TrustedSignerThumbprint -or $TrustedSignerThumbprint -eq $SignCertificate) `
+      "trusted publisher thumbprint does not match signing certificate"
+  } else {
+    Require (-not $TrustedSignerThumbprint) "trusted publisher verification requires -SignCertificate when building"
+  }
   $out = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $repoRoot ".build\windows\packages" }
   New-Item -ItemType Directory -Force -Path $out | Out-Null
   $staging = Join-Path $out ".staging-$([guid]::NewGuid())"
@@ -325,13 +371,9 @@ $zmxLicense
   Write-Metadata $root $Version
   if ($SignCertificate) {
     $signtool = if ($SignToolPath) { (Resolve-Path $SignToolPath).Path } else { (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
-    Require $signtool "signtool.exe was not found; signed packaging requires Windows SDK"
-    Get-ChildItem (Join-Path $root "bin") -Filter *.exe | ForEach-Object {
-      $args = @("sign", "/sha1", $SignCertificate)
-      if ($SignTimestampUrl) { $args += @("/tr", $SignTimestampUrl, "/td", "sha256") }
-      $args += $_.FullName
-      & $signtool @args
-      Require ($LASTEXITCODE -eq 0) "signtool failed for $($_.Name)"
+    Require ([bool]$signtool) "signtool.exe was not found; signed packaging requires Windows SDK"
+    Get-ChildItem (Join-Path $root "bin") -Filter *.exe -File -Recurse -Force | ForEach-Object {
+      Sign-PackageFile $signtool $_.FullName
     }
     Set-Content (Join-Path $root "SIGNATURES.txt") -Value "Signed with certificate thumbprint $SignCertificate" -Encoding utf8
     $signedProvenance = Get-Content $provenancePath -Raw | ConvertFrom-Json
@@ -342,9 +384,15 @@ $zmxLicense
   $manifest | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $root "manifest.json") -Encoding utf8
   $lines = $manifest.files | ForEach-Object { "$($_.sha256)  $($_.path)" }
   $lines | Set-Content (Join-Path $root "checksums.sha256") -Encoding utf8
+  if ($SignCertificate) {
+    $catalogPath = Join-Path $root "package.cat"
+    New-FileCatalog -Path $root -CatalogFilePath $catalogPath -CatalogVersion 2.0 | Out-Null
+    Sign-PackageFile $signtool $catalogPath
+  }
+  Verify-PackageContents $root $SignCertificate | Out-Null
   $archive = Join-Path $out "GraphCode-$Version-windows-x86_64.zip"
   if (Test-Path $archive) { Remove-Item $archive -Force }
-  Compress-Archive -Path $root -DestinationPath $archive -CompressionLevel Optimal
+  [IO.Compression.ZipFile]::CreateFromDirectory($root, $archive, [IO.Compression.CompressionLevel]::Optimal, $true)
   $final = Join-Path $out "GraphCode-$Version-windows-x86_64"
   if (Test-Path $final) { Remove-Item $final -Recurse -Force }
   Move-Item $root $final
@@ -476,15 +524,19 @@ function Start-DaemonTask {
 function Install-Package([bool] $upgrade) {
   try {
     $root = Open-Package ($(if ($Package) { $Package } else { Fail "-Package is required" }))
-    $metadata = Assert-Package $root
-    Verify-Manifest $root | Out-Null
-    Read-ProviderProvenance $root | Out-Null
-    Verify-SignedPackage $root $metadata
+    $metadata = Verify-PackageContents $root
     if ($versionWasProvided -and $metadata.version -ne $Version) { Fail "version mismatch: expected $Version, package is $($metadata.version)" }
   $parent = Split-Path $InstallRoot -Parent
   New-Item -ItemType Directory -Force -Path $parent | Out-Null
   $stage = Join-Path $parent ".GraphCode-install-$([guid]::NewGuid())"
-  Copy-Tree $root $stage
+  try {
+    Copy-Tree $root $stage
+    $stagedMetadata = Verify-PackageContents $stage
+    Require ($stagedMetadata.version -eq $metadata.version) "package version changed during staging"
+  } catch {
+    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+    throw
+  }
   $backup = Join-Path $parent ".GraphCode-rollback-$([guid]::NewGuid())"
   $shortcutBackup = Join-Path $parent ".GraphCode-shortcut-$([guid]::NewGuid())"
   New-Item -ItemType Directory -Force $shortcutBackup | Out-Null
@@ -536,7 +588,7 @@ function Uninstall-Package {
 
 switch ($Command) {
   "Build" { Build-Package }
-  "Verify" { try { $root = Open-Package $Package; $metadata = Assert-Package $root; Verify-Manifest $root | Out-Null; Read-ProviderProvenance $root | Out-Null; Verify-SignedPackage $root $metadata; Write-Output "Package verification: PASS" } finally { Close-Package } }
+  "Verify" { try { $root = Open-Package $Package; Verify-PackageContents $root | Out-Null; Write-Output "Package verification: PASS" } finally { Close-Package } }
   "Install" { Install-Package $false }
   "Upgrade" { Install-Package $true }
   "Uninstall" { Uninstall-Package }

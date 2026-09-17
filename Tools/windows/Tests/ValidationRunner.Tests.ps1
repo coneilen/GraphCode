@@ -170,6 +170,9 @@ try {
     throw "RED: Windows shell CI does not invoke the shell task containing live UI Automation"
   }
   $runnerSource = Get-Content $runner -Raw
+  if ($runnerSource -notmatch '(?s)"packaging" \{\s*& .*?Packaging\.Signing\.Tests\.ps1.*?Packaging\.Tests\.ps1') {
+    throw "RED: packaging validation does not run signed catalog integrity contracts"
+  }
   foreach ($source in @($runnerSource, $hardeningSource)) {
     if ($source -notmatch '-StubResponseDelayMilliseconds 150') {
       throw "RED: shell validation does not exercise delayed correlated responses"

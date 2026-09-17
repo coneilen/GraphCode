@@ -50,8 +50,11 @@ pwsh -NoProfile -File Tools\windows\validate.ps1 `
 
 `Tools\windows\validate.ps1 -Task windows-shell` performs pin, clean-worktree,
 format, lifecycle-contract, real provider build, and native UI Automation live
-event checks. This scaffold has
-package metadata only; it intentionally does not create an installer.
+event checks. `Tools\windows\package.ps1` builds and verifies self-contained ZIP
+packages and supports per-user install/upgrade/rollback. Opt-in signed packages
+bind the complete payload with a publisher-pinned Authenticode catalog; see
+`Tools\windows\PACKAGING.md`. There is not yet a published signed installer or
+an automatic install/relaunch path in the native updater.
 
 ## Tray lifecycle coverage
 
