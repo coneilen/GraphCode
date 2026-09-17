@@ -16,6 +16,8 @@ The Windows port must have runnable commands before implementation fleets begin.
 | Hosted Windows without a WSL distribution | `pwsh Tools/windows/validate.ps1 -Task all -SkipWslRemoteE2E` |
 | Production Swift platform package | `pwsh Tools/windows/validate.ps1 -Task swift-production` |
 | Deterministic release hardening fixtures | `pwsh Tools/windows/validate.ps1 -Task hardening` |
+| Signed catalog integrity and publisher policy | `pwsh Tools\windows\Tests\Packaging.Signing.Tests.ps1` |
+| Real-product packaging/install/upgrade/rollback | `pwsh Tools\windows\validate.ps1 -Task packaging` |
 | Shared Swift package | `swift test --package-path <shared-package>` once extracted |
 | macOS app/daemon/CLI | `make test` |
 | macOS format/lint | `make check` |

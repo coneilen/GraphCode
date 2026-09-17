@@ -7,6 +7,10 @@ $script = Join-Path $repoRoot "Tools\windows\package.ps1"
 $fixture = Join-Path $repoRoot ".build\packaging-test-fixture-$PID"
 $out = Join-Path $repoRoot ".build\packaging-test-output-$PID"
 $install = Join-Path $repoRoot ".build\packaging install $PID\深い\GraphCode"
+$oldProfile = $env:USERPROFILE
+$oldAppData = $env:APPDATA
+$oldSupport = $env:GRAPHCODE_SUPPORT_DIR
+$oldUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 
 function Invoke-Package([string] $command, [hashtable] $extra = @{}) {
   $args = @("-NoProfile", "-File", $script, "-Command", $command)
@@ -35,6 +39,9 @@ try {
   if (-not $zig0160) { $zig0160 = Join-Path $depot "GraphCode-worktrees\ghostty-winghostty-spike\zig-x86_64-windows-0.16.0\zig.exe" }
   if (-not (Test-Path $wingRoot) -or -not (Test-Path $zmxRoot)) { throw "trusted provider roots are required" }
   New-Item -ItemType Directory -Force $fixture | Out-Null
+  $env:USERPROFILE = Join-Path $fixture "user"
+  $env:APPDATA = Join-Path $env:USERPROFILE "AppData\Roaming"
+  $env:GRAPHCODE_SUPPORT_DIR = $null
   $testZmxRoot = Join-Path $fixture "zmx-provider"
   & git clone --no-checkout --local $zmxRoot $testZmxRoot *> $null
   if ($LASTEXITCODE -ne 0) { throw "could not clone isolated pinned zmx provider" }
@@ -68,6 +75,9 @@ try {
   }
   Copy-Item (Join-Path $testZmxRoot "zig-out\bin\zmx.exe") (Join-Path $fixtureBin "zmx.exe")
   Get-ChildItem $release -Filter *.dll | Copy-Item -Destination $fixtureBin
+  $hiddenFixture = Join-Path $fixtureBin "hidden-payload.txt"
+  Set-Content $hiddenFixture "preserve hidden package contents"
+  (Get-Item $hiddenFixture).Attributes = [IO.FileAttributes]::Hidden
   $untrusted = & pwsh -NoProfile -File $script -Command Build -InputDirectory $fixtureBin `
     -OutputDirectory $out -Version "untrusted" 2>&1 | Out-String
   if ($LASTEXITCODE -eq 0 -or $untrusted -notmatch "trusted pinned") {
@@ -85,6 +95,20 @@ try {
   Invoke-Package "Verify" @{ Package = $zip }
   Invoke-Package "Install" @{ Package = $zip; InstallRoot = $install; NoScheduledTask = $true }
   if (-not (Test-Path (Join-Path $install "bin\graphcode.exe"))) { throw "install did not place CLI" }
+  if (-not (Test-Path -LiteralPath (Join-Path $install "bin\hidden-payload.txt"))) {
+    throw "ZIP packaging lost a hidden manifest payload"
+  }
+  $installedHash = (Get-FileHash (Join-Path $install "bin\graphcode.exe")).Hash
+  foreach ($command in @("Verify", "Install", "Upgrade")) {
+    $rejected = & pwsh -NoProfile -File $script -Command $command -Package $zip `
+      -InstallRoot $install -TrustedSignerThumbprint ("A" * 40) 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0 -or $rejected -notmatch "trusted publisher verification requires a signed package") {
+      throw "$command did not reject an unsigned package under publisher policy: $rejected"
+    }
+    if ((Get-FileHash (Join-Path $install "bin\graphcode.exe")).Hash -ne $installedHash) {
+      throw "$command changed the installed executable before publisher verification"
+    }
+  }
   $userData = Join-Path $env:USERPROFILE ".graphcode\packaging-test-$PID\user.json"
   New-Item -ItemType Directory -Force -Path (Split-Path $userData -Parent) | Out-Null
   Set-Content $userData "preserve" -Force
@@ -150,7 +174,9 @@ try {
   Write-Output "Packaging executable install/upgrade/uninstall tests: PASS"
   exit 0
 } finally {
-  Remove-Item $fixture,$out,(Split-Path $install -Parent), `
-    (Join-Path $env:USERPROFILE ('.graphcode\packaging-test-' + $PID)) `
-    -Recurse -Force -ErrorAction SilentlyContinue
+  $env:USERPROFILE = $oldProfile
+  $env:APPDATA = $oldAppData
+  $env:GRAPHCODE_SUPPORT_DIR = $oldSupport
+  [Environment]::SetEnvironmentVariable("Path", $oldUserPath, "User")
+  Remove-Item $fixture,$out,(Split-Path $install -Parent) -Recurse -Force -ErrorAction SilentlyContinue
 }
