@@ -17,6 +17,18 @@ Both commits are published on dedicated branches in the public `coneilen`
 provider repositories. The bootstrap creates detached, exact-revision
 checkouts without copying provider source into GraphCode.
 
+The annotated `graphcode-windows-baseline-2026-09-17` tag preserves each exact
+pin. The provider forks protect these tags against updates/deletion and the
+dedicated branches against deletion/history rewrites; see
+`Tools\windows\PACKAGING.md` for the recorded ruleset IDs and retention limits.
+These are source-retention tags, not signed Windows releases.
+
+`graphcode-windows\provider-pins.json` is authoritative. The terminal gate's
+contract compares its schema and all provider fields against this copy, and
+`Tools\windows\Tests\ProviderPins.Tests.ps1` injects drift into both sides.
+Changing only one copy must fail validation; JSON property order and explanatory
+fallback wording do not change the provider identity.
+
 ## Build
 
 Build Winghostty's host artifact at its pinned local SHA, build zmx at its

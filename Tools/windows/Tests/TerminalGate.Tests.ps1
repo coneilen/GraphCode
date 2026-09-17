@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-  [switch] $List
+  [switch] $List,
+  [string] $ProductPinsPath,
+  [string] $GatePinsPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,8 +38,32 @@ foreach ($path in @(
     "required gate file is missing: $path"
 }
 
-$pins = Get-Content -LiteralPath (Join-Path $gateRoot "provider-pins.json") -Raw |
+if (-not $ProductPinsPath) {
+  $ProductPinsPath = Join-Path $repoRoot "graphcode-windows\provider-pins.json"
+}
+if (-not $GatePinsPath) {
+  $GatePinsPath = Join-Path $gateRoot "provider-pins.json"
+}
+$pins = Get-Content -LiteralPath $GatePinsPath -Raw |
   ConvertFrom-Json
+$productPins = Get-Content -LiteralPath $ProductPinsPath -Raw | ConvertFrom-Json
+Assert-Contract ($productPins.schemaVersion -eq $pins.schemaVersion) "provider pin schemas differ"
+foreach ($provider in @("winghostty", "zmx")) {
+  $product = $productPins.$provider
+  $gate = $pins.$provider
+  Assert-Contract ($product -is [pscustomobject] -and $gate -is [pscustomobject]) `
+    "provider pins differ: $provider"
+  $fields = @(@($product.PSObject.Properties.Name) + @($gate.PSObject.Properties.Name)) |
+    Sort-Object -Unique -CaseSensitive
+  foreach ($field in $fields) {
+    Assert-Contract (
+      $product.PSObject.Properties.Name -ccontains $field -and
+      $gate.PSObject.Properties.Name -ccontains $field -and
+      $product.$field -is [string] -and $gate.$field -is [string] -and
+      $product.$field -ceq $gate.$field
+    ) "provider pins differ: $provider.$field"
+  }
+}
 Assert-Contract ($pins.schemaVersion -eq 1) "provider pin schema is not 1"
 Assert-Contract ($pins.winghostty.sha -eq
   "f5abc059e4ca58b376eb209313aca7784659c679") "Winghostty SHA is not exact"

@@ -79,3 +79,33 @@ DLLs, metadata, manifests, file sets, and checksums. Its OS signature-trust
 decisions are simulated without modifying certificate stores; it is not a
 production Authenticode or signed-installer lifecycle proof. It runs before the
 existing real-product packaging/lifecycle suite under `validate.ps1 -Task packaging`.
+
+## Retained provider sources
+
+Both exact public provider pins have the annotated source-retention tag
+`graphcode-windows-baseline-2026-09-17`:
+
+| Provider | Pinned commit | Retained branch |
+|---|---|---|
+| [coneilen/winghostty](https://github.com/coneilen/winghostty/tree/graphcode-windows-baseline-2026-09-17) | `f5abc059e4ca58b376eb209313aca7784659c679` | `graphcode-host` |
+| [coneilen/zmx](https://github.com/coneilen/zmx/tree/graphcode-windows-baseline-2026-09-17) | `029e11d2b19162fb3bdf90c8270237d303b8bfb4` | `graphcode-quickchat-hang` |
+
+As verified on 2026-09-17, each fork has an active ruleset forbidding updates or
+deletion of `refs/tags/graphcode-windows-*`, without bypass actors. Separate
+active rulesets prevent deletion and non-fast-forward changes of the branches
+above; normal forward development is allowed. The Winghostty tag/branch ruleset
+IDs are `23625509`/`23625510`; zmx's are `23625508`/`23625511`.
+Administrators can still change rulesets or repository availability; these
+settings are retention controls, not an irrevocable archival guarantee.
+
+These tags preserve source, not signed product releases. No installer or binary
+asset is published by creating them. Public CI can fetch them without provider
+credentials; collaborator permissions were not changed.
+
+`graphcode-windows\provider-pins.json` remains the source of truth. Bootstrap and
+packaging still use exact commit SHAs, not moving branch or tag resolution.
+The terminal gate checks every provider field against its investigation copy,
+including repository, remote URL, SHA, artifact path, and Zig version.
+`ProviderPins.Tests.ps1` proves drift in either file is rejected, while JSON
+property order and explanatory fallback wording are immaterial. Run it directly
+or through `validate.ps1 -Task terminal-gate`.

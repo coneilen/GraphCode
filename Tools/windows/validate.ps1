@@ -563,6 +563,7 @@ function Invoke-Task([string] $name) {
       Write-Host "Privacy checks passed"
     }
     "terminal-gate" {
+      & (Join-Path $repoRoot "Tools\windows\Tests\ProviderPins.Tests.ps1")
       & (Join-Path $repoRoot "Tools\windows\Tests\TerminalGate.Tests.ps1")
       if ($LASTEXITCODE -ne 0) {
         throw "Windows terminal gate contract failed with exit code $LASTEXITCODE"
