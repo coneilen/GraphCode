@@ -16,6 +16,7 @@ import GraphcodeKit
 /// `detailSelection` (which canvas —
 /// a folder's, or Quick Chats' — is the fallback when no loop is open).
 @Reducer
+// swiftlint:disable:next type_body_length
 struct AppFeature {
   /// Which canvas the detail pane falls back to when no loop's workspace is open.
   ///
@@ -403,9 +404,14 @@ struct AppFeature {
             state.openLoop?.graph.mailroom = mailbox.posts
           }
           return .send(.projects(.element(id: path, action: .daemonEvent(event))))
-
         case .nodesChanged(let path, let revision, let nodes):
           return foldDelta(state, path: path, revision: revision, nodes: nodes)
+          return foldDelta(state, path: path, revision: revision, nodes: nodes)
+        // Only the Windows shell learns about quick chats from the daemon; this app owns
+        // them locally through `quickChatStore`, so the broadcast is redundant here.
+        case .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:
+          return .none
+          return .none
         }
 
       case .projectHeaderTapped(let path):

@@ -5,6 +5,9 @@ import GraphcodeKit
 import MailroomKit
 import UniformTypeIdentifiers
 
+// This reducer is split across focused extensions; its core declaration remains the
+// integration point for their shared state and actions.
+// swiftlint:disable file_length
 /// One open project's graph canvas — one of possibly several the sidebar shows at once
 /// (multi-project sidebar follow-up to Phase 4, docs/07-roadmap.md#phase-4--projects).
 ///
@@ -25,6 +28,7 @@ import UniformTypeIdentifiers
 /// daemon subscription for the app's whole lifetime and forwards this project's
 /// `DaemonEvent`s in via `.daemonEvent`.
 @Reducer
+// swiftlint:disable:next type_body_length
 struct ProjectFeature {
   @ObservableState
   struct State: Equatable, Identifiable {
@@ -87,6 +91,7 @@ struct ProjectFeature {
     var draftSchedule: CompositeSchedule = .daily
     var draftScheduleTime = "09:00"
     var draftBackend: CLISessionBackendKind = .claudeCode
+    var draftModelTier: ModelTier?
     var draftWorktree: WorktreeSelection = .none
     var draftBranch = ""
     /// A composite draft's carried sub-graph — empty for a hand-made composite,
@@ -375,6 +380,8 @@ struct ProjectFeature {
           // Not this feature's concern: AppFeature routes the listing to `welcome`
           // and folds a delta into the snapshot it holds before routing it here.
           break
+        case .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:
+          break  // Quick chats belong to no project — AppFeature owns them.
         }
         return .none
 
@@ -881,6 +888,8 @@ extension ProjectFeature {
     state.draftBackend =
       backend ?? state.openCompositeID.flatMap { state.graph.nodes[id: $0]?.backend }
       ?? GraphcodeSettingsStore.load().defaultBackend
+    let settings = GraphcodeSettingsStore.load()
+    state.draftModelTier = settings.autoSelectsModel ? nil : settings.defaultModelTier
     state.draftWorktree = .none
     state.draftBranch = ""
     state.draftParentNodeID = parentNodeID

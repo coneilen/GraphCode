@@ -350,6 +350,57 @@ struct GraphStoreTests {
   }
 
   @Test
+  func anInvalidDraftReturnsARejectedCommandResult() async {
+    let store = GraphStore()
+
+    let result = await store.handle(
+      .createNode(NodeDraft(title: "No goal", loopType: .goalBased)))
+
+    guard case .rejected(let message, let snapshot) = result else {
+      Issue.record("expected a rejected command result")
+      return
+    }
+    #expect(message == "node creation refused: draft is invalid")
+    #expect(snapshot.nodes.isEmpty)
+    #expect(await store.graph.nodes.isEmpty)
+  }
+
+  @Test
+  func concurrentCommandsReturnTheirOwnPostCommandSnapshots() async {
+    let store = GraphStore()
+    let firstDraft = turnDraft("First", check: "Sound?")
+    let secondDraft = turnDraft("Second", check: "Clear?")
+
+    async let firstResult = store.handle(.createNode(firstDraft))
+    async let secondResult = store.handle(.createNode(secondDraft))
+    let resolvedFirst = await firstResult
+    let resolvedSecond = await secondResult
+    let firstSnapshot: LoopGraph? = {
+      guard case .applied(let graph) = resolvedFirst else {
+        Issue.record("expected the first concurrent command to apply")
+        return nil
+      }
+      return graph
+    }()
+    let secondSnapshot: LoopGraph? = {
+      guard case .applied(let graph) = resolvedSecond else {
+        Issue.record("expected the second concurrent command to apply")
+        return nil
+      }
+      return graph
+    }()
+    let snapshots = [firstSnapshot, secondSnapshot].compactMap { $0 }
+
+    #expect(firstSnapshot?.nodes.contains { $0.title == "First" } == true)
+    #expect(secondSnapshot?.nodes.contains { $0.title == "Second" } == true)
+    #expect(Set(snapshots.map(\.nodes.count)) == Set([1, 2]))
+    #expect(
+      snapshots.contains {
+        Set($0.nodes.map(\.title)) == Set(["First", "Second"])
+      })
+  }
+
+  @Test
   func anInvalidDraftStartsNoSession() async {
     // Rejecting the node but still launching its session would leave an orphan `claude`
     // with nothing in the graph pointing at it.

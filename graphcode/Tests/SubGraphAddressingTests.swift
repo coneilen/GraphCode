@@ -1,9 +1,10 @@
 import ComposableArchitecture
-import Foundation
-import IdentifiedCollections
-import Testing
 
-@testable import GraphcodeKit
+import Foundation
+
+import IdentifiedCollections
+
+import Testing
 
 /// Addressing a sub-graph child by its own id — the fix for issue #217 item 15.
 ///
@@ -12,6 +13,8 @@ import Testing
 /// Resolving that id against the top-level nodes only answered "no loop <id> in this
 /// graph" for a loop that plainly existed, which locked composite children out of
 /// memo, refine, send, delete, and edges from the CLI entirely.
+@testable import GraphcodeKit
+
 @Suite
 struct SubGraphAddressingTests {
   private func storeWithComposite(
@@ -219,7 +222,11 @@ struct SubGraphAddressingTests {
     let (store, _) = storeWithComposite(
       subNodes: [worker],
       onAnnounceError: { message in errors.withValue { $0.append(message) } })
-    await store.handle(.createNode(NodeDraft(title: "Outside", loopType: .turnBased)))
+    await store.handle(
+      .createNode(
+        NodeDraft(
+          title: "Outside", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     let outsideID = try #require(await store.graph.nodes.last?.id)
 
     await store.handle(.createEdge(from: outsideID, to: worker.id, spec: EdgeSpec()))
@@ -234,7 +241,11 @@ struct SubGraphAddressingTests {
     let errors = LockIsolated<[String]>([])
     let (store, _) = storeWithComposite(
       onAnnounceError: { message in errors.withValue { $0.append(message) } })
-    await store.handle(.createNode(NodeDraft(title: "Outside", loopType: .turnBased)))
+    await store.handle(
+      .createNode(
+        NodeDraft(
+          title: "Outside", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     let outsideID = try #require(await store.graph.nodes.last?.id)
     let missing = UUID()
 
