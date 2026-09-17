@@ -184,6 +184,10 @@ try {
   if ($runnerSource -notmatch '(?s)Pinned GraphCode Windows shell build and smoke.*?Native UI Automation live gate.*?uia-live-gate\.ps1') {
     throw "RED: Windows shell validation does not execute the UI Automation live gate"
   }
+  $shellTests = Get-Content (Join-Path $PSScriptRoot "WindowsShell.Tests.ps1") -Raw
+  if ($shellTests -notmatch '(?s)Windows update feed executable tests.*?zig test src\\WindowsUpdates\.zig.*?-lwinhttp') {
+    throw "RED: Windows shell validation does not run the native updater tests"
+  }
   if ($runnerSource -notmatch '\$SkipWslRemoteE2E' -or
       $runnerSource -notmatch '"--skip-local-wsl"') {
     throw "RED: hosted validation cannot explicitly isolate unavailable local WSL fixtures"
