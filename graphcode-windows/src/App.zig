@@ -232,6 +232,7 @@ pub const App = struct {
     update_cancel: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     update_generation: u64 = 0,
     update_pending: bool = false,
+    update_user_initiated: bool = false,
     update_version: []u8 = &.{},
     update_release_url: []u8 = &.{},
     smoke_restart_index: ?usize = null,
@@ -411,7 +412,7 @@ pub const App = struct {
         if (self.workspace) |workspace| try workspace.startInputWorker();
         }
         self.layoutWorkspace();
-        if (!envFlag("GRAPHCODE_UIA_UPDATE_AVAILABLE")) self.requestUpdateCheck();
+        if (!envFlag("GRAPHCODE_UIA_UPDATE_AVAILABLE")) self.requestUpdateCheck(false);
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON")) |value| {
             defer self.allocator.free(value);
             self.require_smoke_contract = std.mem.eql(u8, value, "1");
@@ -1138,7 +1139,7 @@ pub const App = struct {
         self.update_state = WindowsUpdates.CheckState.configure(draft.beta);
         self.update_lock.unlock();
         self.setStatus("Checking for updates…");
-        self.requestUpdateCheck();
+        self.requestUpdateCheck(false);
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
@@ -1216,13 +1217,14 @@ pub const App = struct {
 
     pub fn checkForUpdates(self: *App) void {
         self.setStatus("Checking for updates...");
-        self.requestUpdateCheck();
+        self.requestUpdateCheck(true);
         self.updateNativeChrome();
     }
 
-    fn requestUpdateCheck(self: *App) void {
+    fn requestUpdateCheck(self: *App, user_initiated: bool) void {
             self.update_lock.lock();
             self.update_generation += 1;
+            self.update_user_initiated = user_initiated;
             self.update_pending = true;
             if (self.update_thread != null) {
                 self.update_cancel.store(true, .release);
@@ -1263,7 +1265,7 @@ pub const App = struct {
         };
         defer self.allocator.free(version);
         var client = WindowsUpdates.CheckClient{ .allocator = self.allocator };
-        const result = client.checkWithCancel(beta, version, &self.update_cancel) catch {
+        var result = client.checkWithCancel(beta, version, &self.update_cancel) catch {
             self.update_lock.lock();
             if (generation == self.update_generation and !self.update_cancel.load(.acquire))
                 self.update_state = .{ .channel = if (beta) .beta else .stable, .state = .failed };
@@ -1271,22 +1273,16 @@ pub const App = struct {
             self.update_lock.unlock();
             return;
         };
-        defer {
-            var owned = result;
-            owned.deinit(self.allocator);
-        }
-        const version_copy = if (result.version) |value| self.allocator.dupe(u8, value) catch null else null;
-        const url_copy = if (result.release_url) |value| self.allocator.dupe(u8, value) catch null else null;
+        defer result.deinit(self.allocator);
         self.update_lock.lock();
         if (generation == self.update_generation and !self.update_cancel.load(.acquire)) {
             self.update_state = .{ .channel = result.channel, .state = result.state };
             if (self.update_version.len != 0) self.allocator.free(self.update_version);
             if (self.update_release_url.len != 0) self.allocator.free(self.update_release_url);
-            self.update_version = version_copy orelse &.{};
-            self.update_release_url = url_copy orelse &.{};
-        } else {
-            if (version_copy) |value| self.allocator.free(value);
-            if (url_copy) |value| self.allocator.free(value);
+            self.update_version = result.version orelse &.{};
+            self.update_release_url = result.release_url orelse &.{};
+            result.version = null;
+            result.release_url = null;
         }
         self.update_done = true;
         self.update_lock.unlock();
@@ -1304,7 +1300,7 @@ pub const App = struct {
                 const pending = self.update_pending;
                 self.update_pending = false;
                 const label = self.update_state.label();
-                const available = self.update_state.state == .available;
+                const present_offer = self.update_state.shouldPresentOffer(self.update_user_initiated);
                 const version = self.update_version;
                 const release_url = self.update_release_url;
                 self.update_lock.unlock();
@@ -1312,19 +1308,29 @@ pub const App = struct {
                     self.launchUpdateCheck();
                 } else {
                     self.setStatus(label);
-                    if (available) self.showAvailableUpdate(version, release_url);
+                    if (present_offer) self.showAvailableUpdate(version, release_url);
                 }
             }
     }
 
     fn showAvailableUpdate(self: *App, version: []const u8, release_url: []const u8) void {
+        const url = WindowsUpdates.releasePageUrl(release_url) catch {
+            self.setStatus("Update release URL is not a trusted GraphCode release page");
+            return;
+        };
         const message = std.fmt.allocPrint(
             self.allocator,
-            "GraphCode {s} is available.\n\nOpen the verified GitHub release page to review release notes and download the Windows package?",
+            "GraphCode {s} is available.\n\nOpen the verified GitHub release page to review release notes?\n\nIn-app Windows installation and relaunch are not available. Release assets may target other platforms.",
             .{if (version.len == 0) "update" else version},
-        ) catch return;
+        ) catch {
+            self.setStatus("Unable to prepare the update offer");
+            return;
+        };
         defer self.allocator.free(message);
-        const message_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, message) catch return;
+        const message_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, message) catch {
+            self.setStatus("Unable to encode the update offer");
+            return;
+        };
         defer self.allocator.free(message_wide);
         if (c.MessageBoxW(
             self.window.hwnd,
@@ -1332,7 +1338,6 @@ pub const App = struct {
             std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Update Available").ptr,
             c.MB_ICONINFORMATION | c.MB_YESNO | c.MB_DEFBUTTON1,
         ) != c.IDYES) return;
-        const url = if (release_url.len != 0) release_url else "https://github.com/GraphCode/GraphCode/releases";
         const url_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, url) catch {
             self.setStatus("Unable to encode the release URL");
             return;
@@ -1358,7 +1363,11 @@ pub const App = struct {
         defer if (version) |value| self.allocator.free(value);
         defer if (release_url) |value| self.allocator.free(value);
         if (!available) return;
-        self.showAvailableUpdate(version orelse "", release_url orelse "");
+        if (version == null or release_url == null) {
+            self.setStatus("Unable to prepare the update offer");
+            return;
+        }
+        self.showAvailableUpdate(version.?, release_url.?);
     }
 
     fn addRemoteRepository(self: *App) void {
@@ -2116,7 +2125,7 @@ pub const App = struct {
             if (self.update_version.len != 0) self.allocator.free(self.update_version);
             if (self.update_release_url.len != 0) self.allocator.free(self.update_release_url);
             self.update_version = self.allocator.dupe(u8, "9.9.9-test") catch &.{};
-            self.update_release_url = self.allocator.dupe(u8, "https://github.com/GraphCode/GraphCode/releases/tag/v9.9.9-test") catch &.{};
+            self.update_release_url = self.allocator.dupe(u8, WindowsUpdates.releases_page_url ++ "/tag/v9.9.9-test") catch &.{};
             self.update_lock.unlock();
         }
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_INGRESS_ERROR")) |message| {

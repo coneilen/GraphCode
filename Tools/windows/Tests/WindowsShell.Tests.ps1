@@ -36,6 +36,11 @@ $nativeFormsSource = Get-Content (Join-Path $shellRoot "src\NativeForms.zig") -R
 $inputSource = Get-Content (Join-Path $shellRoot "src\InputRouter.zig") -Raw
 $stubSource = Get-Content (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") -Raw
 Assert-Contract ($appSource -match
+  '(?s)pub fn checkForUpdates.*?requestUpdateCheck\(true\)' -and
+  $appSource -match 'if \(!envFlag\("GRAPHCODE_UIA_UPDATE_AVAILABLE"\)\) self\.requestUpdateCheck\(false\)' -and
+  $appSource -match 'shouldPresentOffer\(self\.update_user_initiated\)') `
+  "explicit and background update checks must preserve their presentation intent"
+Assert-Contract ($appSource -match
   '(?s)app\.smoke_tick >= 16 and\s*app\.client\.connectionState\(\) == \.connected and\s*app\.currentProject\(\) != null and app\.model\.selected\(\) != null and\s*!app\.smoke_action_requested') `
   "smoke graph command must wait for connection and selection instead of a single tick"
 Assert-Contract ($appSource -match
@@ -315,6 +320,18 @@ Invoke-Native "Product Settings executable tests" {
   try {
     & $zig test src\WindowsProductSettings.zig -target x86_64-windows-msvc `
       -lc -luser32 -lgdi32 "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "Windows update feed executable tests" {
+  $winghosttyRoot = $env:GRAPHCODE_WINGHOSTTY_ROOT
+  if (-not $winghosttyRoot) {
+    $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\WindowsUpdates.zig -target x86_64-windows-msvc -lc -lwinhttp "-I$include"
   } finally { Pop-Location }
 }
 Invoke-Native "Frame buffer executable tests" {

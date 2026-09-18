@@ -56,6 +56,27 @@ bind the complete payload with a publisher-pinned Authenticode catalog; see
 `Tools\windows\PACKAGING.md`. There is not yet a published signed installer or
 an automatic install/relaunch path in the native updater.
 
+## Update checks
+
+The native client checks `scgopi/GraphCode`'s GitHub releases API, accepting
+additive release/asset metadata while retaining type checks on consumed fields.
+The greatest eligible version from the fetched 30-release page is selected;
+stable checks exclude prereleases and both channels exclude drafts. Existing
+version ordering and cancellation/generation behavior are unchanged. Startup
+and settings-refresh checks update status/sidebar offers without opening a modal;
+only an explicit Check for Updates action or banner click opens the offer.
+
+An offer opens only the HTTPS release overview or a single-segment version-tag
+page in that repository; encoded paths, dot segments, query/fragment additions,
+and backslash separators are rejected. It is a project-release notification,
+not proof of an installable Windows artifact: the dialog notes that assets may target other
+platforms and that Windows installation/relaunch is not implemented.
+No installer is downloaded or executed.
+
+`Tools\windows\Tests\WindowsShell.Tests.ps1` runs the native updater contracts,
+including realistic GitHub response fields, URL handoff validation, stable/beta
+selection, malformed consumed fields, and allocation-failure cleanup.
+
 ## Tray lifecycle coverage
 
 The shell registers a version-4 notification icon with a stable `HWND`/icon ID

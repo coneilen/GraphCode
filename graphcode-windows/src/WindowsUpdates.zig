@@ -3,6 +3,23 @@ const c = @import("Win32.zig").c;
 
 pub const Channel = enum { stable, beta };
 pub const State = enum { disabled, available, up_to_date, failed };
+pub const releases_page_url = "https://github.com/scgopi/GraphCode/releases";
+
+pub fn releasePageUrl(value: []const u8) ![]const u8 {
+    if (value.len == 0) return releases_page_url;
+    for (value) |byte| if (byte <= 0x20 or byte == 0x7f) return error.InvalidReleaseUrl;
+    if (std.mem.eql(u8, value, releases_page_url)) return value;
+    const tag_prefix = releases_page_url ++ "/tag/";
+    if (!std.mem.startsWith(u8, value, tag_prefix)) return error.InvalidReleaseUrl;
+    const tag = value[tag_prefix.len..];
+    if (tag.len == 0 or std.mem.eql(u8, tag, ".") or std.mem.eql(u8, tag, ".."))
+        return error.InvalidReleaseUrl;
+    for (tag) |byte| {
+        if (!std.ascii.isAlphanumeric(byte) and byte != '.' and byte != '-' and byte != '_' and byte != '+')
+            return error.InvalidReleaseUrl;
+    }
+    return value;
+}
 
 pub fn acceptsResult(current_generation: u64, result_generation: u64, cancelled: bool) bool {
     return !cancelled and current_generation == result_generation;
@@ -31,6 +48,10 @@ pub const CheckState = struct {
         return .{ .channel = if (beta_enabled) .beta else .stable, .state = .up_to_date };
     }
 
+    pub fn shouldPresentOffer(self: CheckState, user_initiated: bool) bool {
+        return user_initiated and self.state == .available;
+    }
+
     pub fn label(self: CheckState) []const u8 {
         return switch (self.state) {
             .disabled => "Updates disabled",
@@ -43,7 +64,7 @@ pub const CheckState = struct {
 
 pub const CheckClient = struct {
     allocator: std.mem.Allocator,
-    feed_url: []const u8 = "https://api.github.com/repos/GraphCode/GraphCode/releases",
+    feed_url: []const u8 = "https://api.github.com/repos/scgopi/GraphCode/releases?per_page=30",
 
     pub fn check(self: CheckClient, beta_enabled: bool, current_version: []const u8) !CheckResult {
         var cancelled = std.atomic.Value(bool).init(false);
@@ -137,14 +158,18 @@ pub fn currentVersionFromMetadata(allocator: std.mem.Allocator, metadata: ?[]con
 }
 
 fn parseFeed(allocator: std.mem.Allocator, body: []const u8, channel: Channel, current_version: []const u8) !CheckResult {
-    var parsed = try std.json.parseFromSlice([]const Release, allocator, body, .{});
+    var parsed = try std.json.parseFromSlice([]const Release, allocator, body, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     var installed = try SemVer.parse(allocator, current_version);
     defer installed.deinit(allocator);
     var greatest: ?struct { release: Release, version: SemVer } = null;
+    defer if (greatest) |selected| selected.version.deinit(allocator);
     for (parsed.value) |release| {
         if (release.draft or (channel == .stable and release.prerelease)) continue;
-        const candidate = SemVer.parse(allocator, release.tag_name) catch continue;
+        const candidate = SemVer.parse(allocator, release.tag_name) catch |err| switch (err) {
+            error.InvalidVersion => continue,
+            else => return err,
+        };
         if (greatest == null or candidate.compare(greatest.?.version) == .greater) {
             if (greatest) |old| old.version.deinit(allocator);
             greatest = .{ .release = release, .version = candidate };
@@ -153,13 +178,14 @@ fn parseFeed(allocator: std.mem.Allocator, body: []const u8, channel: Channel, c
         }
     }
     if (greatest) |selected| {
-        defer selected.version.deinit(allocator);
-        return .{
+        var result = CheckResult{
             .channel = channel,
             .state = if (selected.version.compare(installed) == .greater) .available else .up_to_date,
             .version = try allocator.dupe(u8, selected.release.tag_name),
-            .release_url = if (selected.release.html_url) |url| try allocator.dupe(u8, url) else null,
         };
+        errdefer result.deinit(allocator);
+        if (selected.release.html_url) |url| result.release_url = try allocator.dupe(u8, try releasePageUrl(url));
+        return result;
     }
     return .{ .channel = channel, .state = .failed, .message = try allocator.dupe(u8, "No release found for selected channel") };
 }
@@ -267,19 +293,100 @@ const Release = struct {
     draft: bool = false,
 };
 
+test "default update feed uses the GraphCode release repository" {
+    const client = CheckClient{ .allocator = std.testing.allocator };
+    try std.testing.expectEqualStrings("https://api.github.com/repos/scgopi/GraphCode/releases?per_page=30", client.feed_url);
+}
+
+test "background update checks do not interrupt the workspace with a modal offer" {
+    const available = CheckState{ .state = .available };
+    try std.testing.expect(!available.shouldPresentOffer(false));
+    try std.testing.expect(available.shouldPresentOffer(true));
+    for ([_]State{ .disabled, .up_to_date, .failed }) |state| {
+        const check = CheckState{ .state = state };
+        try std.testing.expect(!check.shouldPresentOffer(true));
+        try std.testing.expect(!check.shouldPresentOffer(false));
+    }
+}
+
+test "GitHub release response accepts additive metadata without losing channel filtering" {
+    const releases =
+        \\[
+        \\  {"id":100,"tag_name":"v2.0.0","html_url":"https://github.com/scgopi/GraphCode/releases/tag/v2.0.0",
+        \\   "prerelease":false,"draft":false,"name":"GraphCode 2.0.0","body":"Release notes",
+        \\   "author":{"login":"fixture","id":1},"published_at":"2026-09-17T00:00:00Z",
+        \\   "assets":[{"name":"graphcode-macos-arm64.dmg","size":123,"digest":"sha256:fixture"}]},
+        \\  {"id":101,"tag_name":"v3.0.0-beta1","prerelease":true,"draft":false,"assets":[]},
+        \\  {"id":102,"tag_name":"v9.0.0","prerelease":false,"draft":true,"immutable":false}
+        \\]
+    ;
+    var result = try parseFeed(std.testing.allocator, releases, .stable, "1.0.0");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.available, result.state);
+    try std.testing.expectEqualStrings("v2.0.0", result.version.?);
+    try std.testing.expectEqualStrings("https://github.com/scgopi/GraphCode/releases/tag/v2.0.0", result.release_url.?);
+}
+
+test "known update feed fields remain type checked" {
+    try std.testing.expectError(error.UnexpectedToken, parseFeed(std.testing.allocator,
+        \\[{"tag_name":"v2.0.0","prerelease":"false"}]
+    , .stable, "1.0.0"));
+}
+
+test "update feed allocation failures propagate without leaking selected releases" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const releases =
+                \\[{"tag_name":"v1.1.0"},{"tag_name":"not-a-version"},{"tag_name":"v2.0.0","html_url":"https://github.com/scgopi/GraphCode/releases/tag/v2.0.0"}]
+            ;
+            var result = try parseFeed(allocator, releases, .stable, "1.0.0");
+            defer result.deinit(allocator);
+            try std.testing.expectEqualStrings("v2.0.0", result.version.?);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
 test "real update feed result follows stable and beta channels" {
     const stable =
-        \\[{"tag_name":"v2.0.0","html_url":"https://example.test/v2","prerelease":false,"draft":false},{"tag_name":"v3.0.0-beta","prerelease":true,"draft":false}]
+        \\[{"tag_name":"v2.0.0","html_url":"https://github.com/scgopi/GraphCode/releases/tag/v2.0.0","prerelease":false,"draft":false},{"tag_name":"v3.0.0-beta","prerelease":true,"draft":false}]
     ;
     var stable_result = try parseFeed(std.testing.allocator, stable, .stable, "v1.0.0");
     defer stable_result.deinit(std.testing.allocator);
     try std.testing.expectEqual(State.available, stable_result.state);
     try std.testing.expectEqual(Channel.stable, stable_result.channel);
-    try std.testing.expectEqualStrings("https://example.test/v2", stable_result.release_url.?);
+    try std.testing.expectEqualStrings("https://github.com/scgopi/GraphCode/releases/tag/v2.0.0", stable_result.release_url.?);
     var beta_result = try parseFeed(std.testing.allocator, stable, .beta, "v3.0.0-beta");
     defer beta_result.deinit(std.testing.allocator);
     try std.testing.expectEqual(State.up_to_date, beta_result.state);
     try std.testing.expectEqualStrings("v3.0.0-beta", beta_result.version.?);
+}
+
+test "release page handoff stays within the GraphCode release repository" {
+    try std.testing.expectEqualStrings(releases_page_url, try releasePageUrl(""));
+    try std.testing.expectEqualStrings(releases_page_url, try releasePageUrl(releases_page_url));
+    const tag = releases_page_url ++ "/tag/v2.0.0-beta1";
+    try std.testing.expectEqualStrings(tag, try releasePageUrl(tag));
+    const build_tag = releases_page_url ++ "/tag/v2.0.0+build.1";
+    try std.testing.expectEqualStrings(build_tag, try releasePageUrl(build_tag));
+    for ([_][]const u8{
+        "file:///C:/untrusted.exe",
+        "http://github.com/scgopi/GraphCode/releases/tag/v2",
+        "https://github.com/GraphCode/GraphCode/releases",
+        "https://github.com.evil.test/scgopi/GraphCode/releases/tag/v2",
+        releases_page_url ++ "/tag/",
+        releases_page_url ++ "/tag/v2\r\n",
+        releases_page_url ++ "/tag/../../../../other/project",
+        releases_page_url ++ "/tag/%2e%2e",
+        releases_page_url ++ "/tag/..\\..\\other",
+        releases_page_url ++ "/tag/.",
+        releases_page_url ++ "/tag/..",
+        releases_page_url ++ "/tag/v2?other",
+        releases_page_url ++ "/tag/v2#other",
+    }) |invalid| try std.testing.expectError(error.InvalidReleaseUrl, releasePageUrl(invalid));
+    try std.testing.expectError(error.InvalidReleaseUrl, parseFeed(std.testing.allocator,
+        \\[{"tag_name":"v2.0.0","html_url":"file:///C:/untrusted.exe"}]
+    , .stable, "1.0.0"));
 }
 
 test "release tags and installed versions compare semantically" {
