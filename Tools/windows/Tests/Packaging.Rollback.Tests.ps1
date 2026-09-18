@@ -7,7 +7,7 @@ $fixture = Join-Path $repoRoot ".build\packaging-rollback-$([guid]::NewGuid())"
 $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
-  (Join-Path $repoRoot "Tools\windows\package.ps1"), [ref]$tokens, [ref]$errors)
+  (Join-Path $repoRoot "Tools\windows\PackageRuntime.ps1"), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw "Packaging script has parse errors: $errors" }
 foreach ($name in @("Fail", "Require", "Copy-Tree", "Move-InstallDirectory", "Install-Package")) {
   $definition = $ast.Find({

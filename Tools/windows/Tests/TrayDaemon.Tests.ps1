@@ -10,6 +10,7 @@ $supervisor = Get-Content (Join-Path $root "graphcode-windows\src\DaemonSupervis
 $daemonMain = Get-Content (Join-Path $root "graphcoded\Sources\main.swift") -Raw
 $tray = Get-Content (Join-Path $root "graphcode-windows\src\Tray.zig") -Raw
 $package = Get-Content (Join-Path $root "Tools\windows\package.ps1") -Raw
+$package += Get-Content (Join-Path $root "Tools\windows\PackageRuntime.ps1") -Raw
 
 function Get-PeSubsystem([string] $path) {
   $bytes = [IO.File]::ReadAllBytes($path)
