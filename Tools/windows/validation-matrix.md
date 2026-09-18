@@ -17,6 +17,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 | Production Swift platform package | `pwsh Tools/windows/validate.ps1 -Task swift-production` |
 | Deterministic release hardening fixtures | `pwsh Tools/windows/validate.ps1 -Task hardening` |
 | Signed catalog integrity and publisher policy | `pwsh Tools\windows\Tests\Packaging.Signing.Tests.ps1` |
+| Failed-upgrade preservation and recoverable rollback | `pwsh Tools\windows\Tests\Packaging.Rollback.Tests.ps1` |
 | Product/investigation provider pin consistency | `pwsh Tools\windows\Tests\ProviderPins.Tests.ps1` |
 | Native release feed, URL handoff, and allocation safety | `pwsh Tools\windows\Tests\WindowsShell.Tests.ps1 -ZigExecutable $env:GRAPHCODE_ZIG0152` (includes updater tests) |
 | Real-product packaging/install/upgrade/rollback | `pwsh Tools\windows\validate.ps1 -Task packaging` |

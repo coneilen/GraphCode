@@ -12,7 +12,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile(
 if ($errors.Count) { throw "Packaging script has parse errors: $errors" }
 foreach ($name in @("Fail", "Require", "Get-Manifest", "Normalize-ManifestPath",
     "Get-ActualPackageFiles", "Verify-Manifest", "Verify-SignedPackage",
-    "Verify-PackageContents", "Sign-PackageFile", "Install-Package", "Copy-Tree")) {
+    "Verify-PackageContents", "Sign-PackageFile", "Move-InstallDirectory", "Install-Package", "Copy-Tree")) {
   $definition = $ast.Find({
       param($node)
       $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
