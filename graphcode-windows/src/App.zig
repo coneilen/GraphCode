@@ -3391,7 +3391,16 @@ pub const App = struct {
             .quick_chat => |id| {
                 self.setStatus("Opening quick chat...");
                 if (envFlag("GRAPHCODE_UIA_GATE")) {
-                    self.openQuickChat(id);
+                    for (self.model.quick_chats.items, 0..) |chat, index| {
+                        if (!std.mem.eql(u8, chat.id, id)) continue;
+                        self.selected_quick_chat = index;
+                        self.surface = .workspace;
+                        self.workspace_controls.panel_visible = true;
+                        self.layoutWorkspace();
+                        self.layoutEmptyStateControls();
+                        self.syncAccessibility();
+                        break;
+                    }
                 } else {
                     self.client.sendOpenQuickChat(id);
                 }

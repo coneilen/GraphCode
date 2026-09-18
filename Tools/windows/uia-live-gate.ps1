@@ -655,6 +655,7 @@ try {
   Start-Sleep -Milliseconds 150
   Require ((Find-FragmentById $root "status" $rawWalker).Current.Name -eq "Opening quick chat...") `
     "Quick Chat invocation did not perform its expected action"
+  $graph = Find-FragmentById $root "graph" $rawWalker
   $quickChatWorkspace = @(Get-DirectChildren $graph $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^quick-chat-workspace-' -and
     $_.Current.Name -eq "Quick Chat terminal workspace"
