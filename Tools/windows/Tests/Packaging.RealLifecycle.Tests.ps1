@@ -1,15 +1,28 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)][string] $Package,
-  [Parameter(Mandatory)][string] $RepositoryRoot
+  [Parameter(Mandatory)][string] $RepositoryRoot,
+  [switch] $Standalone,
+  [string] $PowerShellExecutable = (Get-Command pwsh).Source
 )
 
 $ErrorActionPreference = "Stop"
 $script = Join-Path $RepositoryRoot "Tools\windows\package.ps1"
-$testHome = Join-Path $RepositoryRoot ".build\packaging-real-home-$PID\深い & (空間)\用户"
+$testRoot = Join-Path $RepositoryRoot ".build\packaging-real-home-$PID"
+if ($Standalone) {
+  $testRoot = Join-Path ([IO.Path]::GetTempPath()) "graphcode-setup-real-$PID"
+}
+$testHome = Join-Path $testRoot "深い & (空間)\用户"
 $install = Join-Path $testHome "GraphCode\current"
 $oldHome = $env:USERPROFILE
-$pwsh = (Get-Command pwsh).Source
+$oldAppData = $env:APPDATA
+$oldPath = $env:PATH
+$oldModulePath = $env:PSModulePath
+$oldModuleCache = $env:PSModuleAnalysisCachePath
+$oldSupport = $env:GRAPHCODE_SUPPORT_DIR
+$oldUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$pwsh = $PowerShellExecutable
+$completed = $false
 function Invoke-Package([string] $command, [hashtable] $extra = @{}) {
   $args = @("-NoProfile", "-File", $script, "-Command", $command)
   foreach ($key in $extra.Keys) { $args += @("-$key", [string] $extra[$key]) }
@@ -18,8 +31,27 @@ function Invoke-Package([string] $command, [hashtable] $extra = @{}) {
 }
 try {
   New-Item -ItemType Directory -Force $testHome | Out-Null
+  $env:PSModuleAnalysisCachePath = Join-Path $testHome "ModuleAnalysisCache"
   $env:USERPROFILE = $testHome
-  Invoke-Package "Install" @{ Package = $Package; InstallRoot = $install }
+  $env:APPDATA = Join-Path $testHome "AppData\Roaming"
+  $env:PSModulePath = $null
+  $env:GRAPHCODE_SUPPORT_DIR = Join-Path $testHome ".graphcode"
+  if ($Standalone) {
+    $archive = Join-Path $testHome "release.zip"
+    Copy-Item -LiteralPath $Package -Destination $archive
+    $Package = $archive
+    $incoming = Join-Path $testHome "incoming"
+    Expand-Archive -LiteralPath $Package -DestinationPath $incoming
+    $script = Join-Path $incoming "GraphCode\GraphCode-Setup.ps1"
+    if (-not (Test-Path -LiteralPath $script)) { throw "Package has no standalone setup" }
+    $env:PATH = Join-Path $env:SystemRoot "System32"
+    Invoke-Package "Verify"
+    Invoke-Package "Install" @{ InstallRoot = $install }
+    $script = Join-Path $install "GraphCode-Setup.ps1"
+    Remove-Item -LiteralPath $incoming -Recurse -Force
+  } else {
+    Invoke-Package "Install" @{ Package = $Package; InstallRoot = $install }
+  }
   $bin = Join-Path $install "bin"
   $env:PATH = "$bin;$env:SystemRoot\System32"
   $env:GRAPHCODE_SUPPORT_DIR = Join-Path $testHome ".graphcode"
@@ -104,7 +136,22 @@ try {
     throw "uninstall left the GraphCode daemon task"
   }
   Write-Output "Real scheduled-task install/locked-upgrade/upgrade/rollback/uninstall: PASS"
+  if ($Standalone) { Write-Output "Standalone extracted/installed setup lifecycle using $pwsh`: PASS" }
+  $completed = $true
 } finally {
+  if (-not $completed -and $env:USERPROFILE -eq $testHome) {
+    try {
+      & $pwsh -NoProfile -File (Join-Path $RepositoryRoot "Tools\windows\package.ps1") `
+        -Command Uninstall -InstallRoot $install -RemoveUserData
+      if ($LASTEXITCODE -ne 0) { Write-Warning "Owned lifecycle cleanup failed with exit code $LASTEXITCODE" }
+    } catch { Write-Warning "Owned lifecycle cleanup failed: $_" }
+  }
   $env:USERPROFILE = $oldHome
-  Remove-Item $testHome -Recurse -Force -ErrorAction SilentlyContinue
+  $env:APPDATA = $oldAppData
+  $env:PATH = $oldPath
+  $env:PSModulePath = $oldModulePath
+  $env:PSModuleAnalysisCachePath = $oldModuleCache
+  $env:GRAPHCODE_SUPPORT_DIR = $oldSupport
+  [Environment]::SetEnvironmentVariable("Path", $oldUserPath, "User")
+  Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

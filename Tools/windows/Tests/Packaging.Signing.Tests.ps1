@@ -7,16 +7,17 @@ $packageScript = Join-Path $repoRoot "Tools\windows\package.ps1"
 $fixture = Join-Path $repoRoot ".build\packaging-signing-$([guid]::NewGuid())"
 $tokens = $null
 $errors = $null
-$ast = [Management.Automation.Language.Parser]::ParseFile(
-  $packageScript, [ref]$tokens, [ref]$errors)
-if ($errors.Count) { throw "Packaging script has parse errors: $errors" }
+$asts = @(foreach ($path in @($packageScript, (Join-Path $repoRoot "Tools\windows\PackageRuntime.ps1"))) {
+  [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+  if ($errors.Count) { throw "Packaging script has parse errors: $errors" }
+})
 foreach ($name in @("Fail", "Require", "Get-Manifest", "Normalize-ManifestPath",
-    "Get-ActualPackageFiles", "Verify-Manifest", "Verify-SignedPackage",
+    "Get-ActualPackageFiles", "Verify-Manifest", "Get-PackageCodeFiles", "Verify-SignedPackage",
     "Verify-PackageContents", "Sign-PackageFile", "Move-InstallDirectory", "Install-Package", "Copy-Tree")) {
-  $definition = $ast.Find({
+  $definition = $asts | ForEach-Object { $_.Find({
       param($node)
       $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
-    }, $true)
+    }, $true) } | Where-Object { $_ } | Select-Object -First 1
   if (-not $definition) { throw "Packaging helper is missing: $name" }
   . ([scriptblock]::Create($definition.Extent.Text))
 }
@@ -39,6 +40,7 @@ function New-TestPackage {
   New-Item -ItemType Directory -Path (Join-Path $root "bin") -Force | Out-Null
   Set-Content (Join-Path $root "bin\graphcode.exe") "executable fixture"
   Set-Content (Join-Path $root "bin\swiftCore.dll") "runtime fixture"
+  Set-Content (Join-Path $root "GraphCode-Setup.ps1") "# setup fixture"
   Set-Content (Join-Path $root "metadata.json") '{"signing":"signed","version":"1.2.3"}'
   Set-Content (Join-Path $root "SIGNATURES.txt") "publisher fixture"
   Set-Content (Join-Path $root "checksums.sha256") "checksum fixture"
@@ -55,10 +57,13 @@ $SignToolPath = Join-Path $fixture "no-sdk-signtool.exe"
 $signatureMode = "valid"
 function Get-AuthenticodeSignature([string] $FilePath) {
   $catalog = [IO.Path]::GetExtension($FilePath) -eq ".cat"
+  $setup = [IO.Path]::GetExtension($FilePath) -eq ".ps1"
   $invalid = ($catalog -and $signatureMode -eq "invalid-catalog") -or
-    (-not $catalog -and $signatureMode -eq "invalid-executable")
+    ($setup -and $signatureMode -eq "invalid-setup") -or
+    (-not $catalog -and -not $setup -and $signatureMode -eq "invalid-executable")
   $wrongSigner = ($catalog -and $signatureMode -eq "wrong-catalog-signer") -or
-    (-not $catalog -and $signatureMode -eq "wrong-executable-signer")
+    ($setup -and $signatureMode -eq "wrong-setup-signer") -or
+    (-not $catalog -and -not $setup -and $signatureMode -eq "wrong-executable-signer")
   [pscustomobject]@{
     Status = if ($invalid) { "NotTrusted" } else { "Valid" }
     SignerCertificate = [pscustomobject]@{
@@ -98,7 +103,9 @@ try {
       @{ mode = "invalid-catalog"; message = "catalog Authenticode verification failed" },
       @{ mode = "wrong-catalog-signer"; message = "catalog publisher does not match" },
       @{ mode = "invalid-executable"; message = "Authenticode verification failed: graphcode.exe" },
-      @{ mode = "wrong-executable-signer"; message = "executable publisher does not match: graphcode.exe" }
+      @{ mode = "wrong-executable-signer"; message = "code publisher does not match: graphcode.exe" },
+      @{ mode = "invalid-setup"; message = "Authenticode verification failed: GraphCode-Setup.ps1" },
+      @{ mode = "wrong-setup-signer"; message = "code publisher does not match: GraphCode-Setup.ps1" }
     )) {
     $signatureMode = $case.mode
     Assert-Rejected $case.mode { Verify-SignedPackage $root $signed } $case.message
@@ -115,7 +122,7 @@ try {
   $TrustedSignerThumbprint = ("A" * 40).ToLowerInvariant()
   Verify-SignedPackage $root $signed
 
-  foreach ($file in @("metadata.json", "SIGNATURES.txt", "checksums.sha256", "manifest.json")) {
+  foreach ($file in @("metadata.json", "SIGNATURES.txt", "checksums.sha256", "manifest.json", "GraphCode-Setup.ps1")) {
     $root = New-TestPackage
     Add-Content (Join-Path $root $file) "tampered"
     Assert-Rejected "tampered $file" {
@@ -180,6 +187,10 @@ try {
   if (($signingArguments -join "`n") -cne ($expectedArguments -join "`n")) {
     throw "SHA-256 signing/timestamp arguments or path boundaries were lost"
   }
+  $setupFile = @(Get-PackageCodeFiles $root | Where-Object Name -eq "GraphCode-Setup.ps1")
+  if ($setupFile.Count -ne 1) { throw "Standalone setup was excluded from package code signing" }
+  Sign-PackageFile "Invoke-TestSigner" $setupFile[0].FullName
+  if ($signingArguments[-1] -ne $setupFile[0].FullName) { throw "Setup script signing arguments were lost" }
   $signingExitCode = 1
   Assert-Rejected "signing failure" {
     Sign-PackageFile "Invoke-TestSigner" $signedPath

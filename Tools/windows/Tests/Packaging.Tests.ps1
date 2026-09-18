@@ -6,10 +6,12 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $script = Join-Path $repoRoot "Tools\windows\package.ps1"
 $fixture = Join-Path $repoRoot ".build\packaging-test-fixture-$PID"
 $out = Join-Path $repoRoot ".build\packaging-test-output-$PID"
-$install = Join-Path $repoRoot ".build\packaging install $PID\深い\GraphCode"
+$installFixture = Join-Path $repoRoot ".build\packaging install $PID"
+$install = Join-Path $installFixture "深い\GraphCode"
 $oldProfile = $env:USERPROFILE
 $oldAppData = $env:APPDATA
 $oldSupport = $env:GRAPHCODE_SUPPORT_DIR
+$oldModuleCache = $env:PSModuleAnalysisCachePath
 $oldUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 
 function Invoke-Package([string] $command, [hashtable] $extra = @{}) {
@@ -39,6 +41,7 @@ try {
   if (-not $zig0160) { $zig0160 = Join-Path $depot "GraphCode-worktrees\ghostty-winghostty-spike\zig-x86_64-windows-0.16.0\zig.exe" }
   if (-not (Test-Path $wingRoot) -or -not (Test-Path $zmxRoot)) { throw "trusted provider roots are required" }
   New-Item -ItemType Directory -Force $fixture | Out-Null
+  $env:PSModuleAnalysisCachePath = Join-Path $fixture "ModuleAnalysisCache"
   $env:USERPROFILE = Join-Path $fixture "user"
   $env:APPDATA = Join-Path $env:USERPROFILE "AppData\Roaming"
   $env:GRAPHCODE_SUPPORT_DIR = $null
@@ -134,6 +137,10 @@ try {
   & pwsh -NoProfile -File (Join-Path $PSScriptRoot "Packaging.RealLifecycle.Tests.ps1") `
     -Package $zip -RepositoryRoot $repoRoot
   if ($LASTEXITCODE -ne 0) { throw "real scheduled lifecycle test failed" }
+  & pwsh -NoProfile -File (Join-Path $PSScriptRoot "Packaging.RealLifecycle.Tests.ps1") `
+    -Package $zip -RepositoryRoot $repoRoot -Standalone `
+    -PowerShellExecutable (Get-Command powershell.exe).Source
+  if ($LASTEXITCODE -ne 0) { throw "standalone Windows PowerShell lifecycle test failed" }
   Assert-VerifyReject "checksum" { param($p) Add-Content (Join-Path $p "bin\zmx.exe") corrupt } "size mismatch"
   Assert-VerifyReject "extra file" { param($p) Set-Content (Join-Path $p "extra.txt") unexpected } "manifest file set differs"
   Assert-VerifyReject "traversal" {
@@ -177,6 +184,7 @@ try {
   $env:USERPROFILE = $oldProfile
   $env:APPDATA = $oldAppData
   $env:GRAPHCODE_SUPPORT_DIR = $oldSupport
+  $env:PSModuleAnalysisCachePath = $oldModuleCache
   [Environment]::SetEnvironmentVariable("Path", $oldUserPath, "User")
-  Remove-Item $fixture,$out,(Split-Path $install -Parent) -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item $fixture,$out,$installFixture -Recurse -Force -ErrorAction SilentlyContinue
 }

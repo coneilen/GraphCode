@@ -51,9 +51,13 @@ pwsh -NoProfile -File Tools\windows\validate.ps1 `
 `Tools\windows\validate.ps1 -Task windows-shell` performs pin, clean-worktree,
 format, lifecycle-contract, real provider build, and native UI Automation live
 event checks. `Tools\windows\package.ps1` builds and verifies self-contained ZIP
-packages and supports per-user install/upgrade/rollback. Opt-in signed packages
+packages and supports per-user install/upgrade/rollback. Each ZIP includes a
+standalone `GraphCode-Setup.ps1` for Windows PowerShell 5.1 or PowerShell 7, so
+installation and uninstall no longer require a source checkout or build tools.
+Opt-in signed packages
 bind the complete payload with a publisher-pinned Authenticode catalog; see
-`Tools\windows\PACKAGING.md`. There is not yet a published signed installer or
+`Tools\windows\PACKAGING.md`, including setup-script verification before execution.
+There is not yet a published production-signed installer or
 an automatic install/relaunch path in the native updater.
 
 ## Update checks
