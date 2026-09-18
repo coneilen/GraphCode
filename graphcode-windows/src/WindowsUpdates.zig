@@ -8,10 +8,17 @@ pub const releases_page_url = "https://github.com/scgopi/GraphCode/releases";
 pub fn releasePageUrl(value: []const u8) ![]const u8 {
     if (value.len == 0) return releases_page_url;
     for (value) |byte| if (byte <= 0x20 or byte == 0x7f) return error.InvalidReleaseUrl;
+    if (std.mem.eql(u8, value, releases_page_url)) return value;
     const tag_prefix = releases_page_url ++ "/tag/";
-    if (std.mem.eql(u8, value, releases_page_url) or
-        (std.mem.startsWith(u8, value, tag_prefix) and value.len > tag_prefix.len)) return value;
-    return error.InvalidReleaseUrl;
+    if (!std.mem.startsWith(u8, value, tag_prefix)) return error.InvalidReleaseUrl;
+    const tag = value[tag_prefix.len..];
+    if (tag.len == 0 or std.mem.eql(u8, tag, ".") or std.mem.eql(u8, tag, ".."))
+        return error.InvalidReleaseUrl;
+    for (tag) |byte| {
+        if (!std.ascii.isAlphanumeric(byte) and byte != '.' and byte != '-' and byte != '_' and byte != '+')
+            return error.InvalidReleaseUrl;
+    }
+    return value;
 }
 
 pub fn acceptsResult(current_generation: u64, result_generation: u64, cancelled: bool) bool {
@@ -360,6 +367,8 @@ test "release page handoff stays within the GraphCode release repository" {
     try std.testing.expectEqualStrings(releases_page_url, try releasePageUrl(releases_page_url));
     const tag = releases_page_url ++ "/tag/v2.0.0-beta1";
     try std.testing.expectEqualStrings(tag, try releasePageUrl(tag));
+    const build_tag = releases_page_url ++ "/tag/v2.0.0+build.1";
+    try std.testing.expectEqualStrings(build_tag, try releasePageUrl(build_tag));
     for ([_][]const u8{
         "file:///C:/untrusted.exe",
         "http://github.com/scgopi/GraphCode/releases/tag/v2",
@@ -367,6 +376,13 @@ test "release page handoff stays within the GraphCode release repository" {
         "https://github.com.evil.test/scgopi/GraphCode/releases/tag/v2",
         releases_page_url ++ "/tag/",
         releases_page_url ++ "/tag/v2\r\n",
+        releases_page_url ++ "/tag/../../../../other/project",
+        releases_page_url ++ "/tag/%2e%2e",
+        releases_page_url ++ "/tag/..\\..\\other",
+        releases_page_url ++ "/tag/.",
+        releases_page_url ++ "/tag/..",
+        releases_page_url ++ "/tag/v2?other",
+        releases_page_url ++ "/tag/v2#other",
     }) |invalid| try std.testing.expectError(error.InvalidReleaseUrl, releasePageUrl(invalid));
     try std.testing.expectError(error.InvalidReleaseUrl, parseFeed(std.testing.allocator,
         \\[{"tag_name":"v2.0.0","html_url":"file:///C:/untrusted.exe"}]

@@ -66,9 +66,10 @@ version ordering and cancellation/generation behavior are unchanged. Startup
 and settings-refresh checks update status/sidebar offers without opening a modal;
 only an explicit Check for Updates action or banner click opens the offer.
 
-An offer opens only the HTTPS release overview or a release-tag page in that
-repository. It is a project-release notification, not proof of an installable
-Windows artifact: the dialog explicitly notes that assets may target other
+An offer opens only the HTTPS release overview or a single-segment version-tag
+page in that repository; encoded paths, dot segments, query/fragment additions,
+and backslash separators are rejected. It is a project-release notification,
+not proof of an installable Windows artifact: the dialog notes that assets may target other
 platforms and that Windows installation/relaunch is not implemented.
 No installer is downloaded or executed.
 
