@@ -27,6 +27,32 @@ code signed)` in `metadata.json` and `SIGNING.txt`. Their checksums detect
 corruption, not publisher authenticity. They remain accepted for development
 unless `-TrustedSignerThumbprint` is supplied.
 
+## Failed installation and recovery
+
+Install and upgrade track which transaction steps actually completed. A failed
+daemon stop, locked installation, or failed move to backup never authorizes
+deleting the existing installation. Same-volume directory renames prevent the
+partial recursive moves that PowerShell can perform on locked trees.
+Only a newly promoted payload is removed
+during rollback. Staging and shortcut-snapshot failures also clean up their
+temporary directories without changing the installed product.
+
+If rollback itself fails, the command reports both the initiating failure and
+the recovery errors, rather than replacing one with the other. An unrestored
+previous installation is retained in the reported `.GraphCode-rollback-<id>`
+directory alongside the installation root. A failed shortcut restoration keeps
+its `.GraphCode-shortcut-<id>` snapshot and reports that path too. Do not delete
+these recovery directories until the previous installation/integration has been
+restored. The previous daemon is restarted only when its payload is back at the
+installation root; an incomplete rollback is never reported as a successful
+installation.
+
+`Packaging.Rollback.Tests.ps1` covers pre-swap failures, failed promotion,
+post-swap rollback, secondary recovery failures, fresh/portable installs, and a
+native Windows file-sharing lock. It isolates daemon and shortcut operations;
+the real-product packaging gate separately exercises scheduled-daemon
+install/upgrade/rollback/uninstall.
+
 ## Signed package integrity
 
 Signing is opt-in: `-SignCertificate <thumbprint>` requires a trusted code-signing

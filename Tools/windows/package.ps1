@@ -521,52 +521,116 @@ function Start-DaemonTask {
   }
   throw "scheduled graphcoded endpoint did not become reachable"
 }
+function Move-InstallDirectory([string] $source, [string] $destination) {
+  # Staging and backup are siblings: use a rename, not Move-Item's recursive move.
+  $source = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($source)
+  $destination = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($destination)
+  [IO.Directory]::Move($source, $destination)
+}
 function Install-Package([bool] $upgrade) {
   try {
     $root = Open-Package ($(if ($Package) { $Package } else { Fail "-Package is required" }))
     $metadata = Verify-PackageContents $root
     if ($versionWasProvided -and $metadata.version -ne $Version) { Fail "version mismatch: expected $Version, package is $($metadata.version)" }
-  $parent = Split-Path $InstallRoot -Parent
-  New-Item -ItemType Directory -Force -Path $parent | Out-Null
-  $stage = Join-Path $parent ".GraphCode-install-$([guid]::NewGuid())"
-  try {
-    Copy-Tree $root $stage
-    $stagedMetadata = Verify-PackageContents $stage
-    Require ($stagedMetadata.version -eq $metadata.version) "package version changed during staging"
-  } catch {
-    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-    throw
-  }
-  $backup = Join-Path $parent ".GraphCode-rollback-$([guid]::NewGuid())"
-  $shortcutBackup = Join-Path $parent ".GraphCode-shortcut-$([guid]::NewGuid())"
-  New-Item -ItemType Directory -Force $shortcutBackup | Out-Null
-  Save-Shortcut $shortcutBackup
-  $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
-  try {
-    if (-not $NoScheduledTask) { Stop-InstalledDaemon; Remove-DaemonTask }
-    if (Test-Path $InstallRoot) { Move-Item $InstallRoot $backup }
-    Move-Item $stage $InstallRoot
-    Set-UserPath (Join-Path $InstallRoot "bin") $true
-    Set-Shortcut $true
-    if (-not $NoScheduledTask) {
-      Start-DaemonTask
+    $parent = Split-Path $InstallRoot -Parent
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    $stage = Join-Path $parent ".GraphCode-install-$([guid]::NewGuid())"
+    $backup = Join-Path $parent ".GraphCode-rollback-$([guid]::NewGuid())"
+    $shortcutBackup = Join-Path $parent ".GraphCode-shortcut-$([guid]::NewGuid())"
+    $previousInstallMoved = $false
+    $stagedInstallPromoted = $false
+    $integrationAttempted = $false
+    $daemonAttempted = $false
+    $keepShortcutBackup = $false
+    $committed = $false
+    try {
+      Copy-Tree $root $stage
+      $stagedMetadata = Verify-PackageContents $stage
+      Require ($stagedMetadata.version -eq $metadata.version) "package version changed during staging"
+      New-Item -ItemType Directory -Force -Path $shortcutBackup | Out-Null
+      Save-Shortcut $shortcutBackup
+      $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
+      if (-not $NoScheduledTask) {
+        $daemonAttempted = $true
+        Stop-InstalledDaemon
+        Remove-DaemonTask
+      }
+      if (Test-Path -LiteralPath $InstallRoot) {
+        Move-InstallDirectory $InstallRoot $backup
+        $previousInstallMoved = $true
+      }
+      Move-InstallDirectory $stage $InstallRoot
+      $stagedInstallPromoted = $true
+      $integrationAttempted = $true
+      Set-UserPath (Join-Path $InstallRoot "bin") $true
+      Set-Shortcut $true
+      if (-not $NoScheduledTask) { Start-DaemonTask }
+      $committed = $true
+    } catch {
+      $failure = $_
+      $rollbackErrors = [Collections.Generic.List[string]]::new()
+      $canRestoreFiles = $true
+      if ($stagedInstallPromoted -and $daemonAttempted) {
+        try {
+          Stop-InstalledDaemon
+          Remove-DaemonTask
+        } catch {
+          $rollbackErrors.Add("stopping the new installation: $($_.Exception.Message)")
+          $canRestoreFiles = $false
+        }
+      }
+      # Never delete an installation that this transaction did not promote.
+      if ($stagedInstallPromoted -and $canRestoreFiles) {
+        try {
+          Remove-Item -LiteralPath $InstallRoot -Recurse -Force
+          $stagedInstallPromoted = $false
+        } catch {
+          $rollbackErrors.Add("removing the new installation: $($_.Exception.Message)")
+          $canRestoreFiles = $false
+        }
+      }
+      if ($previousInstallMoved -and $canRestoreFiles) {
+        try {
+          Move-InstallDirectory $backup $InstallRoot
+          $previousInstallMoved = $false
+        } catch {
+          $rollbackErrors.Add("restoring the previous installation: $($_.Exception.Message)")
+        }
+      }
+      if ($integrationAttempted) {
+        try { [Environment]::SetEnvironmentVariable("Path", $oldPath, "User") } catch {
+          $rollbackErrors.Add("restoring user PATH: $($_.Exception.Message)")
+        }
+        try { Restore-Shortcut $shortcutBackup } catch {
+          $keepShortcutBackup = $true
+          $rollbackErrors.Add("restoring shortcuts: $($_.Exception.Message)")
+        }
+      }
+      if ($daemonAttempted -and -not $previousInstallMoved -and -not $stagedInstallPromoted -and
+          (Test-Path -LiteralPath (Join-Path $InstallRoot "bin\graphcoded.exe"))) {
+        try { Start-DaemonTask } catch {
+          $rollbackErrors.Add("restarting the previous daemon: $($_.Exception.Message)")
+        }
+      }
+      if ($rollbackErrors.Count) {
+        $recovery = @()
+        if ($previousInstallMoved) { $recovery += "Previous installation retained at: $backup." }
+        if ($keepShortcutBackup) { $recovery += "Shortcut recovery snapshot retained at: $shortcutBackup." }
+        Fail "Installation failed: $($failure.Exception.Message). Rollback incomplete: $($rollbackErrors -join '; '). $($recovery -join ' ')"
+      }
+      throw $failure
+    } finally {
+      $cleanup = @($stage)
+      if ($committed) { $cleanup += $backup }
+      if (-not $keepShortcutBackup) { $cleanup += $shortcutBackup }
+      foreach ($path in $cleanup) {
+        if (Test-Path -LiteralPath $path) {
+          try { Remove-Item -LiteralPath $path -Recurse -Force } catch {
+            Write-Warning "GraphCode packaging: could not clean transaction directory '$path': $($_.Exception.Message)"
+          }
+        }
+      }
     }
-  } catch {
-    if (-not $NoScheduledTask) {
-      try { Stop-InstalledDaemon } catch { }
-      if (-not $NoScheduledTask) { Remove-DaemonTask }
-    }
-    if (Test-Path $InstallRoot) { Remove-Item $InstallRoot -Recurse -Force }
-    if (Test-Path $backup) { Move-Item $backup $InstallRoot }
-    [Environment]::SetEnvironmentVariable("Path", $oldPath, "User")
-    Restore-Shortcut $shortcutBackup
-    if (-not $NoScheduledTask -and (Test-Path (Join-Path $InstallRoot "bin\graphcoded.exe"))) {
-      Start-DaemonTask
-    }
-    throw
-  } finally {
-    Remove-Item $stage,$backup,$shortcutBackup -Recurse -Force -ErrorAction SilentlyContinue
-  }
     Write-Output "Installed GraphCode $($metadata.version) at $InstallRoot"
   } finally {
     Close-Package

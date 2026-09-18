@@ -31,6 +31,30 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "scheduled daemon CLI reachability failed" }
   Set-Content (Join-Path $testHome ".graphcode\real-lifecycle.json") preserved -Force
   $expected = [IO.Path]::GetFullPath((Join-Path $bin "graphcoded.exe"))
+  $beforeLockedUpgrade = @(Get-ChildItem -LiteralPath $install -File -Recurse -Force |
+    Sort-Object FullName | Get-FileHash -Algorithm SHA256 | Select-Object Path, Hash) |
+    ConvertTo-Json -Compress
+  $lockedShell = [IO.File]::Open((Join-Path $bin "graphcode-windows.exe"),
+    [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  try {
+    $lockedOutput = & $pwsh -NoProfile -File $script -Command Upgrade `
+      -Package $Package -InstallRoot $install 2>&1 | Out-String
+    $lockedExit = $LASTEXITCODE
+  } finally {
+    $lockedShell.Dispose()
+  }
+  $afterLockedUpgrade = @(Get-ChildItem -LiteralPath $install -File -Recurse -Force |
+    Sort-Object FullName | Get-FileHash -Algorithm SHA256 | Select-Object Path, Hash) |
+    ConvertTo-Json -Compress
+  if ($lockedExit -eq 0 -or $lockedOutput -notmatch "access|used|denied" -or
+      $beforeLockedUpgrade -cne $afterLockedUpgrade) {
+    throw "locked upgrade did not preserve the complete prior installation: $lockedOutput"
+  }
+  & (Join-Path $bin "graphcode.exe") projects
+  if ($LASTEXITCODE -ne 0) { throw "locked upgrade did not restart the unchanged daemon" }
+  if (@(Get-ChildItem -LiteralPath (Split-Path $install -Parent) -Directory -Filter ".GraphCode-*").Count) {
+    throw "locked upgrade left transaction debris after preserving the installation"
+  }
   Invoke-Package "Upgrade" @{ Package = $Package; InstallRoot = $install }
   $running = @(Get-CimInstance Win32_Process | Where-Object {
       $_.Name -ieq "graphcoded.exe" -and $_.ExecutablePath -and
@@ -79,7 +103,7 @@ try {
   if (schtasks.exe /Query /TN $taskName 2>$null) {
     throw "uninstall left the GraphCode daemon task"
   }
-  Write-Output "Real scheduled-task install/upgrade/rollback/uninstall: PASS"
+  Write-Output "Real scheduled-task install/locked-upgrade/upgrade/rollback/uninstall: PASS"
 } finally {
   $env:USERPROFILE = $oldHome
   Remove-Item $testHome -Recurse -Force -ErrorAction SilentlyContinue

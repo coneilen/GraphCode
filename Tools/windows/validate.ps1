@@ -663,6 +663,7 @@ function Invoke-Task([string] $name) {
     }
     "packaging" {
       & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Signing.Tests.ps1")
+      & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Rollback.Tests.ps1")
       & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Tests.ps1")
       if ($LASTEXITCODE -ne 0) {
         throw "Windows packaging tests failed with exit code $LASTEXITCODE"
