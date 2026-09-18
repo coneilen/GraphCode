@@ -22,6 +22,7 @@ $oldModuleCache = $env:PSModuleAnalysisCachePath
 $oldSupport = $env:GRAPHCODE_SUPPORT_DIR
 $oldUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $pwsh = $PowerShellExecutable
+$completed = $false
 function Invoke-Package([string] $command, [hashtable] $extra = @{}) {
   $args = @("-NoProfile", "-File", $script, "-Command", $command)
   foreach ($key in $extra.Keys) { $args += @("-$key", [string] $extra[$key]) }
@@ -136,7 +137,15 @@ try {
   }
   Write-Output "Real scheduled-task install/locked-upgrade/upgrade/rollback/uninstall: PASS"
   if ($Standalone) { Write-Output "Standalone extracted/installed setup lifecycle using $pwsh`: PASS" }
+  $completed = $true
 } finally {
+  if (-not $completed -and $env:USERPROFILE -eq $testHome) {
+    try {
+      & $pwsh -NoProfile -File (Join-Path $RepositoryRoot "Tools\windows\package.ps1") `
+        -Command Uninstall -InstallRoot $install -RemoveUserData
+      if ($LASTEXITCODE -ne 0) { Write-Warning "Owned lifecycle cleanup failed with exit code $LASTEXITCODE" }
+    } catch { Write-Warning "Owned lifecycle cleanup failed: $_" }
+  }
   $env:USERPROFILE = $oldHome
   $env:APPDATA = $oldAppData
   $env:PATH = $oldPath

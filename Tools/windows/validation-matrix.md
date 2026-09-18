@@ -17,6 +17,8 @@ The Windows port must have runnable commands before implementation fleets begin.
 | Production Swift platform package | `pwsh Tools/windows/validate.ps1 -Task swift-production` |
 | Deterministic release hardening fixtures | `pwsh Tools/windows/validate.ps1 -Task hardening` |
 | Signed catalog integrity and publisher policy | `pwsh Tools\windows\Tests\Packaging.Signing.Tests.ps1` |
+| Native SignTool PS1 signature and tamper detection (SDK required) | `pwsh Tools\windows\Tests\Packaging.ScriptSigning.Tests.ps1` |
+| Native missing/idle task stop and deletion | `pwsh Tools\windows\Tests\Packaging.Scheduler.Tests.ps1` |
 | Failed-upgrade preservation and recoverable rollback | `pwsh Tools\windows\Tests\Packaging.Rollback.Tests.ps1` |
 | Standalone setup under PowerShell 5.1 and 7 | `pwsh Tools\windows\Tests\Packaging.Standalone.Tests.ps1` |
 | Product/investigation provider pin consistency | `pwsh Tools\windows\Tests\ProviderPins.Tests.ps1` |

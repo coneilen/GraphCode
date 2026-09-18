@@ -16,7 +16,8 @@ param(
 $ErrorActionPreference = "Stop"
 if (-not $Package) { $Package = $PSScriptRoot }
 $versionWasProvided = [bool]$Version
-$ProviderPinsPath = Join-Path $PSScriptRoot "provider-pins.json"
+# Repository commands supply canonical pins; standalone follows the selected package.
+$ProviderPinsPath = $null
 $required = @("graphcoded.exe", "graphcode.exe", "zmx.exe")
 $SignToolPath = $null
 

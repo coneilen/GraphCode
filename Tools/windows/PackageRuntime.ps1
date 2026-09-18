@@ -99,7 +99,8 @@ function Verify-Manifest([string] $root) {
 function Read-ProviderProvenance([string] $root) {
   $path = Join-Path $root "provider-provenance.json"
   $provenance = Get-Content $path -Raw | ConvertFrom-Json
-  $pins = Get-Content -LiteralPath $ProviderPinsPath -Raw | ConvertFrom-Json
+  $pinsPath = if ($ProviderPinsPath) { $ProviderPinsPath } else { Join-Path $root "provider-pins.json" }
+  $pins = Get-Content -LiteralPath $pinsPath -Raw | ConvertFrom-Json
   foreach ($provider in @("winghostty", "zmx")) {
     $p = $provenance.$provider
     $pin = $pins.$provider
@@ -213,8 +214,8 @@ function Open-Package([string] $path) {
   Require (Test-Path -LiteralPath $path) "package does not exist: $path"
   if ((Get-Item $path).PSIsContainer) { return (Resolve-Path $path).Path }
   $extract = Join-Path ([IO.Path]::GetTempPath()) "graphcode-package-$([guid]::NewGuid())"
-  Expand-Archive -LiteralPath $path -DestinationPath $extract
   $script:PackageExtraction = $extract
+  Expand-Archive -LiteralPath $path -DestinationPath $extract
   $entries = @(Get-ChildItem $extract)
   $nested = @($entries | Where-Object { $_.PSIsContainer })
   if ($nested.Count -eq 1 -and $nested[0].Name -eq "GraphCode" -and

@@ -9,7 +9,7 @@ $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
   (Join-Path $repoRoot "Tools\windows\PackageRuntime.ps1"), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw "Packaging script has parse errors: $errors" }
-foreach ($name in @("Fail", "Require", "Copy-Tree", "Move-InstallDirectory", "Install-Package")) {
+foreach ($name in @("Fail", "Require", "Copy-Tree", "Move-InstallDirectory", "Install-Package", "Open-Package", "Close-Package")) {
   $definition = $ast.Find({
       param($node)
       $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -19,6 +19,8 @@ foreach ($name in @("Fail", "Require", "Copy-Tree", "Move-InstallDirectory", "In
 }
 $copyTree = (Get-Command Copy-Tree).ScriptBlock
 $moveDirectory = (Get-Command Move-InstallDirectory).ScriptBlock
+$openPackage = (Get-Command Open-Package).ScriptBlock
+$closePackage = (Get-Command Close-Package).ScriptBlock
 
 function Assert([bool] $condition, [string] $message) {
   if (-not $condition) { throw "RED: $message" }
@@ -189,6 +191,33 @@ try {
     } finally {
       if ($lock) { $lock.Dispose() }
       if ($pushed) { Pop-Location }
+    }
+  }
+  & {
+    $script:PackageExtraction = $null
+    $script:failedExtraction = $null
+    $archive = Join-Path $fixture "interrupted.zip"
+    Set-Content -LiteralPath $archive "archive fixture"
+    function Expand-Archive([string] $LiteralPath, [string] $DestinationPath) {
+      $script:failedExtraction = $DestinationPath
+      New-Item -ItemType Directory -Path $DestinationPath | Out-Null
+      Set-Content (Join-Path $DestinationPath "partial.txt") "incomplete"
+      throw "injected archive interruption"
+    }
+    try {
+      try {
+        & $openPackage $archive | Out-Null
+        throw "Archive interruption was accepted"
+      } catch {
+        if ($_.Exception.Message -ne "injected archive interruption") { throw }
+      } finally { & $closePackage }
+      if (-not $script:failedExtraction -or (Test-Path -LiteralPath $script:failedExtraction)) {
+        $failures.Add("RED: interrupted archive extraction leaked its partial directory")
+      }
+    } finally {
+      if ($script:failedExtraction -and (Test-Path -LiteralPath $script:failedExtraction)) {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $script:failedExtraction -Recurse -Force
+      }
     }
   }
   if ($failures.Count) { throw ($failures -join "`n") }

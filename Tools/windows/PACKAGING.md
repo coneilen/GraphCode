@@ -59,6 +59,11 @@ it, setup verifies/installs its own directory. `-InstallRoot` supports custom
 locations and must also be supplied when managing that custom installation.
 `-NoScheduledTask` retains the explicit development/portable mode.
 
+Standalone provenance checks use the selected package's declared provider pins,
+so an older setup can verify another release whose pins changed. Signed-package
+catalog verification authenticates those declarations. Repository commands
+instead retain their comparison against the checkout's canonical pins.
+
 The installed copy remains usable after the extraction directory is removed:
 
 ```powershell
@@ -87,6 +92,8 @@ partial recursive moves that PowerShell can perform on locked trees.
 Only a newly promoted payload is removed
 during rollback. Staging and shortcut-snapshot failures also clean up their
 temporary directories without changing the installed product.
+The extraction directory is recorded before ZIP expansion, so interrupted
+expansion also reaches the normal cleanup path.
 
 If rollback itself fails, the command reports both the initiating failure and
 the recovery errors, rather than replacing one with the other. An unrestored
@@ -186,6 +193,14 @@ real-product gate additionally runs extracted/installed standalone setup under
 Windows PowerShell 5.1 with a minimal PATH, including scheduled-daemon startup,
 locked upgrade, rollback, and self-uninstall. These are local clean-environment
 tests, not a new physical clean-machine or production-certificate qualification.
+`Packaging.ScriptSigning.Tests.ps1` additionally uses the real SDK SignTool
+with an ephemeral, untrusted certificate to sign the generated setup. Native
+PowerShell recognizes its text signature block and detects modified code as a
+hash mismatch; no certificate is added to trust stores. This contract requires
+the SDK on the build/CI host, not the installation target, and is not proof of
+production publisher trust. `Packaging.Scheduler.Tests.ps1` exercises an owned
+idle task through native stop/delete and verifies the actual missing-task
+HRESULT without suppressing account or permission errors.
 
 ## Retained provider sources
 

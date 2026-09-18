@@ -105,6 +105,21 @@ try {
   if (-not $setupSource.Contains($runtime.Trim())) { throw "Setup does not embed the shared lifecycle verbatim" }
   $zip = Join-Path $fixture "GraphCode.zip"
   [IO.Compression.ZipFile]::CreateFromDirectory($root, $zip, [IO.Compression.CompressionLevel]::Optimal, $true)
+  $nextRoot = Join-Path $fixture "next release\GraphCode"
+  New-Item -ItemType Directory -Path (Split-Path $nextRoot -Parent) | Out-Null
+  Copy-Item -LiteralPath $root -Destination $nextRoot -Recurse
+  $pins.zmx.sha = "1" * 40
+  $pins | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $nextRoot "provider-pins.json") -Encoding utf8
+  $provenance.zmx.sha = $pins.zmx.sha
+  $provenance | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $nextRoot "provider-provenance.json") -Encoding utf8
+  $nextMetadata = Get-Content (Join-Path $nextRoot "metadata.json") -Raw | ConvertFrom-Json
+  $nextMetadata.version = "1.2.4"
+  $nextMetadata.providerPins = $pins
+  $nextMetadata | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $nextRoot "metadata.json") -Encoding utf8
+  @{ schemaVersion = 1; files = @(Get-Manifest $nextRoot) } |
+    ConvertTo-Json -Depth 10 | Set-Content (Join-Path $nextRoot "manifest.json") -Encoding utf8
+  $nextZip = Join-Path $fixture "next-release.zip"
+  [IO.Compression.ZipFile]::CreateFromDirectory($nextRoot, $nextZip, [IO.Compression.CompressionLevel]::Optimal, $true)
   $nativeProbe = Join-Path $fixture "native-command.ps1"
   $nativeSource = (@("Fail", "Invoke-PackageCommand") | ForEach-Object { $definitions[$_] }) -join "`n"
   $nativeSource += @'
@@ -124,10 +139,19 @@ Write-Output "Native command exit/stderr preservation: PASS"
   foreach ($hostPath in @((Get-Command powershell.exe).Source, (Get-Command pwsh).Source)) {
     Invoke-Setup $hostPath @() ""
     Invoke-Setup $hostPath @("-Command", "Verify", "-Package", $zip) ""
+    Invoke-Setup $hostPath @("-Command", "Verify", "-Package", $nextRoot) ""
+    Invoke-Setup $hostPath @("-Command", "Verify", "-Package", $nextZip) ""
+    Invoke-Setup $hostPath @("-Command", "Verify", "-Package", $nextRoot) "zmx provenance pin mismatch" `
+      (Join-Path $repoRoot "Tools\windows\package.ps1")
     Invoke-Setup $hostPath @("-Command", "Verify", "-TrustedSignerThumbprint", ("A" * 40)) "trusted publisher verification requires a signed package"
     Invoke-Setup $hostPath @("-Command", "Build") "Cannot validate argument"
     Invoke-Setup $hostPath @() "" $nativeProbe "Native command exit/stderr preservation: PASS"
   }
+  $pins.zmx.sha = "2" * 40
+  $pins | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $nextRoot "provider-pins.json") -Encoding utf8
+  @{ schemaVersion = 1; files = @(Get-Manifest $nextRoot) } |
+    ConvertTo-Json -Depth 10 | Set-Content (Join-Path $nextRoot "manifest.json") -Encoding utf8
+  Invoke-Setup (Get-Command powershell.exe).Source @("-Command", "Verify", "-Package", $nextRoot) "zmx provenance pin mismatch"
   Add-Content (Join-Path $root "bin\swiftCore.dll") "tamper"
   Invoke-Setup (Get-Command powershell.exe).Source @("-Command", "Verify") "size mismatch"
   Write-Output "Standalone setup without repository/toolchains on Windows PowerShell 5.1 and PowerShell 7: PASS"
