@@ -3118,36 +3118,36 @@ pub const App = struct {
                 else => {},
             }
         }
+        if (self.surface == .workspace) if (self.selected_quick_chat) |chat_index| {
+            if (chat_index < self.model.quick_chats.items.len) {
+                const chat = self.model.quick_chats.items[chat_index];
+                const identity = std.fmt.allocPrint(self.allocator, "quick-chat-workspace:{s}", .{chat.id}) catch return;
+                owned_identities.append(identity) catch {
+                    self.allocator.free(identity);
+                    return;
+                };
+                const workspace_bounds = c.RECT{
+                    .left = canvas_rect.left,
+                    .top = inputBounds(client.right, client.bottom, self.workspace_controls).workspace_top,
+                    .right = canvas_rect.right,
+                    .bottom = client.bottom,
+                };
+                elements.append(.{
+                    .identity = identity,
+                    .name = "Quick Chat terminal workspace",
+                    .parent = 4,
+                    .selected = true,
+                    .eligible = false,
+                    .invokable = false,
+                    .left = workspace_bounds.left,
+                    .top = workspace_bounds.top,
+                    .right = workspace_bounds.right,
+                    .bottom = workspace_bounds.bottom,
+                }) catch return;
+            }
+        };
         switch (self.surface) {
             .project, .workspace => if (self.model.graph) |graph| {
-                if (self.surface == .workspace) if (self.selected_quick_chat) |chat_index| {
-                    if (chat_index < self.model.quick_chats.items.len) {
-                        const chat = self.model.quick_chats.items[chat_index];
-                        const identity = std.fmt.allocPrint(self.allocator, "quick-chat-workspace:{s}", .{chat.id}) catch return;
-                        owned_identities.append(identity) catch {
-                            self.allocator.free(identity);
-                            return;
-                        };
-                        const workspace_bounds = c.RECT{
-                            .left = canvas_rect.left,
-                            .top = inputBounds(client.right, client.bottom, self.workspace_controls).workspace_top,
-                            .right = canvas_rect.right,
-                            .bottom = client.bottom,
-                        };
-                        elements.append(.{
-                            .identity = identity,
-                            .name = "Quick Chat terminal workspace",
-                            .parent = 4,
-                            .selected = true,
-                            .eligible = false,
-                            .invokable = false,
-                            .left = workspace_bounds.left,
-                            .top = workspace_bounds.top,
-                            .right = workspace_bounds.right,
-                            .bottom = workspace_bounds.bottom,
-                        }) catch return;
-                    }
-                };
                 if (self.model.open_composite_id) |parent_id| {
                     const back_name = std.fmt.allocPrint(self.allocator, "Back to {s}", .{graph.project.name}) catch return;
                     owned_identities.append(back_name) catch {
@@ -3214,11 +3214,6 @@ pub const App = struct {
                 .bottom = bounds.bottom,
             }) catch return;
         }
-        if (self.worktree_dialog == null) if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_FIXTURE_ROWS") catch null) |fixture| {
-            defer self.allocator.free(fixture);
-            provider.syncStatus(self.status());
-            return;
-        };
         const policy = if (self.worktree_dialog) |dialog| dialog.policy else WorktreeStatus.Policy{};
         provider.syncElements(self.status(), elements.items, policy);
     }
