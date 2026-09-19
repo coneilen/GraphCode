@@ -3385,7 +3385,7 @@ public actor GraphStore {
     guard !targets.isEmpty, let onDeliverMessage else { return }
     recordMailroomCommunication(from: senderID, to: "all", text: trimmed, topic: "direct")
     let sender = senderID.flatMap { id in graph.nodesAtAnyDepth.first { $0.id == id }?.title }
-    let message = "[graphcode] to every loop — \(sender.map { "\($0): " } ?? "")\(trimmed)"
+    let message = "[graphcode] \(sender.map { "\($0): " } ?? "")\(trimmed)"
     let path = graph.project.path
     let delivered = await withTaskGroup(of: (UUID, Bool).self) { group in
       for target in targets {
