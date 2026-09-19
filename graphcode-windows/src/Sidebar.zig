@@ -219,7 +219,7 @@ pub fn draw(
                     fill(hdc, rect(30 + indent, row.top - 2, 33 + indent, row.top + 17), loopAccent(node.loop_type));
                     drawText(hdc, allocator, node.title, 39 + indent, row.top, 11, 0x00E6E6E6);
                     drawText(hdc, allocator, compactState(node.state), 150, row.top, 9, stateColor(node.state));
-                    const elapsed = elapsedText(allocator, node.created_at, std.time.timestamp()) catch null;
+                    const elapsed = elapsedText(allocator, @intCast(node.created_at orelse 0), std.time.timestamp()) catch null;
                     defer if (elapsed) |value| allocator.free(value);
                     if (elapsed) |value| drawText(hdc, allocator, value, 168, row.top, 9, 0x008E8E93);
                     if (row.has_children and hover_y >= row.top and hover_y < row.top + 24)
