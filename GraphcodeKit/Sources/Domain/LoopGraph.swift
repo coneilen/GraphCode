@@ -126,6 +126,19 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     nodes.flatMap { [$0] + ($0.subGraph?.nodesAtAnyDepth ?? []) }
   }
 
+  /// The loops a broadcast (`GraphCommand.broadcastMessage`) types into: every session
+  /// that can take input now, at any depth. A composite has no session of its own, and
+  /// one never piloted has none among its workers either — they are templates.
+  public var broadcastTargets: [LoopNode] {
+    nodes.flatMap { node -> [LoopNode] in
+      guard node.loopType == .composite else {
+        return MessageBus.deliverability(to: node) == nil ? [node] : []
+      }
+      guard node.pilotState != .notPiloted else { return [] }
+      return node.subGraph?.broadcastTargets ?? []
+    }
+  }
+
   /// A structural copy with brand-new identities throughout — same loops, same wiring,
   /// nothing shared with the original.
   ///

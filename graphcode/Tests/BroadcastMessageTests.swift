@@ -67,24 +67,72 @@ struct BroadcastMessageTests {
     #expect(errors.value.first?.contains("1 of 3") == true)
   }
 
-  @Test
-  func aCompositesWorkersAreReached() async {
-    let delivered = LockIsolated<[String]>([])
-    let composite = LoopNode(
-      title: "Team", loopType: .composite,
+  private func composite(
+    _ title: String, _ workers: [LoopNode], pilot: PilotState = .piloted
+  ) -> LoopNode {
+    LoopNode(
+      title: title, loopType: .composite,
       subGraph: LoopGraph(
         project: ProjectRef(path: "sub", name: "sub"),
-        nodes: IdentifiedArray(uniqueElements: [loop("Worker", .running)])))
+        nodes: IdentifiedArray(uniqueElements: workers)),
+      pilotState: pilot)
+  }
+
+  /// Review of PR #382: recursing through each composite's child store wrote a letter
+  /// and raised a summary per level. One broadcast is one letter and one verdict.
+  @Test
+  func nestedCompositesGetOneLetterAndOneSummary() async {
+    let delivered = LockIsolated<[String: String]>([:])
+    let errors = LockIsolated<[String]>([])
+    let failing: Set<String> = ["Top B", "Worker B", "Deep"]
+    let graph = LoopGraph(
+      project: Self.project,
+      nodes: [
+        loop("Top A", .running), loop("Top B", .idle),
+        composite("Team 1", [loop("Worker A", .running), loop("Worker B", .running)]),
+        composite(
+          "Team 2", [loop("Worker C", .idle), composite("Inner", [loop("Deep", .running)])]),
+      ])
     let store = GraphStore(
-      graph: LoopGraph(project: Self.project, nodes: [composite, loop("Top", .idle)]),
+      graph: graph,
+      onDeliverMessage: { node, _, path in
+        delivered.withValue { $0[node.title] = path }
+        return !failing.contains(node.title)
+      },
+      onAnnounceError: { message in errors.withValue { $0.append(message) } },
+      onMailroomEnabled: { true })
+
+    await store.handle(.broadcastMessage(text: "freeze", from: nil))
+
+    #expect(
+      Set(delivered.value.keys)
+        == ["Top A", "Top B", "Worker A", "Worker B", "Worker C", "Deep"])
+    #expect(Set(delivered.value.values) == [Self.project.path])
+    #expect(await store.graph.mailroom.filter { $0.body == "@all: freeze" }.count == 1)
+    #expect(errors.value.count == 1)
+    #expect(errors.value.first?.contains("3 of 6") == true)
+  }
+
+  @Test
+  func anUnpilotedCompositesWorkersHaveNoSessionToReach() async {
+    let delivered = LockIsolated<[String]>([])
+    let errors = LockIsolated<[String]>([])
+    let store = GraphStore(
+      graph: LoopGraph(
+        project: Self.project,
+        nodes: [
+          composite("Template", [loop("Worker", .idle)], pilot: .notPiloted), loop("Top", .idle),
+        ]),
       onDeliverMessage: { node, _, _ in
         delivered.withValue { $0.append(node.title) }
         return true
-      })
+      },
+      onAnnounceError: { message in errors.withValue { $0.append(message) } })
 
     await store.handle(.broadcastMessage(text: "hello", from: nil))
 
-    #expect(delivered.value.sorted() == ["Top", "Worker"])
+    #expect(delivered.value == ["Top"])
+    #expect(errors.value.isEmpty)
   }
 
   @Test

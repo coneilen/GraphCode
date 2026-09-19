@@ -245,11 +245,5 @@ extension AppFeature {
 }
 
 extension LoopGraph {
-  /// The loops a broadcast would reach — every session that can be typed into now,
-  /// composites' workers included. Composites themselves have no session of their own.
-  var liveLoopCount: Int {
-    nodesAtAnyDepth.filter {
-      $0.loopType != .composite && MessageBus.deliverability(to: $0) == nil
-    }.count
-  }
+  var liveLoopCount: Int { broadcastTargets.count }
 }

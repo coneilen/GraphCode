@@ -3367,27 +3367,24 @@ public actor GraphStore {
     }
   }
 
-  /// `GraphCommand.broadcastMessage`. The sends run concurrently for the reason
-  /// `restart`'s kills do: each one is paced in chunks, and a dozen in sequence would hold
-  /// this actor for as long as they add up to. A send that fails is staged to that loop's
-  /// memory, as `deliverAdHocMessage` does, and the misses are reported once rather than
-  /// as one banner per loop.
+  /// `GraphCommand.broadcastMessage`, as one operation over the whole tree rather than a
+  /// recursion through `runInSubGraph`: a child store would write its own letter and raise
+  /// its own summary, so a graph with two composites got three letters and a banner per
+  /// level. Workers are sent to with this graph's path, the one piloting launched their
+  /// sessions with. The sends run concurrently for the reason `restart`'s kills do: each
+  /// one is paced in chunks, and a dozen in sequence would hold this actor for as long as
+  /// they add up to. A send that fails is staged to that loop's memory, as
+  /// `deliverAdHocMessage` does.
   private func broadcastMessage(_ text: String, from senderID: UUID?) async {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
       announceError("broadcast not sent: empty message")
       return
     }
-    for composite in graph.nodes where composite.loopType == .composite && !composite.isResolved {
-      _ = await runInSubGraph(
-        composite.id, .broadcastMessage(text: trimmed, from: senderID), broadcastErrors: false)
-    }
-    let targets = graph.nodes.filter {
-      $0.id != senderID && $0.loopType != .composite && MessageBus.deliverability(to: $0) == nil
-    }
+    let targets = graph.broadcastTargets.filter { $0.id != senderID }
     guard !targets.isEmpty, let onDeliverMessage else { return }
     recordMailroomCommunication(from: senderID, to: "all", text: trimmed, topic: "direct")
-    let sender = senderID.flatMap { graph.nodes[id: $0]?.title }
+    let sender = senderID.flatMap { id in graph.nodesAtAnyDepth.first { $0.id == id }?.title }
     let message = "[graphcode] to every loop — \(sender.map { "\($0): " } ?? "")\(trimmed)"
     let path = graph.project.path
     let delivered = await withTaskGroup(of: (UUID, Bool).self) { group in
