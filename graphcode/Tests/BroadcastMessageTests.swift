@@ -38,7 +38,7 @@ struct BroadcastMessageTests {
     await store.handle(.broadcastMessage(text: "  main is frozen  ", from: sender.id))
 
     #expect(Set(delivered.value.keys) == ["Running", "Idle", "Waiting"])
-    #expect(delivered.value["Running"] == "[graphcode] to every loop — Sender: main is frozen")
+    #expect(delivered.value["Running"] == "[graphcode] Sender: main is frozen")
     #expect(errors.value.isEmpty)
   }
 
@@ -61,7 +61,7 @@ struct BroadcastMessageTests {
     await store.handle(.broadcastMessage(text: "rebase on main", from: nil))
 
     #expect(memos.value["Reachable"] == nil)
-    #expect(memos.value["Gone"]?.contains { $0.contains("rebase on main") } == true)
+    #expect(memos.value["Gone"] == ["while you were away: [graphcode] rebase on main"])
     #expect(memos.value["AlsoGone"]?.contains { $0.contains("rebase on main") } == true)
     #expect(errors.value.count == 1)
     #expect(errors.value.first?.contains("1 of 3") == true)
