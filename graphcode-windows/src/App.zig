@@ -374,7 +374,11 @@ pub const App = struct {
         const com_result = c.CoInitializeEx(null, c.COINIT_APARTMENTTHREADED);
         if (com_result < 0) return error.ComInitializationFailed;
         defer c.CoUninitialize();
-        GdiplusAA.init();
+        const daemon_supervisor_test_hook = envFlag(daemon_supervisor_test_hook_environment);
+        // GDI+ may create a process-owned helper window. The daemon handoff
+        // test intentionally identifies the shell through its sole top-level
+        // window, so keep that visual-only subsystem disabled for this hook.
+        if (!daemon_supervisor_test_hook) GdiplusAA.init();
         try self.window.create(self, &onWindowMessage, title.ptr);
         self.tray.test_hook_enabled = self.tray_test_hook_enabled;
         self.tray.add(self.window.hwnd) catch self.setStatus("System tray unavailable; GraphCode remains open");
@@ -383,7 +387,7 @@ pub const App = struct {
         defer if (endpoint.len != 0) self.allocator.free(endpoint);
         defer if (lock_name.len != 0) self.allocator.free(lock_name);
         if (endpoint.len != 0 and lock_name.len != 0) self.daemon.start(endpoint, lock_name);
-        if (envFlag(daemon_supervisor_test_hook_environment)) {
+        if (daemon_supervisor_test_hook) {
             const state: usize = if (self.daemon.owned) 1 else if (self.daemon.status().len == 0) 2 else 3;
             _ = c.SetPropW(
                 self.window.hwnd,
@@ -420,7 +424,7 @@ pub const App = struct {
             const shell_test = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON") catch null;
             defer if (shell_test) |value| self.allocator.free(value);
             if (!envFlag("GRAPHCODE_UIA_GATE") and
-                !envFlag(daemon_supervisor_test_hook_environment) and
+                !daemon_supervisor_test_hook and
                 (shell_test == null or !std.mem.eql(u8, shell_test.?, "1")))
             {
                 const initial_backend = if (self.product_settings) |settings| settings.default_backend else "claudeCode";
