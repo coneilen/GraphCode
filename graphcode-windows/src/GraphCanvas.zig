@@ -998,7 +998,7 @@ fn edgeKindColor(kind: []const u8) u32 {
 fn edgeLabel(buffer: []u8, edge: GraphModel.Edge) []const u8 {
     const kind = if (edge.kind.len == 0) "handoff" else edge.kind;
     if (edge.fire_count != 0)
-        return std.fmt.bufPrint(buffer, "{s} · {s} · retry ×{d}", .{ kind, edge.condition, edge.fire_count }) catch kind;
+        return std.fmt.bufPrint(buffer, "{s} · {s} · fired {d}", .{ kind, edge.condition, edge.fire_count }) catch kind;
     if (!std.mem.eql(u8, edge.condition, "always"))
         return std.fmt.bufPrint(buffer, "{s} · {s}", .{ kind, edge.condition }) catch kind;
     return kind;
