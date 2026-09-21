@@ -15,6 +15,7 @@ const InputRouter = @import("InputRouter.zig");
 const MainWindow = @import("MainWindow.zig");
 const TerminalWorkspace = @import("TerminalWorkspace.zig");
 const Tokens = @import("DesignTokens.zig");
+const Dpi = @import("Dpi.zig");
 const Wire = @import("Wire.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
 const TrayModule = @import("Tray.zig");
@@ -191,6 +192,7 @@ pub const App = struct {
     workspace: ?*TerminalWorkspace.Workspace = null,
     navigation_cursor: Navigation.Cursor = .{},
     workspace_controls: WorkspaceControls.State = .{ .panel_visible = false },
+    dpi: u32 = Dpi.base_dpi,
     surface: GraphCanvas.Surface = .project,
     canvas_layout_store: ?CanvasLayoutStore.Store = null,
     quick_chats_requested: bool = false,
@@ -4031,6 +4033,29 @@ fn onWindowMessage(
             app.clampSidebarScroll();
             app.layoutEmptyStateControls();
             app.syncAccessibility();
+            result.* = 0;
+            return true;
+        },
+        c.WM_DPICHANGED => {
+            const dpi = @as(u32, @intCast(wparam & 0xffff));
+            app.dpi = Dpi.normalize(dpi);
+            if (lparam != 0) {
+                const suggested: *const c.RECT = @ptrFromInt(@as(usize, @bitCast(lparam)));
+                _ = c.SetWindowPos(
+                    hwnd,
+                    null,
+                    suggested.left,
+                    suggested.top,
+                    suggested.right - suggested.left,
+                    suggested.bottom - suggested.top,
+                    c.SWP_NOZORDER | c.SWP_NOACTIVATE,
+                );
+            }
+            app.layoutWorkspace();
+            app.clampSidebarScroll();
+            app.layoutEmptyStateControls();
+            app.syncAccessibility();
+            _ = c.InvalidateRect(hwnd, null, 0);
             result.* = 0;
             return true;
         },

@@ -128,7 +128,7 @@ pub fn show(
         .quick_chats => append(menu, ids.new_quick_chat, "New Chat"),
         .project => |project| {
             append(menu, ids.open_project, "Open Project");
-            append(menu, ids.new_project_loop, "New Loop...");
+            append(menu, ids.new_project_loop, "New Loop...\tCtrl+N");
             separator(menu);
             append(menu, ids.inspect_project_worktrees, "Worktrees...");
             append(menu, ids.project_settings, "Project Settings...");
@@ -146,7 +146,7 @@ pub fn show(
             append(menu, ids.delete_project_loops, "Delete All Loops...");
         },
         .node => |node| {
-            append(menu, ids.open_terminal, "Open Terminal");
+            append(menu, ids.open_terminal, "Open Terminal\tEnter");
             if (node.unwired) {
                 append(menu, ids.wire_node, "Wire it up");
                 append(menu, ids.mark_entry, "Mark as entry");
@@ -158,10 +158,10 @@ pub fn show(
                 appendEnabled(menu, ids.arm_composite, "Arm Schedule", node.can_arm);
                 separator(menu);
             }
-            append(menu, ids.edit_node, "Edit Details...");
-            append(menu, ids.rename_node, "Rename...");
-            append(menu, ids.stop_node, "Stop");
-            append(menu, ids.delete_node, "Delete Loop...");
+            append(menu, ids.edit_node, "Edit Details...\tCtrl+E");
+            append(menu, ids.rename_node, "Rename...\tF2");
+            append(menu, ids.stop_node, "Stop\tCtrl+S");
+            append(menu, ids.delete_node, "Delete Loop...\tDelete");
         },
         .edge => {
             append(menu, ids.edit_edge, "Edit Edge...");
@@ -169,8 +169,8 @@ pub fn show(
         },
         .quick_chat => {
             append(menu, ids.open_quick_chat, "Open Chat");
-            append(menu, ids.rename_quick_chat, "Rename...");
-            append(menu, ids.delete_quick_chat, "Delete Chat...");
+            append(menu, ids.rename_quick_chat, "Rename...\tCtrl+Shift+Q");
+            append(menu, ids.delete_quick_chat, "Delete Chat...\tCtrl+Shift+Delete");
         },
     }
     const command = c.TrackPopupMenu(
