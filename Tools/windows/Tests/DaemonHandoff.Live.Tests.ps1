@@ -156,9 +156,77 @@ function Assert-EndpointReachable {
   $process.Dispose()
 }
 
+function Get-HandoffElapsed([Diagnostics.Stopwatch] $clock) {
+  return "{0:n2}s" -f $clock.Elapsed.TotalSeconds
+}
+
+function Get-DaemonTestState([string] $path) {
+  if (Test-Path -LiteralPath $path) {
+    return (Get-Content -LiteralPath $path -Raw).Trim()
+  }
+  return "<missing>"
+}
+
+function Get-ProcessStatus([Diagnostics.Process] $process, [string] $role) {
+  if (-not $process) { return "$role=<not-started>" }
+  $process.Refresh()
+  return "$role(pid=$($process.Id), exited=$($process.HasExited), exitCode=$(
+    if ($process.HasExited) { $process.ExitCode } else { '<running>' }))"
+}
+
+function Assert-ShellsAlive(
+  [Diagnostics.Process] $shellA,
+  [Diagnostics.Process] $shellB,
+  [string] $diagnostics
+) {
+  foreach ($entry in @(
+      @{ Process = $shellA; Role = "shellA" },
+      @{ Process = $shellB; Role = "shellB" }
+    )) {
+    if (-not $entry.Process) { continue }
+    $entry.Process.Refresh()
+    if ($entry.Process.HasExited) {
+      throw "$($entry.Role) exited before daemon handoff completed: $diagnostics"
+    }
+  }
+}
+
+function Get-HandoffDiagnostics(
+  [Diagnostics.Process] $shellA,
+  [Diagnostics.Process] $shellB,
+  [string] $daemonStateA,
+  [string] $daemonStateB,
+  [Diagnostics.Stopwatch] $clock,
+  [Diagnostics.Process] $daemonProcess = $null,
+  [object] $selectedChild = $null
+) {
+  $ownerState = if ($shellA) { Get-ShellSupervisorState $shellA.Id } else { "<missing>" }
+  $contenderState = if ($shellB) { Get-ShellSupervisorState $shellB.Id } else { "<missing>" }
+  $daemonStatus = if ($daemonProcess) {
+    $daemonProcess.Refresh()
+    "daemon(pid=$($daemonProcess.Id), exited=$($daemonProcess.HasExited), exitCode=$(
+      if ($daemonProcess.HasExited) { $daemonProcess.ExitCode } else { '<running>' }))"
+  } elseif ($selectedChild) {
+    "daemon(pid=$($selectedChild.ProcessId), parent=$($selectedChild.ParentProcessId), executable=$($selectedChild.ExecutablePath))"
+  } else {
+    "daemon=<missing>"
+  }
+  return @(
+    "elapsed=$(Get-HandoffElapsed $clock)",
+    (Get-ProcessStatus $shellA "shellA"),
+    (Get-ProcessStatus $shellB "shellB"),
+    $daemonStatus,
+    "daemonA=$(Get-DaemonTestState $daemonStateA)",
+    "daemonB=$(Get-DaemonTestState $daemonStateB)",
+    "shellStateA=$ownerState",
+    "shellStateB=$contenderState"
+  ) -join "; "
+}
+
 $shellA = $null
 $shellB = $null
 $daemonProcess = $null
+$handoffClock = [Diagnostics.Stopwatch]::StartNew()
 try {
   New-Item -ItemType Directory -Force -Path $supportDirectory | Out-Null
   $daemonStateA = Join-Path $supportDirectory "daemon-a.state"
@@ -170,7 +238,11 @@ try {
   $parents = @($shellA.Id, $shellB.Id)
   $children = @()
   $selectedChild = $null
-  for ($i = 0; $i -lt 100; $i++) {
+  $spawnDeadline = [DateTime]::UtcNow.AddSeconds(20)
+  while ([DateTime]::UtcNow -lt $spawnDeadline) {
+    Assert-ShellsAlive $shellA $shellB (
+      Get-HandoffDiagnostics $shellA $shellB $daemonStateA $daemonStateB $handoffClock
+    )
     $children = @(Get-DaemonChildren $parents)
     if ($children.Count -eq 1) {
       $candidate = Get-Process -Id $children[0].ProcessId -ErrorAction SilentlyContinue
@@ -187,27 +259,28 @@ try {
     Start-Sleep -Milliseconds 100
   }
   if (-not $daemonProcess -or -not $selectedChild) {
-    $states = @($shellA, $shellB | ForEach-Object {
-        $_.Refresh()
-        "pid=$($_.Id), exited=$($_.HasExited), exitCode=$(
-          if ($_.HasExited) { $_.ExitCode } else { '<running>' })"
-      }) -join "; "
-    $daemonStates = @($daemonStateA, $daemonStateB |
-      ForEach-Object {
-        "$(Split-Path -Leaf $_)=$(if (Test-Path -LiteralPath $_) {
-          Get-Content -LiteralPath $_ -Raw
-        } else { '<missing>' })"
-      }) -join "; "
     throw (
-      "concurrent shells did not spawn exactly one graphcoded child: $states; $daemonStates; " +
-      "shellStateA=$(Get-ShellSupervisorState $shellA.Id), shellStateB=$(Get-ShellSupervisorState $shellB.Id)"
+      "concurrent shells did not spawn exactly one graphcoded child before the deadline: " +
+      (Get-HandoffDiagnostics $shellA $shellB $daemonStateA $daemonStateB $handoffClock)
     )
   }
   $owner = if ($selectedChild.ParentProcessId -eq $shellA.Id) { $shellA } else { $shellB }
   $contender = if ($owner.Id -eq $shellA.Id) { $shellB } else { $shellA }
-  for ($i = 0; $i -lt 80; $i++) {
-    if ((Get-ShellSupervisorState $owner.Id) -eq 1 -and
-        (Get-ShellSupervisorState $contender.Id) -eq 2) {
+  $classificationDeadline = [DateTime]::UtcNow.AddSeconds(30)
+  while ([DateTime]::UtcNow -lt $classificationDeadline) {
+    Assert-ShellsAlive $shellA $shellB (
+      Get-HandoffDiagnostics $shellA $shellB $daemonStateA $daemonStateB $handoffClock $daemonProcess $selectedChild
+    )
+    $daemonProcess.Refresh()
+    if ($daemonProcess.HasExited) {
+      throw (
+        "graphcoded exited before shell ownership classification completed: " +
+        (Get-HandoffDiagnostics $shellA $shellB $daemonStateA $daemonStateB $handoffClock $daemonProcess $selectedChild)
+      )
+    }
+    $ownerState = Get-ShellSupervisorState $owner.Id
+    $contenderState = Get-ShellSupervisorState $contender.Id
+    if ($ownerState -eq 1 -and $contenderState -eq 2) {
       break
     }
     Start-Sleep -Milliseconds 100
@@ -216,9 +289,9 @@ try {
   $contenderState = Get-ShellSupervisorState $contender.Id
   if ($ownerState -ne 1 -or $contenderState -ne 2) {
     throw (
-      "shell ownership classification was incorrect: owner=$ownerState, contender=$contenderState, " +
-      "daemonA=$(if (Test-Path $daemonStateA) { Get-Content $daemonStateA -Raw } else { '<missing>' }), " +
-      "daemonB=$(if (Test-Path $daemonStateB) { Get-Content $daemonStateB -Raw } else { '<missing>' })"
+      "shell ownership classification did not reach owner=1 and contender=2 before the deadline: " +
+      "owner=$ownerState, contender=$contenderState; " +
+      (Get-HandoffDiagnostics $shellA $shellB $daemonStateA $daemonStateB $handoffClock $daemonProcess $selectedChild)
     )
   }
   Assert-EndpointReachable

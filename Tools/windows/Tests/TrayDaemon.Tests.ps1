@@ -61,10 +61,20 @@ if ($daemonMain -notmatch "DaemonStartupHandoff" -or
   throw "child must skip the parent-held reservation and publish readiness after its lifetime lock"
 }
 $handoffLive = Join-Path $root "Tools\windows\Tests\DaemonHandoff.Live.Tests.ps1"
-if (-not (Test-Path -LiteralPath $handoffLive) -or
-    (Get-Content -LiteralPath $handoffLive -Raw) -notmatch
-      "Concurrent shells did not spawn exactly one graphcoded child") {
+if (-not (Test-Path -LiteralPath $handoffLive)) {
   throw "concurrent two-shell handoff coverage is missing"
+}
+$handoffLiveText = Get-Content -LiteralPath $handoffLive -Raw
+if ($handoffLiveText -notmatch "Concurrent shells did not spawn exactly one graphcoded child") {
+  throw "concurrent two-shell handoff coverage is missing"
+}
+if ($handoffLiveText -notmatch "classificationDeadline" -or
+    $handoffLiveText -notmatch "Assert-ShellsAlive" -or
+    $handoffLiveText -notmatch "Get-HandoffDiagnostics") {
+  throw "concurrent handoff test must use a diagnostic condition wait for ownership classification"
+}
+if ($handoffLiveText -match 'for \(\$i = 0; \$i -lt 80; \$i\+\+\) \{[\s\S]{0,400}Get-ShellSupervisorState \$owner\.Id') {
+  throw "concurrent handoff test must not regress to short fixed ownership polling"
 }
 if ($app -notmatch "GRAPHCODE_DAEMON_SUPERVISOR_TEST_HOOK" -or
     $app -notmatch "DaemonSupervisorState") {
