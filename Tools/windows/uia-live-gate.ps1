@@ -318,6 +318,57 @@ function Get-FocusDiagnostics([IntPtr] $expectedWindow) {
   return "foreground=$(Format-WindowHandle $foreground) expected=$(Format-WindowHandle $expectedWindow) expectedIsForeground=$([GraphCodeUiaGateState]::IsForegroundWindow($expectedWindow)) foregroundPid=$foregroundProcessId foregroundProcess='$($foregroundProcess.ProcessName)' foregroundClass='$([GraphCodeUiaGateState]::WindowClass($foreground))' foregroundTitle='$([GraphCodeUiaGateState]::WindowTitle($foreground))' focused={$focusedDescription}"
 }
 
+function Wait-ForDesktopElement(
+  [System.Windows.Automation.AutomationElement] $desktop,
+  [System.Windows.Automation.Condition] $condition,
+  [string] $label,
+  [IntPtr] $diagnosticWindow = [IntPtr]::Zero,
+  [int] $TimeoutMilliseconds = 10000,
+  [int] $PollMilliseconds = 50
+) {
+  $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+  $element = $null
+  while ([DateTime]::UtcNow -lt $deadline -and $null -eq $element) {
+    $element = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $condition
+    )
+    if ($null -eq $element) {
+      Start-Sleep -Milliseconds $PollMilliseconds
+    }
+  }
+  if ($null -eq $element -and $diagnosticWindow -ne [IntPtr]::Zero) {
+    Write-Host "UIA_WAIT_DIAGNOSTICS label=$label $(Get-FocusDiagnostics $diagnosticWindow)"
+  }
+  return $element
+}
+
+function Wait-ForDesktopElementGone(
+  [System.Windows.Automation.AutomationElement] $desktop,
+  [System.Windows.Automation.Condition] $condition,
+  [string] $label,
+  [IntPtr] $diagnosticWindow = [IntPtr]::Zero,
+  [int] $TimeoutMilliseconds = 10000,
+  [int] $PollMilliseconds = 50
+) {
+  $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+  $element = $desktop.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    $condition
+  )
+  while ([DateTime]::UtcNow -lt $deadline -and $null -ne $element) {
+    Start-Sleep -Milliseconds $PollMilliseconds
+    $element = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $condition
+    )
+  }
+  if ($null -ne $element -and $diagnosticWindow -ne [IntPtr]::Zero) {
+    Write-Host "UIA_WAIT_DIAGNOSTICS label=$label-still-present $(Get-FocusDiagnostics $diagnosticWindow)"
+  }
+  return $null -eq $element
+}
+
 function Hide-TestProviderZmxWindows {
   if (-not $env:GRAPHCODE_ZMX) { return }
   $providerZmx = [IO.Path]::GetFullPath($env:GRAPHCODE_ZMX)
@@ -789,17 +840,20 @@ try {
       [System.Windows.Automation.AutomationElement]::NameProperty, "Create or edit node"
     ))
   )
-  for ($index = 0; $index -lt 40 -and $null -eq $sidebarNodeForm; $index++) {
-    Start-Sleep -Milliseconds 50
-    $sidebarNodeForm = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants, $sidebarNodeFormCondition
-    )
-  }
+  $sidebarNodeForm = Wait-ForDesktopElement `
+    -desktop $desktop `
+    -condition $sidebarNodeFormCondition `
+    -label "project-row New Loop node form" `
+    -diagnosticWindow $shellWindow
   Require ($null -ne $sidebarNodeForm) "project-row New Loop did not open the node form"
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$sidebarNodeForm.Current.NativeWindowHandle
   )) "project-row New Loop form rejected cancellation"
-  Start-Sleep -Milliseconds 150
+  Require (Wait-ForDesktopElementGone `
+    -desktop $desktop `
+    -condition $sidebarNodeFormCondition `
+    -label "project-row New Loop node form close" `
+    -diagnosticWindow $shellWindow) "project-row New Loop form did not close after cancellation"
   $loopIds = @($loopRows | ForEach-Object { $_.Current.AutomationId })
   $null = $loops.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
   foreach ($row in $loopRows) {
@@ -1601,18 +1655,20 @@ try {
     )),
     $folderPickerWindowCondition
   )
-  for ($index = 0; $index -lt 40 -and $null -eq $folderPicker; $index++) {
-    Start-Sleep -Milliseconds 50
-    $folderPicker = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      $folderPickerCondition
-    )
-  }
+  $folderPicker = Wait-ForDesktopElement `
+    -desktop $desktop `
+    -condition $folderPickerCondition `
+    -label "Open Folder picker" `
+    -diagnosticWindow $shellWindow
   Require ($null -ne $folderPicker) "Open Folder did not launch the native folder picker"
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$folderPicker.Current.NativeWindowHandle
   )) "native folder picker rejected cancellation"
-  Start-Sleep -Milliseconds 200
+  Require (Wait-ForDesktopElementGone `
+    -desktop $desktop `
+    -condition $folderPickerCondition `
+    -label "Open Folder picker close" `
+    -diagnosticWindow $shellWindow) "native folder picker did not close after cancellation"
 
   Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, 4602)) `
     "empty global New Loop command was rejected"
@@ -1632,18 +1688,20 @@ try {
     )),
     $nodeFormWindowCondition
   )
-  for ($index = 0; $index -lt 40 -and $null -eq $nodeForm; $index++) {
-    Start-Sleep -Milliseconds 50
-    $nodeForm = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      $nodeFormCondition
-    )
-  }
+  $nodeForm = Wait-ForDesktopElement `
+    -desktop $desktop `
+    -condition $nodeFormCondition `
+    -label "empty global New Loop node form" `
+    -diagnosticWindow $shellWindow
   Require ($null -ne $nodeForm) "empty global New Loop did not open the node form"
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$nodeForm.Current.NativeWindowHandle
   )) "empty global node form rejected cancellation"
-  Start-Sleep -Milliseconds 200
+  Require (Wait-ForDesktopElementGone `
+    -desktop $desktop `
+    -condition $nodeFormCondition `
+    -label "empty global New Loop node form close" `
+    -diagnosticWindow $shellWindow) "empty global node form did not close after cancellation"
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 10)) "empty project fixture command was rejected"
   Start-Sleep -Milliseconds 200
@@ -1655,18 +1713,20 @@ try {
   Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, 4602)) `
     "empty project New Loop command was rejected"
   $projectNodeForm = $null
-  for ($index = 0; $index -lt 40 -and $null -eq $projectNodeForm; $index++) {
-    Start-Sleep -Milliseconds 50
-    $projectNodeForm = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      $nodeFormCondition
-    )
-  }
+  $projectNodeForm = Wait-ForDesktopElement `
+    -desktop $desktop `
+    -condition $nodeFormCondition `
+    -label "empty project New Loop node form" `
+    -diagnosticWindow $shellWindow
   Require ($null -ne $projectNodeForm) "empty project New Loop did not open the node form"
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$projectNodeForm.Current.NativeWindowHandle
   )) "empty project node form rejected cancellation"
-  Start-Sleep -Milliseconds 200
+  Require (Wait-ForDesktopElementGone `
+    -desktop $desktop `
+    -condition $nodeFormCondition `
+    -label "empty project New Loop node form close" `
+    -diagnosticWindow $shellWindow) "empty project node form did not close after cancellation"
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 11)) `
     "Remote Connection fixture command was rejected"

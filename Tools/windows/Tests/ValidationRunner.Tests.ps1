@@ -215,6 +215,19 @@ try {
       $uiaLiveGateSource -notmatch 'Product Settings model control could not retain foreground focus') {
     throw "RED: UIA live gate does not prove foreground ownership before accepting row focus"
   }
+  if ($uiaLiveGateSource -notmatch 'function Wait-ForDesktopElement' -or
+      $uiaLiveGateSource -notmatch 'function Wait-ForDesktopElementGone' -or
+      $uiaLiveGateSource -notmatch 'UIA_WAIT_DIAGNOSTICS' -or
+      $uiaLiveGateSource -notmatch 'empty global New Loop node form' -or
+      $uiaLiveGateSource -notmatch 'empty project New Loop node form' -or
+      $uiaLiveGateSource -notmatch 'project-row New Loop node form' -or
+      $uiaLiveGateSource -notmatch 'Open Folder picker close') {
+    throw "RED: UIA live gate does not wait deterministically for asynchronous modal windows"
+  }
+  if ($uiaLiveGateSource -match '(?s)New Loop command was rejected.*?for \(\$index = 0; \$index -lt 40 -and \$null -eq \$.*NodeForm' -or
+      $uiaLiveGateSource -match '(?s)Open Folder command was rejected.*?Start-Sleep -Milliseconds 200\s*[\r\n]+\s*Require \(\[GraphCodeUiaGateState\]::PostCommand\(\$shellWindow, 4602\)\)') {
+    throw "RED: UIA live gate reintroduced short fixed polling around New Loop modal commands"
+  }
   $shellTests = Get-Content (Join-Path $PSScriptRoot "WindowsShell.Tests.ps1") -Raw
   if ($shellTests -notmatch '(?s)Windows update feed executable tests.*?zig test src\\WindowsUpdates\.zig.*?-lwinhttp') {
     throw "RED: Windows shell validation does not run the native updater tests"
