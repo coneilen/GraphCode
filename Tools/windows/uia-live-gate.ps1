@@ -2,7 +2,8 @@
 param(
   [Parameter(Mandatory)] [string] $Shell,
   [string] $Zmx = "",
-  [string[]] $ArgumentList = @()
+  [string[]] $ArgumentList = @(),
+  [switch] $SidebarParityOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -181,7 +182,8 @@ public static class GraphCodeUiaGateState {
   public static bool FocusControl(IntPtr parent, IntPtr control) {
     if (parent == IntPtr.Zero || control == IntPtr.Zero) return false;
     ActivateWindow(parent);
-    uint parentThread = GetWindowThreadProcessId(parent, out _);
+    uint ignoredProcessId;
+    uint parentThread = GetWindowThreadProcessId(parent, out ignoredProcessId);
     uint currentThread = GetCurrentThreadId();
     bool attached = currentThread != parentThread &&
       AttachThreadInput(currentThread, parentThread, true);
@@ -195,9 +197,11 @@ public static class GraphCodeUiaGateState {
   public static bool ActivateWindow(IntPtr window) {
     if (window == IntPtr.Zero) return false;
     IntPtr foreground = GetForegroundWindow();
+    uint ignoredForegroundProcessId;
     uint foregroundThread = foreground == IntPtr.Zero ? 0 :
-      GetWindowThreadProcessId(foreground, out _);
-    uint targetThread = GetWindowThreadProcessId(window, out _);
+      GetWindowThreadProcessId(foreground, out ignoredForegroundProcessId);
+    uint ignoredTargetProcessId;
+    uint targetThread = GetWindowThreadProcessId(window, out ignoredTargetProcessId);
     uint currentThread = GetCurrentThreadId();
     bool attachForeground = foregroundThread != 0 &&
       currentThread != foregroundThread &&
@@ -480,6 +484,9 @@ $oldSupportDirectory = [Environment]::GetEnvironmentVariable("GRAPHCODE_SUPPORT_
 $oldResetSidebar = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_RESET_SIDEBAR")
 $oldUpdateAvailable = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_UPDATE_AVAILABLE")
 $oldShowUpdate = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_SHOW_UPDATE")
+$oldIngressError = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_INGRESS_ERROR")
+$oldDaemonCommandLog = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_DAEMON_COMMAND_LOG")
+$oldShellExecuteLog = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_SHELL_EXECUTE_LOG")
 $process = $null
 $settingsProcess = $null
 $status = $null
@@ -499,6 +506,8 @@ $policyContents = $null
 $settingsDirectory = $null
 $settingsPath = $null
 $settingsErrorPath = $null
+$daemonCommandLogPath = $null
+$shellExecuteLogPath = $null
 try {
   if ($Zmx) { $env:GRAPHCODE_ZMX = $Zmx }
   $env:GRAPHCODE_GATE_CWD = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -509,6 +518,12 @@ try {
   $env:USERNAME = "GraphCodeUIAGate"
   $env:GRAPHCODE_UIA_FIXTURE_ROWS = "C:\fixture-safe|safe,C:\fixture-unsafe|unsafe"
   $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\graphcode-uia-gate-$PID"
+  $daemonCommandLogPath = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode-uia-daemon-command-$PID.json"
+  $shellExecuteLogPath = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode-uia-shell-execute-$PID.log"
+  Remove-Item -LiteralPath $daemonCommandLogPath -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $shellExecuteLogPath -Force -ErrorAction SilentlyContinue
+  $env:GRAPHCODE_UIA_DAEMON_COMMAND_LOG = $daemonCommandLogPath
+  $env:GRAPHCODE_UIA_SHELL_EXECUTE_LOG = $shellExecuteLogPath
   $settingsDirectory = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode-uia-product-settings-$PID"
   $settingsPath = Join-Path $settingsDirectory "settings.json"
   $settingsErrorPath = Join-Path $settingsDirectory "stderr.log"
@@ -620,14 +635,21 @@ try {
   $navigationIds = @("overview-destination", "quick-chats-destination")
   $canvasActionIds = @("canvas-primary-action", "zoom-out", "actual-size", "zoom-in", "fit-canvas")
   $projectRows = @(Get-DirectChildren $projects $rawWalker | Where-Object { $_.Current.AutomationId -match '^project-row-' })
+  $openProjectRows = @(Get-DirectChildren $projects $rawWalker | Where-Object { $_.Current.AutomationId -match '^open-project-' })
   $graphDestination = Find-FragmentById $root "overview-destination" $rawWalker
   Require (($null -ne $graphDestination) -and ($graphDestination.Current.Name -eq "Graph")) `
     "global sidebar destination did not expose the pinned Graph identity"
-  Require ($projectRows.Count -eq 3) "Projects did not expose grouped recent rows and the open project row"
-  Require ((@($projectRows | ForEach-Object { $_.Current.Name }) -join "|") -eq "Fixture local|Fixture remote|UIA project") "dynamic project row names were not synchronized"
+  Require ($projectRows.Count -eq 1) "Projects did not expose grouped recent rows"
+  Require ($openProjectRows.Count -eq 1) "Projects did not expose the separate open-project row"
+  Require ((@($projectRows | ForEach-Object { $_.Current.Name }) -join "|") -eq "Fixture remote") "recent project row names were not synchronized"
+  Require ($openProjectRows[0].Current.Name -eq "UIA project") "open project row name was not synchronized"
   foreach ($projectRow in $projectRows) {
     Require (($projectRow.Current.BoundingRectangle.Width -gt 0) -and
              ($projectRow.Current.BoundingRectangle.Height -gt 0)) "dynamic project row has empty bounds"
+  }
+  foreach ($projectRow in $openProjectRows) {
+    Require (($projectRow.Current.BoundingRectangle.Width -gt 0) -and
+             ($projectRow.Current.BoundingRectangle.Height -gt 0)) "open project row has empty bounds"
   }
   $needsYouRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^needs-you-row-'
@@ -687,31 +709,27 @@ try {
     ForEach-Object { $_.Current.AutomationId } | Where-Object { $_ })
   $null = Assert-FragmentLinks $projects $rawWalker $projectChildIds "RawView Projects"
   $null = Assert-FragmentLinks $projects $controlWalker $projectChildIds "ControlView Projects"
-  $localSection = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Local Projects"
-  }) | Select-Object -First 1
   $remoteSection = @(Get-DirectChildren $projects $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Remote Repositories"
   }) | Select-Object -First 1
-  Require (($null -ne $localSection) -and ($null -ne $remoteSection)) `
-    "Local and Remote sidebar sections did not expose independent actions"
+  Require ($null -ne $remoteSection) "Remote sidebar section did not expose its section action"
   $remoteRowId = @($projectRows | Where-Object { $_.Current.Name -eq "Fixture remote" })[0].Current.AutomationId
-  $localSection.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $remoteSection.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   Start-Sleep -Milliseconds 150
   $collapsedProjectNames = @(Get-DirectChildren $projects $rawWalker |
-    Where-Object { $_.Current.AutomationId -match '^project-row-' } |
+    Where-Object { $_.Current.AutomationId -match '^(project-row|open-project)-' } |
     ForEach-Object { $_.Current.Name })
-  Require (("Fixture local" -notin $collapsedProjectNames) -and
-           ("Fixture remote" -in $collapsedProjectNames)) `
-    "Local section collapse affected the Remote section or retained its Local child"
-  $remoteAfterLocalCollapse = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -eq $remoteRowId
+  Require (("Fixture remote" -notin $collapsedProjectNames) -and
+           ("UIA project" -in $collapsedProjectNames)) `
+    "Remote section collapse did not hide only the unopened recent folder"
+  $openProjectAfterRemoteCollapse = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^open-project-' -and $_.Current.Name -eq 'UIA project'
   }) | Select-Object -First 1
-  Require ($null -ne $remoteAfterLocalCollapse) "Remote row identity changed during Local collapse"
-  $localSection = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Local Projects"
+  Require ($null -ne $openProjectAfterRemoteCollapse) "open project row disappeared when collapsing recents"
+  $remoteSection = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Remote Repositories"
   }) | Select-Object -First 1
-  $localSection.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $remoteSection.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   Start-Sleep -Milliseconds 150
 
   $loopRows = @(Get-DirectChildren $loops $rawWalker | Where-Object {
@@ -936,7 +954,7 @@ try {
   $process.Refresh()
   Require (-not $process.HasExited) "surface UIA actions terminated the shell"
   $activeProjectRow = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^project-row-' -and $_.Current.Name -eq "UIA project"
+    $_.Current.AutomationId -match '^open-project-' -and $_.Current.Name -eq "UIA project"
   }) | Select-Object -First 1
   $activeLoopRow = @(Get-DirectChildren $loops $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^loop-row-' -and $_.Current.Name -eq "UIA loop A"
@@ -1745,6 +1763,116 @@ try {
   )) "About dialog rejected its close command"
   Start-Sleep -Milliseconds 250
 
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 20)) `
+    "sidebar parity fixture reset was rejected"
+  Start-Sleep -Milliseconds 200
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 19)) `
+    "sidebar ingress-error fixture mutation was rejected"
+  Start-Sleep -Milliseconds 150
+  $sidebarErrorFooter = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^sidebar-error-footer-' -and
+      $_.Current.Name -eq 'Folder could not be opened because the background service returned a detailed error that should wrap cleanly in the sidebar footer.'
+  }) | Select-Object -First 1
+  Require ($null -ne $sidebarErrorFooter) "sidebar error footer omitted its dedicated UIA identity"
+  Require (($sidebarErrorFooter.Current.BoundingRectangle.Width -gt 0) -and
+           ($sidebarErrorFooter.Current.BoundingRectangle.Height -gt 24)) `
+    "sidebar error footer did not expose wrapped multi-line bounds"
+
+  $needsYouStop = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^needs-you-stop-' -and $_.Current.Name -eq "Stop loop"
+  }) | Select-Object -First 1
+  Require ($null -ne $needsYouStop) "Needs-you row omitted its Stop action"
+  Remove-Item -LiteralPath $daemonCommandLogPath -Force -ErrorAction SilentlyContinue
+  $needsYouStop.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  for ($index = 0; $index -lt 40 -and -not (Test-Path -LiteralPath $daemonCommandLogPath); $index++) {
+    Start-Sleep -Milliseconds 50
+  }
+  Require (Test-Path -LiteralPath $daemonCommandLogPath) "Needs-you Stop did not emit a daemon command"
+  $needsYouStopCommand = [IO.File]::ReadAllText($daemonCommandLogPath)
+  Require ($needsYouStopCommand -match '"projectPath":"C:\\\\GraphCode\\\\fixture"') `
+    "Needs-you Stop routed to the wrong project: $needsYouStopCommand"
+  Require ($needsYouStopCommand -match '"stopNode":\{"_0":"22222222-2222-4222-8222-222222222222"\}') `
+    "Needs-you Stop routed to the wrong loop: $needsYouStopCommand"
+
+  Remove-Item -LiteralPath $daemonCommandLogPath -Force -ErrorAction SilentlyContinue
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 16)) `
+    "sidebar root reorder fixture mutation was rejected"
+  for ($index = 0; $index -lt 40 -and -not (Test-Path -LiteralPath $daemonCommandLogPath); $index++) {
+    Start-Sleep -Milliseconds 50
+  }
+  $reorderedLoopRows = @(Get-DirectChildren $loops $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^loop-row-'
+  })
+  $reorderedRootNames = @($reorderedLoopRows | Where-Object {
+    $_.Current.Name -in @("UIA loop A", "UIA loop C")
+  } | ForEach-Object { $_.Current.Name })
+  Require ((($reorderedRootNames -join '|') -eq 'UIA loop C|UIA loop A') -or
+           (($reorderedRootNames -join '|') -eq 'UIA loop C|UIA loop A|UIA loop B')) `
+    "sidebar root reorder was not observable in the loop tree: $($reorderedRootNames -join '|')"
+  Require (Test-Path -LiteralPath $daemonCommandLogPath) "sidebar root reorder did not emit a daemon command"
+  $reorderCommand = [IO.File]::ReadAllText($daemonCommandLogPath)
+  Require ($reorderCommand -match '"sidebarNodesReordered"') `
+    "sidebar root reorder did not use the sidebar-order daemon command: $reorderCommand"
+
+  Remove-Item -LiteralPath $shellExecuteLogPath -Force -ErrorAction SilentlyContinue
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 17)) `
+    "project Move fixture mutation was rejected"
+  for ($index = 0; $index -lt 40 -and -not (Test-Path -LiteralPath $shellExecuteLogPath); $index++) {
+    Start-Sleep -Milliseconds 50
+  }
+  Require (Test-Path -LiteralPath $shellExecuteLogPath) "project Move did not record its Explorer request"
+  $moveProjectLog = [IO.File]::ReadAllText($shellExecuteLogPath)
+  Require ($moveProjectLog -match 'file=explorer\.exe') "project Move did not route through Explorer"
+  Require ($moveProjectLog -match 'parameters=/select,"C:\\GraphCode\\fixture"') `
+    "project Move did not target the expected folder: $moveProjectLog"
+
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 18)) `
+    "activity fixture mutation was rejected"
+  Start-Sleep -Milliseconds 200
+  $activityFilter = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-filter-'
+  }) | Select-Object -First 1
+  $activityRight = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-control-' -and $_.Current.Name -eq 'Scroll activity right'
+  }) | Select-Object -First 1
+  Require (($null -ne $activityFilter) -and ($null -ne $activityRight)) `
+    "activity strip omitted its filter or scroll affordances"
+  $activityBeforeScroll = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-row-'
+  } | ForEach-Object { $_.Current.Name })
+  Require (($activityBeforeScroll -join '|') -eq 'Activity E|Activity D') `
+    "activity strip did not expose the expected initial viewport: $($activityBeforeScroll -join '|')"
+  $activityRight.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  $activityAfterScroll = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-row-'
+  } | ForEach-Object { $_.Current.Name })
+  Require (($activityAfterScroll -join '|') -eq 'Activity D|Activity C') `
+    "activity strip scroll-right did not advance the live viewport: $($activityAfterScroll -join '|')"
+  $activityFilter.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  $filteredActivityRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-row-'
+  })
+  $filteredActivityNames = @($filteredActivityRows | ForEach-Object { $_.Current.Name })
+  Require (($filteredActivityNames -join '|') -eq 'Activity C|Activity B') `
+    "activity attention-only filter did not reduce the strip to attention rows: $($filteredActivityNames -join '|')"
+  $activityNavigationRow = @($filteredActivityRows | Where-Object { $_.Current.Name -eq 'Activity C' }) | Select-Object -First 1
+  Require ($null -ne $activityNavigationRow) "activity strip omitted the Activity C card after filtering"
+  $activityNavigationRow.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 250
+  $workspaceLoopBar = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^workspace-loop-bar-'
+  }) | Select-Object -First 1
+  Require ($null -ne $workspaceLoopBar) "activity navigation did not open a workspace"
+  $selectedWorkspaceCard = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^canvas-card-' -and
+      $_.Current.Name -eq 'Activity C' -and
+      $_.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected
+  }) | Select-Object -First 1
+  Require ($null -ne $selectedWorkspaceCard) "activity navigation did not select the targeted loop"
+  if ($SidebarParityOnly) { return }
+
   Require $process.CloseMainWindow() "shell refused caption close"
   Start-Sleep -Milliseconds 250
   $process.Refresh()
@@ -2083,6 +2211,12 @@ try {
   if ($settingsDirectory) {
     Remove-Item -LiteralPath $settingsDirectory -Recurse -Force -ErrorAction SilentlyContinue
   }
+  if ($daemonCommandLogPath) {
+    Remove-Item -LiteralPath $daemonCommandLogPath -Force -ErrorAction SilentlyContinue
+  }
+  if ($shellExecuteLogPath) {
+    Remove-Item -LiteralPath $shellExecuteLogPath -Force -ErrorAction SilentlyContinue
+  }
   if ($null -eq $oldZmx) { Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue }
   else { $env:GRAPHCODE_ZMX = $oldZmx }
   if ($null -eq $oldCwd) { Remove-Item Env:GRAPHCODE_GATE_CWD -ErrorAction SilentlyContinue }
@@ -2112,4 +2246,13 @@ try {
   if ($null -eq $oldShowUpdate) {
     Remove-Item Env:GRAPHCODE_UIA_SHOW_UPDATE -ErrorAction SilentlyContinue
   } else { $env:GRAPHCODE_UIA_SHOW_UPDATE = $oldShowUpdate }
+  if ($null -eq $oldIngressError) {
+    Remove-Item Env:GRAPHCODE_UIA_INGRESS_ERROR -ErrorAction SilentlyContinue
+  } else { $env:GRAPHCODE_UIA_INGRESS_ERROR = $oldIngressError }
+  if ($null -eq $oldDaemonCommandLog) {
+    Remove-Item Env:GRAPHCODE_UIA_DAEMON_COMMAND_LOG -ErrorAction SilentlyContinue
+  } else { $env:GRAPHCODE_UIA_DAEMON_COMMAND_LOG = $oldDaemonCommandLog }
+  if ($null -eq $oldShellExecuteLog) {
+    Remove-Item Env:GRAPHCODE_UIA_SHELL_EXECUTE_LOG -ErrorAction SilentlyContinue
+  } else { $env:GRAPHCODE_UIA_SHELL_EXECUTE_LOG = $oldShellExecuteLog }
 }

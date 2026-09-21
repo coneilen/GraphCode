@@ -55,6 +55,13 @@ pub const Command = enum(u16) {
 
 pub const empty_open_folder_id: usize = 4601;
 pub const empty_new_loop_id: usize = 4602;
+pub const recent_folder_command_base: usize = 4700;
+pub const recent_folder_command_limit: usize = 4799;
+
+pub const RecentFolderItem = struct {
+    path: []const u8,
+    name: []const u8,
+};
 
 pub const MenuState = struct {
     has_project: bool,
@@ -66,6 +73,7 @@ pub const MenuState = struct {
     workspace_visible: bool,
     activity_visible: bool,
     update_checking: bool,
+    recent_folders: []const RecentFolderItem = &.{},
 };
 
 pub fn commandFromId(id: usize) ?Command {
@@ -166,14 +174,19 @@ pub fn restoreExistingInstance() void {
 pub fn installMenu(hwnd: c.HWND) !void {
     const menu = c.CreateMenu() orelse return error.MenuCreationFailed;
     const file = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
+    const add_folder = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
+    const recent_folders = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
     const loop = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
     const terminal = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
     const view = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
     const help = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
 
-    append(file, "Open Folder...\tCtrl+O", @intFromEnum(Command.open_folder));
-    append(file, "Clone Repository...\tCtrl+Shift+C", @intFromEnum(Command.clone_repository));
-    append(file, "Add Remote Repository...\tCtrl+Shift+R", @intFromEnum(Command.remote_repository));
+    append(add_folder, "Open Folder...\tCtrl+O", @intFromEnum(Command.open_folder));
+    append(add_folder, "Clone Repository...\tCtrl+Shift+C", @intFromEnum(Command.clone_repository));
+    append(add_folder, "Add Remote Repository...\tCtrl+Shift+R", @intFromEnum(Command.remote_repository));
+    separator(add_folder);
+    appendPopup(add_folder, "Recent Folders", recent_folders);
+    appendPopup(file, "Add Folder", add_folder);
     separator(file);
     append(file, "New Quick Chat\tCtrl+Q", @intFromEnum(Command.new_quick_chat));
     append(file, "Open Global Overview", @intFromEnum(Command.open_global_overview));
@@ -236,6 +249,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
 }
 
 pub fn updateMenu(hwnd: c.HWND, state: MenuState) void {
+    updateRecentFolderMenu(hwnd, state.recent_folders);
     setEnabled(hwnd, .open_global_overview, true);
     setEnabled(hwnd, .worktrees, state.can_worktrees);
     setEnabled(hwnd, .reclaim_worktrees, state.can_worktrees);
@@ -268,6 +282,32 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState) void {
     _ = c.DrawMenuBar(hwnd);
 }
 
+pub fn isRecentFolderCommand(id: usize) bool {
+    return id >= recent_folder_command_base and id <= recent_folder_command_limit;
+}
+
+fn updateRecentFolderMenu(hwnd: c.HWND, recent_folders: []const RecentFolderItem) void {
+    const root = c.GetMenu(hwnd);
+    if (root == null) return;
+    const file = c.GetSubMenu(root, 0);
+    if (file == null) return;
+    const add_folder = c.GetSubMenu(file, 0);
+    if (add_folder == null) return;
+    const recent = c.GetSubMenu(add_folder, 4);
+    if (recent == null) return;
+    var count = c.GetMenuItemCount(recent);
+    while (count > 0) : (count -= 1) {
+        _ = c.DeleteMenu(recent, @intCast(count - 1), c.MF_BYPOSITION);
+    }
+    if (recent_folders.len == 0) {
+        appendEnabled(recent, "No recent folders", recent_folder_command_base, false);
+        return;
+    }
+    for (recent_folders[0..@min(recent_folders.len, recent_folder_command_limit - recent_folder_command_base + 1)], 0..) |project, index| {
+        append(recent, project.name, recent_folder_command_base + index);
+    }
+}
+
 fn setEnabled(hwnd: c.HWND, command: Command, enabled: bool) void {
     const flags: c.UINT = @intCast(@as(i32, c.MF_BYCOMMAND) |
         if (enabled) @as(i32, c.MF_ENABLED) else @as(i32, c.MF_GRAYED));
@@ -281,9 +321,15 @@ fn setChecked(hwnd: c.HWND, command: Command, checked: bool) void {
 }
 
 fn append(menu: c.HMENU, text: []const u8, id: usize) void {
+    appendEnabled(menu, text, id, true);
+}
+
+fn appendEnabled(menu: c.HMENU, text: []const u8, id: usize, enabled: bool) void {
     const wide = toWideZ(std.heap.c_allocator, text) catch return;
     defer std.heap.c_allocator.free(wide);
-    _ = c.AppendMenuW(menu, c.MF_STRING, id, wide.ptr);
+    var flags: c.UINT = c.MF_STRING;
+    if (!enabled) flags |= c.MF_GRAYED;
+    _ = c.AppendMenuW(menu, flags, id, wide.ptr);
 }
 
 fn appendPopup(menu: c.HMENU, text: []const u8, popup: c.HMENU) void {
@@ -330,6 +376,12 @@ test "native menu exposes the parity command groups" {
     try std.testing.expectEqual(Command.split_right, commandFromId(4303).?);
     try std.testing.expectEqual(Command.about, commandFromId(4501).?);
     try std.testing.expectEqual(@as(?Command, null), commandFromId(9999));
+}
+
+test "recent folder commands use a dedicated command range" {
+    try std.testing.expect(isRecentFolderCommand(recent_folder_command_base));
+    try std.testing.expect(isRecentFolderCommand(recent_folder_command_limit));
+    try std.testing.expect(!isRecentFolderCommand(recent_folder_command_limit + 1));
 }
 
 test "native menu labels are NUL terminated UTF-16" {
