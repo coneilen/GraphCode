@@ -798,10 +798,15 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("quick-chat-row:", 0) == 0 ? L"quick-chat-row-" :
           row.identity.rfind("quick-chat-workspace:", 0) == 0 ? L"quick-chat-workspace-" :
           row.identity.rfind("loop-disclosure:", 0) == 0 ? L"loop-disclosure-" :
+          row.identity.rfind("attention-action:", 0) == 0 ? L"attention-action-" :
           row.identity.rfind("workspace-toolbar:", 0) == 0 ? L"workspace-toolbar-" :
           row.identity.rfind("workspace-loop-bar:", 0) == 0 ? L"workspace-loop-bar-" :
           row.identity.rfind("workspace-show-graph:", 0) == 0 ? L"workspace-show-graph-" :
           row.identity.rfind("workspace-stop:", 0) == 0 ? L"workspace-stop-" :
+          row.identity.rfind("workspace-toggle-panel:", 0) == 0 ? L"workspace-toggle-panel-" :
+          row.identity.rfind("workspace-detail-sparkline:", 0) == 0 ? L"workspace-detail-sparkline-" :
+          row.identity.rfind("workspace-detail-start:", 0) == 0 ? L"workspace-detail-start-" :
+          row.identity.rfind("workspace-detail-usage:", 0) == 0 ? L"workspace-detail-usage-" :
           row.identity.rfind("workspace-tab-close:", 0) == 0 ? L"workspace-tab-close-" :
           row.identity.rfind("workspace-tab:", 0) == 0 ? L"workspace-tab-" :
           row.identity.rfind("workspace-new-tab:", 0) == 0 ? L"workspace-new-tab-" :
