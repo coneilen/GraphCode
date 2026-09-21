@@ -982,6 +982,10 @@ try {
   $workspaceShowGraph = $null
   $workspaceTabs = @()
   $workspaceControls = @()
+  $workspacePanelToggle = $null
+  $workspaceSparkline = $null
+  $workspaceStart = $null
+  $workspaceUsage = $null
   for ($attempt = 0; $attempt -lt 100; $attempt++) {
     $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
     $workspaceToolbar = @($workspaceChildren | Where-Object {
@@ -997,8 +1001,22 @@ try {
       $_.Current.AutomationId -match '^workspace-(new-tab|split-right|split-down)-' -and
         $_.Current.Name -in @("New Tab", "Split Right", "Split Down")
     })
+    $workspacePanelToggle = @($workspaceChildren | Where-Object {
+      $_.Current.AutomationId -match '^workspace-toggle-panel-' -and $_.Current.Name -eq "Collapse loop panel"
+    }) | Select-Object -First 1
+    $workspaceSparkline = @($workspaceChildren | Where-Object {
+      $_.Current.AutomationId -match '^workspace-detail-sparkline-' -and $_.Current.Name -eq "Metric sparkline"
+    }) | Select-Object -First 1
+    $workspaceStart = @($workspaceChildren | Where-Object {
+      $_.Current.AutomationId -match '^workspace-detail-start-' -and $_.Current.Name -eq "Start time"
+    }) | Select-Object -First 1
+    $workspaceUsage = @($workspaceChildren | Where-Object {
+      $_.Current.AutomationId -match '^workspace-detail-usage-' -and $_.Current.Name -match 'tokens$'
+    }) | Select-Object -First 1
     if (($null -ne $workspaceToolbar) -and ($null -ne $workspaceShowGraph) -and
-        ($workspaceTabs.Count -ge 1) -and ($workspaceControls.Count -eq 3)) {
+        ($workspaceTabs.Count -ge 1) -and ($workspaceControls.Count -eq 3) -and
+        ($null -ne $workspacePanelToggle) -and ($null -ne $workspaceSparkline) -and
+        ($null -ne $workspaceStart) -and ($null -ne $workspaceUsage)) {
       break
     }
     Start-Sleep -Milliseconds 100
@@ -1011,18 +1029,6 @@ try {
     "workspace chrome omitted a split control (found $($workspaceControls.Count) of 3: $(@($workspaceControls | ForEach-Object { $_.Current.Name }) -join '|'))"
   Require ($workspaceTabs.Count -ge 1) `
     "workspace chrome exposed no tab children; found $(@($workspaceChildren | ForEach-Object { $_.Current.AutomationId }) -join '|')"
-  $workspacePanelToggle = @($workspaceChildren | Where-Object {
-    $_.Current.AutomationId -match '^workspace-toggle-panel-' -and $_.Current.Name -eq "Collapse loop panel"
-  }) | Select-Object -First 1
-  $workspaceSparkline = @($workspaceChildren | Where-Object {
-    $_.Current.AutomationId -match '^workspace-detail-sparkline-' -and $_.Current.Name -eq "Metric sparkline"
-  }) | Select-Object -First 1
-  $workspaceStart = @($workspaceChildren | Where-Object {
-    $_.Current.AutomationId -match '^workspace-detail-start-' -and $_.Current.Name -eq "Start time"
-  }) | Select-Object -First 1
-  $workspaceUsage = @($workspaceChildren | Where-Object {
-    $_.Current.AutomationId -match '^workspace-detail-usage-' -and $_.Current.Name -match 'tokens$'
-  }) | Select-Object -First 1
   Require ($null -ne $workspacePanelToggle) "workspace right panel omitted collapse control"
   Require ($null -ne $workspaceSparkline) "workspace right panel omitted metric sparkline child"
   Require ($null -ne $workspaceStart) "workspace right panel omitted start-time child"
