@@ -166,7 +166,16 @@ class Node final : public IRawElementProviderSimple,
                  property == UIA_IsEnabledPropertyId ||
                  property == UIA_IsControlElementPropertyId ||
                  property == UIA_IsContentElementPropertyId) {
-        bool_value = true;
+        if (isRowKey(id_)) {
+          const Row &row = state_->rows.at(id_);
+          const bool sidebar_error_footer =
+              row.identity.rfind("sidebar-error-footer:", 0) == 0;
+          bool_value = sidebar_error_footer
+              ? (property != UIA_IsKeyboardFocusablePropertyId)
+              : true;
+        } else {
+          bool_value = true;
+        }
         kind = kBool;
       } else if (property == UIA_HasKeyboardFocusPropertyId) {
         bool_value = state_->focused == id_;
@@ -775,9 +784,12 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("sidebar-section:", 0) == 0 ? L"sidebar-section-" :
           row.identity.rfind("needs-you-header:", 0) == 0 ? L"needs-you-header-" :
           row.identity.rfind("needs-you-row:", 0) == 0 ? L"needs-you-row-" :
+          row.identity.rfind("needs-you-stop:", 0) == 0 ? L"needs-you-stop-" :
           row.identity.rfind("activity-header:", 0) == 0 ? L"activity-header-" :
+          row.identity.rfind("activity-filter:", 0) == 0 ? L"activity-filter-" :
           row.identity.rfind("activity-row:", 0) == 0 ? L"activity-row-" :
           row.identity.rfind("activity-control:", 0) == 0 ? L"activity-control-" :
+          row.identity.rfind("open-project:", 0) == 0 ? L"open-project-" :
           row.identity.rfind("project-new-loop:", 0) == 0 ? L"project-new-loop-" :
           row.identity.rfind("project-disclosure:", 0) == 0 ? L"project-disclosure-" :
           row.identity.rfind("quick-chats-header:", 0) == 0 ? L"quick-chats-header-" :
@@ -795,6 +807,7 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("workspace-new-tab:", 0) == 0 ? L"workspace-new-tab-" :
           row.identity.rfind("workspace-split-right:", 0) == 0 ? L"workspace-split-right-" :
           row.identity.rfind("workspace-split-down:", 0) == 0 ? L"workspace-split-down-" :
+          row.identity.rfind("sidebar-error-footer:", 0) == 0 ? L"sidebar-error-footer-" :
           parent == 1 ? L"project-row-" :
           parent == 2 ? L"loop-row-" :
           parent == 3 ? L"worktree-row-" : L"canvas-card-";
@@ -814,10 +827,15 @@ class Node final : public IRawElementProviderSimple,
     if (id_ >= 1 && id_ <= 3) return UIA_ListControlTypeId;
     if (isRowKey(id_)) {
       const Row &row = state_->rows.at(id_);
+      if (row.identity.rfind("sidebar-error-footer:", 0) == 0) {
+        return UIA_TextControlTypeId;
+      }
       const bool action =
           row.identity.rfind("sidebar-section:", 0) == 0 ||
           row.identity.rfind("needs-you-header:", 0) == 0 ||
+          row.identity.rfind("needs-you-stop:", 0) == 0 ||
           row.identity.rfind("activity-header:", 0) == 0 ||
+          row.identity.rfind("activity-filter:", 0) == 0 ||
           row.identity.rfind("activity-control:", 0) == 0 ||
           row.identity.rfind("project-new-loop:", 0) == 0 ||
           row.identity.rfind("project-disclosure:", 0) == 0 ||

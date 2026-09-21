@@ -9,6 +9,8 @@ pub const State = struct {
     local_collapsed: bool = false,
     remote_collapsed: bool = false,
     chats_collapsed: bool = false,
+    activity_attention_only: bool = false,
+    activity_scroll: usize = 0,
     collapsed_projects: std.StringHashMapUnmanaged(void) = .empty,
     expanded_nodes: std.StringHashMapUnmanaged(void) = .empty,
     root_order: std.ArrayListUnmanaged([]u8) = .empty,
@@ -257,15 +259,21 @@ pub fn draw(
         drawText(hdc, allocator, "Needs you", 18, section_y + 10, 11, 0x00FFCD7A);
         var attention_y = section_y + 30;
         if (model.attention_entries.items.len != 0) {
-            for (model.attention_entries.items[0..@min(model.attention_entries.items.len, 4)]) |entry| {
+            for (model.attention_entries.items[0..@min(model.attention_entries.items.len, 4)], 0..) |entry, index| {
                 drawText(hdc, allocator, entry.node.title, 24, attention_y, 11, 0x00E6E6E6);
                 drawText(hdc, allocator, attentionReason(entry.node), 24, attention_y + 15, 9, stateColor(entry.node.state));
+                const stop_bounds = needsYouStopBounds(model, inspection, state, 0, index);
+                fill(hdc, stop_bounds, 0x00353224);
+                drawTextRect(hdc, allocator, "Stop", stop_bounds, 9, 0x00FFCD7A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
                 attention_y += 34;
             }
         } else {
-            for (model.attention.items[0..@min(model.attention.items.len, 4)]) |node| {
+            for (model.attention.items[0..@min(model.attention.items.len, 4)], 0..) |node, index| {
                 drawText(hdc, allocator, node.title, 24, attention_y, 11, 0x00E6E6E6);
                 drawText(hdc, allocator, attentionReason(node), 24, attention_y + 15, 9, stateColor(node.state));
+                const stop_bounds = needsYouStopBounds(model, inspection, state, 0, index);
+                fill(hdc, stop_bounds, 0x00353224);
+                drawTextRect(hdc, allocator, "Stop", stop_bounds, 9, 0x00FFCD7A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
                 attention_y += 34;
             }
         }
@@ -274,19 +282,32 @@ pub fn draw(
         const attention_rows = @min(model.attentionCount(), 4);
         const activity_y = section_y + 30 + (@as(i32, @intCast(attention_rows)) * 34) + 18;
         drawText(hdc, allocator, "Activity", 18, activity_y, 11, 0x00B8B8B8);
-        var x: i32 = 24;
-        for (model.activity.items[0..@min(model.activity.items.len, 4)]) |event| {
+        const filter_bounds = activityFilterBounds(model, inspection, state, 0);
+        fill(hdc, filter_bounds, if (state.activity_attention_only) 0x00302B1D else 0x0026262B);
+        drawTextRect(hdc, allocator, "Attention only", filter_bounds, 9, if (state.activity_attention_only) 0x00FFCD7A else 0x00B8B8B8, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+        const left_bounds = activityControlBounds(model, inspection, state, 0, .left);
+        const right_bounds = activityControlBounds(model, inspection, state, 0, .right);
+        fill(hdc, left_bounds, 0x0026262B);
+        fill(hdc, right_bounds, 0x0026262B);
+        drawTextRect(hdc, allocator, "<", left_bounds, 10, 0x00B8B8B8, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+        drawTextRect(hdc, allocator, ">", right_bounds, 10, 0x00B8B8B8, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+        const viewport = activityViewport(model, state);
+        for (0..viewport.visible_count) |visible_index| {
+            const activity_index = activityEventAtVisible(model, state, visible_index) orelse break;
+            const event = model.activity.items[activity_index];
+            const card = activityCardBounds(model, inspection, state, 0, visible_index);
             const stamp = std.fmt.allocPrint(allocator, "{d}m", .{@max(0, @divTrunc(std.time.timestamp() - event.timestamp, 60))}) catch null;
             defer if (stamp) |value| allocator.free(value);
-            drawText(hdc, allocator, event.title, x, activity_y + 18, 10, 0x00E6E6E6);
-            drawText(hdc, allocator, stamp orelse "", x, activity_y + 32, 9, stateColor(event.state));
-            x += 116;
+            fill(hdc, card, 0x0026262B);
+            fill(hdc, rect(card.left, card.top, card.left + 3, card.bottom), stateColor(event.state));
+            drawTextRect(hdc, allocator, event.title, rect(card.left + 8, card.top + 4, card.right - 8, card.top + 20), 10, 0x00E6E6E6, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+            drawTextRect(hdc, allocator, stamp orelse "", rect(card.left + 8, card.top + 18, card.right - 8, card.bottom - 4), 9, stateColor(event.state), c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER);
         }
     }
     if (ingress_error.len != 0) {
         const bounds = errorFooterRect(viewport_bottom);
         fill(hdc, bounds, 0x00242448);
-        drawText(hdc, allocator, ingress_error, bounds.left + 10, bounds.top + 10, 10, 0x006060FF);
+        drawTextRect(hdc, allocator, ingress_error, errorFooterTextRect(viewport_bottom), 10, 0x006060FF, c.DT_LEFT | c.DT_WORDBREAK | c.DT_NOPREFIX);
     }
     if (update_version.len != 0) {
         const bounds = updateBannerRect(viewport_bottom, ingress_error.len != 0);
@@ -307,6 +328,11 @@ pub fn errorFooterRect(viewport_bottom: i32) c.RECT {
     return rect(8, viewport_bottom - 84, Tokens.sidebar_width - 8, viewport_bottom - 42);
 }
 
+pub fn errorFooterTextRect(viewport_bottom: i32) c.RECT {
+    const bounds = errorFooterRect(viewport_bottom);
+    return rect(bounds.left + 10, bounds.top + 8, bounds.right - 10, bounds.bottom - 8);
+}
+
 pub fn updateBannerRect(viewport_bottom: i32, has_error: bool) c.RECT {
     const error_offset: i32 = if (has_error) 50 else 0;
     return rect(8, viewport_bottom - 92 - error_offset, Tokens.sidebar_width - 8, viewport_bottom - 42 - error_offset);
@@ -317,6 +343,15 @@ pub fn updateBannerAt(x: i32, y: i32, viewport_bottom: i32, available: bool, has
     const bounds = updateBannerRect(viewport_bottom, has_error);
     return x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom;
 }
+
+pub const ActivityControl = enum { filter, left, right };
+pub const ActivityDirection = enum { left, right };
+
+pub const ActivityViewport = struct {
+    start: usize,
+    visible_count: usize,
+    total_count: usize,
+};
 
 fn loopAccent(loop_type: []const u8) u32 {
     if (std.mem.eql(u8, loop_type, "goalBased")) return 0x0048C78E;
@@ -351,6 +386,13 @@ pub fn attentionReason(node: GraphModel.Node) []const u8 {
     if (std.mem.eql(u8, node.presence, "awaitingInput")) return "Awaiting your input";
     if (std.mem.eql(u8, node.state, "blocked")) return "Blocked - upstream unavailable";
     return compactState(node.state);
+}
+
+pub fn activityNeedsAttention(state: []const u8) bool {
+    return std.mem.eql(u8, state, "failed") or
+        std.mem.eql(u8, state, "stalled") or
+        std.mem.eql(u8, state, "blocked") or
+        std.mem.eql(u8, state, "awaitingInput");
 }
 
 fn elapsedText(allocator: std.mem.Allocator, created_at: i64, now: i64) ![]u8 {
@@ -461,7 +503,7 @@ pub fn appendRows(
     }
     if (!local_collapsed) {
         for (model.recent_projects.items, 0..) |project, index| {
-            if (project.isRemote()) continue;
+            if (project.isRemote() or isProjectOpen(model, project.path)) continue;
             try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
             top += 24;
         }
@@ -472,7 +514,7 @@ pub fn appendRows(
     }
     if (!remote_collapsed) {
         for (model.recent_projects.items, 0..) |project, index| {
-            if (!project.isRemote()) continue;
+            if (!project.isRemote() or isProjectOpen(model, project.path)) continue;
             try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
             top += 24;
         }
@@ -601,18 +643,29 @@ pub fn rowAt(
 }
 
 fn hasLocalProjects(model: *const GraphModel.Model) bool {
-    for (model.recent_projects.items) |project| if (!project.isRemote()) return true;
+    for (model.recent_projects.items) |project| if (!project.isRemote() and !isProjectOpen(model, project.path)) return true;
     return false;
 }
 
 fn hasRemoteProjects(model: *const GraphModel.Model) bool {
-    for (model.recent_projects.items) |project| if (project.isRemote()) return true;
+    for (model.recent_projects.items) |project| if (project.isRemote() and !isProjectOpen(model, project.path)) return true;
     return false;
 }
 
 fn projectHeadingCount(model: *const GraphModel.Model) usize {
     return @as(usize, @intFromBool(hasLocalProjects(model))) +
         @as(usize, @intFromBool(hasRemoteProjects(model)));
+}
+
+fn isProjectOpen(model: *const GraphModel.Model, path: []const u8) bool {
+    for (model.open_projects.items) |project| {
+        if (std.mem.eql(u8, project.path, path)) return true;
+    }
+    for (model.graphs.items) |graph| {
+        if (std.mem.eql(u8, graph.project.path, path)) return true;
+    }
+    if (model.graph) |graph| return std.mem.eql(u8, graph.project.path, path);
+    return false;
 }
 
 fn hierarchyItems(
@@ -626,7 +679,30 @@ fn hierarchyItems(
     const visited = try allocator.alloc(bool, nodes.len);
     defer allocator.free(visited);
     @memset(visited, false);
+    var roots = try collectRootIndices(allocator, nodes, edges, state, false, visited);
+    defer roots.deinit(allocator);
+    for (roots.items) |index| try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0, state);
+    var unresolved = try collectRootIndices(allocator, nodes, edges, state, true, visited);
+    defer unresolved.deinit(allocator);
+    for (unresolved.items) |index| if (!visited[index]) try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0, state);
+    return result;
+}
+
+fn collectRootIndices(
+    allocator: std.mem.Allocator,
+    nodes: []const GraphModel.Node,
+    edges: []const GraphModel.Edge,
+    state: ?*const State,
+    only_unvisited: bool,
+    visited: []const bool,
+) !std.ArrayList(usize) {
+    var indices: std.ArrayList(usize) = .empty;
+    errdefer indices.deinit(allocator);
     for (nodes, 0..) |node, index| {
+        if (only_unvisited) {
+            if (!visited[index]) try indices.append(allocator, index);
+            continue;
+        }
         var incoming = false;
         for (edges) |edge| {
             if (std.mem.eql(u8, edge.kind, "handoff") and std.mem.eql(u8, edge.to, node.id)) {
@@ -634,12 +710,31 @@ fn hierarchyItems(
                 break;
             }
         }
-        if (!incoming) try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0, state);
+        if (!incoming) try indices.append(allocator, index);
     }
-    for (nodes, 0..) |_, index| {
-        if (!visited[index]) try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0, state);
+    std.sort.heap(usize, indices.items, RootOrderContext{ .nodes = nodes, .state = state }, compareRootOrder);
+    return indices;
+}
+
+const RootOrderContext = struct {
+    nodes: []const GraphModel.Node,
+    state: ?*const State,
+};
+
+fn rootOrderRank(state: ?*const State, id: []const u8) usize {
+    if (state) |value| {
+        for (value.root_order.items, 0..) |candidate, index| {
+            if (std.mem.eql(u8, candidate, id)) return index;
+        }
     }
-    return result;
+    return std.math.maxInt(usize);
+}
+
+fn compareRootOrder(context: RootOrderContext, lhs: usize, rhs: usize) bool {
+    const lhs_rank = rootOrderRank(context.state, context.nodes[lhs].id);
+    const rhs_rank = rootOrderRank(context.state, context.nodes[rhs].id);
+    if (lhs_rank == rhs_rank) return lhs < rhs;
+    return lhs_rank < rhs_rank;
 }
 
 fn appendHierarchy(
@@ -714,8 +809,14 @@ pub fn worktreeSectionBottom(project_count: usize, worktree_count: usize) i32 {
 
 pub fn contentBottom(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection, state: ?*const State) i32 {
     const section = sidebarSectionBottom(model, inspection, state);
-    return if (model.attentionCount() == 0) section else section + 30 +
-        @as(i32, @intCast(@min(model.attentionCount(), 4))) * 34;
+    var bottom = section;
+    if (model.attentionCount() != 0) {
+        bottom += 30 + @as(i32, @intCast(@min(model.attentionCount(), 4))) * 34;
+    }
+    if (model.activity.items.len != 0) {
+        bottom += 18 + 24 + 34;
+    }
+    return bottom;
 }
 
 pub fn attentionRowAt(
@@ -738,6 +839,223 @@ pub fn sidebarSectionBottom(model: *const GraphModel.Model, inspection: ?*const 
     if (rows.items.len == 0) return Tokens.header_height;
     const last = rows.items[rows.items.len - 1];
     return last.top + (if (last.kind == .worktree) @as(i32, 34) else 24);
+}
+
+pub fn needsYouStopBounds(
+    model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    state: ?*const State,
+    scroll_offset: i32,
+    index: usize,
+) c.RECT {
+    const top = sidebarSectionBottom(model, inspection, state) - scroll_offset + 30 + @as(i32, @intCast(index)) * 34;
+    return rect(Tokens.sidebar_width - 66, top + 6, Tokens.sidebar_width - 14, top + 26);
+}
+
+pub fn needsYouStopAt(
+    x: i32,
+    y: i32,
+    model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    state: ?*const State,
+    scroll_offset: i32,
+) ?usize {
+    if (model.attentionCount() == 0) return null;
+    const count = @min(model.attentionCount(), 4);
+    for (0..count) |index| {
+        const bounds = needsYouStopBounds(model, inspection, state, scroll_offset, index);
+        if (x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom)
+            return index;
+    }
+    return null;
+}
+
+pub fn activityFilterBounds(
+    model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    state: *const State,
+    scroll_offset: i32,
+) c.RECT {
+    const top = activityHeaderTop(model, inspection, state, scroll_offset);
+    return rect(78, top + 2, 168, top + 22);
+}
+
+pub fn activityControlBounds(
+    model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    state: *const State,
+    scroll_offset: i32,
+    control: ActivityDirection,
+) c.RECT {
+    const top = activityHeaderTop(model, inspection, state, scroll_offset);
+    const left: i32 = if (control == .left) 184 else 208;
+    return rect(left, top, left + 22, top + 22);
+}
+
+pub fn activityControlAt(
+    x: i32,
+    y: i32,
+    model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    state: *const State,
+    scroll_offset: i32,
+) ?ActivityControl {
+    if (model.activity.items.len == 0) return null;
+    const filter = activityFilterBounds(model, inspection, state, scroll_offset);
+    if (x >= filter.left and x < filter.right and y >= filter.top and y < filter.bottom) return .filter;
+    const left = activityControlBounds(model, inspection, state, scroll_offset, .left);
+    if (x >= left.left and x < left.right and y >= left.top and y < left.bottom) return .left;
+    const right = activityControlBounds(model, inspection, state, scroll_offset, .right);
+    if (x >= right.left and x < right.right and y >= right.top and y < right.bottom) return .right;
+    return null;
+}
+
+pub fn activityCardBounds(
+    model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    state: *const State,
+    scroll_offset: i32,
+    visible_index: usize,
+) c.RECT {
+    const top = activityCardsTop(model, inspection, state, scroll_offset);
+    const left = 18 + @as(i32, @intCast(visible_index)) * 112;
+    return rect(left, top, @min(left + 100, Tokens.sidebar_width - 10), top + 34);
+}
+
+pub fn activityCardAt(
+    x: i32,
+    y: i32,
+    model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    state: *const State,
+    scroll_offset: i32,
+) ?usize {
+    const viewport = activityViewport(model, state);
+    for (0..viewport.visible_count) |visible_index| {
+        const bounds = activityCardBounds(model, inspection, state, scroll_offset, visible_index);
+        if (x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom)
+            return activityEventAtVisible(model, state, visible_index);
+    }
+    return null;
+}
+
+pub fn activityViewport(model: *const GraphModel.Model, state: *const State) ActivityViewport {
+    const total = filteredActivityCount(model, state);
+    const capacity = @min(total, @as(usize, 2));
+    const max_start = if (total > capacity) total - capacity else 0;
+    return .{
+        .start = @min(state.activity_scroll, max_start),
+        .visible_count = capacity,
+        .total_count = total,
+    };
+}
+
+pub fn activityEventAtVisible(model: *const GraphModel.Model, state: *const State, visible_index: usize) ?usize {
+    const viewport = activityViewport(model, state);
+    if (visible_index >= viewport.visible_count) return null;
+    const target = viewport.start + visible_index;
+    var count: usize = 0;
+    for (model.activity.items, 0..) |event, index| {
+        if (!activityMatchesFilter(event, state)) continue;
+        if (count == target) return index;
+        count += 1;
+    }
+    return null;
+}
+
+pub fn stepActivity(state: *State, model: *const GraphModel.Model, direction: ActivityDirection) void {
+    const viewport = activityViewport(model, state);
+    if (viewport.total_count <= viewport.visible_count) {
+        state.activity_scroll = 0;
+        return;
+    }
+    if (direction == .left) {
+        if (state.activity_scroll > 0) state.activity_scroll -= 1;
+    } else {
+        const max_start = viewport.total_count - viewport.visible_count;
+        if (state.activity_scroll < max_start) state.activity_scroll += 1;
+    }
+}
+
+pub fn toggleActivityAttentionOnly(state: *State, model: *const GraphModel.Model) void {
+    state.activity_attention_only = !state.activity_attention_only;
+    const viewport = activityViewport(model, state);
+    if (viewport.total_count <= viewport.visible_count) {
+        state.activity_scroll = 0;
+    } else if (state.activity_scroll > viewport.total_count - viewport.visible_count) {
+        state.activity_scroll = viewport.total_count - viewport.visible_count;
+    }
+}
+
+pub fn rootIDs(
+    allocator: std.mem.Allocator,
+    nodes: []const GraphModel.Node,
+    edges: []const GraphModel.Edge,
+    state: ?*const State,
+) !std.ArrayList([]const u8) {
+    const visited = try allocator.alloc(bool, nodes.len);
+    defer allocator.free(visited);
+    @memset(visited, false);
+    var root_indices = try collectRootIndices(allocator, nodes, edges, state, false, visited);
+    defer root_indices.deinit(allocator);
+    var ids: std.ArrayList([]const u8) = .empty;
+    errdefer ids.deinit(allocator);
+    for (root_indices.items) |index| try ids.append(allocator, nodes[index].id);
+    return ids;
+}
+
+pub fn reorderRootIDs(
+    state: *State,
+    allocator: std.mem.Allocator,
+    nodes: []const GraphModel.Node,
+    edges: []const GraphModel.Edge,
+    dragged_id: []const u8,
+    drop_index: usize,
+) !bool {
+    var roots = try rootIDs(allocator, nodes, edges, state);
+    defer roots.deinit(allocator);
+    const from_index = for (roots.items, 0..) |id, index| {
+        if (std.mem.eql(u8, id, dragged_id)) break index;
+    } else return false;
+    const bounded_drop = @min(drop_index, roots.items.len);
+    const target = if (bounded_drop > from_index) bounded_drop - 1 else bounded_drop;
+    if (target == from_index) return false;
+    const dragged = roots.orderedRemove(from_index);
+    roots.insert(allocator, target, dragged) catch return error.OutOfMemory;
+    try state.reorderRoots(roots.items);
+    return true;
+}
+
+fn filteredActivityCount(model: *const GraphModel.Model, state: *const State) usize {
+    var count: usize = 0;
+    for (model.activity.items) |event| {
+        if (activityMatchesFilter(event, state)) count += 1;
+    }
+    return count;
+}
+
+fn activityMatchesFilter(event: GraphModel.ActivityEvent, state: *const State) bool {
+    return !state.activity_attention_only or activityNeedsAttention(event.state);
+}
+
+fn activityHeaderTop(
+    model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    state: *const State,
+    scroll_offset: i32,
+) i32 {
+    const section = sidebarSectionBottom(model, inspection, state);
+    const attention_rows = @min(model.attentionCount(), 4);
+    return section - scroll_offset + 30 + (@as(i32, @intCast(attention_rows)) * 34) + 18;
+}
+
+fn activityCardsTop(
+    model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    state: *const State,
+    scroll_offset: i32,
+) i32 {
+    return activityHeaderTop(model, inspection, state, scroll_offset) + 24;
 }
 
 pub fn maxScroll(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection, viewport_bottom: i32, state: ?*const State) i32 {
@@ -807,6 +1125,78 @@ test "root reorder validates uniqueness and replaces order atomically" {
     try std.testing.expectError(error.InvalidRootOrder, state.reorderRoots(&.{ "root-a", "root-a" }));
     try std.testing.expectEqualStrings("root-a", state.root_order.items[0]);
     try std.testing.expectEqualStrings("root-b", state.root_order.items[1]);
+}
+
+test "root ordering follows persisted root ids and can be reordered by drop index" {
+    const nodes = [_]GraphModel.Node{
+        .{ .id = @constCast("root-b"), .title = @constCast("Root B"), .loop_type = @constCast("turnBased"), .state = @constCast("idle"), .activity = @constCast(""), .presence = @constCast("idle") },
+        .{ .id = @constCast("root-a"), .title = @constCast("Root A"), .loop_type = @constCast("turnBased"), .state = @constCast("idle"), .activity = @constCast(""), .presence = @constCast("idle") },
+    };
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    var initial = try rootIDs(std.testing.allocator, &nodes, &.{}, &state);
+    defer initial.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("root-b", initial.items[0]);
+    try std.testing.expect(try reorderRootIDs(&state, std.testing.allocator, &nodes, &.{}, "root-a", 0));
+    try std.testing.expectEqualStrings("root-a", state.root_order.items[0]);
+    var reordered = try rootIDs(std.testing.allocator, &nodes, &.{}, &state);
+    defer reordered.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("root-a", reordered.items[0]);
+    try std.testing.expectEqualStrings("root-b", reordered.items[1]);
+    try std.testing.expect(try reorderRootIDs(&state, std.testing.allocator, &nodes, &.{}, "root-a", 2));
+    var moved_to_end = try rootIDs(std.testing.allocator, &nodes, &.{}, &state);
+    defer moved_to_end.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("root-b", moved_to_end.items[0]);
+    try std.testing.expectEqualStrings("root-a", moved_to_end.items[1]);
+}
+
+test "activity viewport filters attention events and scrolls horizontally" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    for ([_][]const u8{ "running", "failed", "blocked" }, 0..) |state_text, index| {
+        try model.activity.append(.{
+            .title = try std.fmt.allocPrint(std.testing.allocator, "Event {d}", .{index}),
+            .state = try std.testing.allocator.dupe(u8, state_text),
+        });
+    }
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    try std.testing.expectEqual(@as(usize, 2), activityViewport(&model, &state).visible_count);
+    try std.testing.expectEqual(@as(?usize, 0), activityEventAtVisible(&model, &state, 0));
+    stepActivity(&state, &model, .right);
+    try std.testing.expectEqual(@as(?usize, 1), activityEventAtVisible(&model, &state, 0));
+    toggleActivityAttentionOnly(&state, &model);
+    try std.testing.expect(state.activity_attention_only);
+    try std.testing.expectEqual(@as(usize, 2), activityViewport(&model, &state).total_count);
+    try std.testing.expectEqual(@as(?usize, 1), activityEventAtVisible(&model, &state, 0));
+    try std.testing.expectEqual(@as(?usize, 2), activityEventAtVisible(&model, &state, 1));
+}
+
+test "needs-you stop and activity hit targets remain bounded" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.attention.append(.{
+        .id = try std.testing.allocator.dupe(u8, "attention"),
+        .title = try std.testing.allocator.dupe(u8, "Needs You"),
+        .loop_type = try std.testing.allocator.dupe(u8, "goal"),
+        .state = try std.testing.allocator.dupe(u8, "failed"),
+        .activity = try std.testing.allocator.dupe(u8, "failed"),
+        .presence = try std.testing.allocator.dupe(u8, "idle"),
+        .worktree_path = try std.testing.allocator.dupe(u8, ""),
+        .worktree_branch = try std.testing.allocator.dupe(u8, ""),
+    });
+    try model.activity.append(.{
+        .title = try std.testing.allocator.dupe(u8, "Activity"),
+        .state = try std.testing.allocator.dupe(u8, "failed"),
+    });
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    const stop = needsYouStopBounds(&model, null, &state, 0, 0);
+    try std.testing.expectEqual(@as(?usize, 0), needsYouStopAt(stop.left + 2, stop.top + 2, &model, null, &state, 0));
+    const card = activityCardBounds(&model, null, &state, 0, 0);
+    try std.testing.expectEqual(@as(?usize, 0), activityCardAt(card.left + 2, card.top + 2, &model, null, &state, 0));
+    const filter = activityFilterBounds(&model, null, &state, 0);
+    try std.testing.expectEqual(ActivityControl.filter, activityControlAt(filter.left + 2, filter.top + 2, &model, null, &state, 0).?);
 }
 
 test "shared sidebar layout routes every loop row after project rows and scroll" {
@@ -1028,6 +1418,31 @@ test "recent projects are grouped into local and remote sections" {
     try std.testing.expectEqual(@as(usize, 0), rows.items[3].index);
 }
 
+test "recent project rows exclude folders already open in the projects list" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.recent_projects.append(.{
+        .path = try std.testing.allocator.dupe(u8, "C:\\open"),
+        .name = try std.testing.allocator.dupe(u8, "Open local"),
+    });
+    try model.recent_projects.append(.{
+        .path = try std.testing.allocator.dupe(u8, "C:\\recent"),
+        .name = try std.testing.allocator.dupe(u8, "Recent local"),
+    });
+    try model.open_projects.append(.{
+        .path = try std.testing.allocator.dupe(u8, "C:\\open"),
+        .name = try std.testing.allocator.dupe(u8, "Open local"),
+    });
+    var rows = try appendRows(std.testing.allocator, &model, null, 0, null);
+    defer rows.deinit(std.testing.allocator);
+    try std.testing.expectEqual(RowKind.local_heading, rows.items[0].kind);
+    try std.testing.expectEqual(RowKind.project, rows.items[1].kind);
+    try std.testing.expectEqualStrings("C:\\recent", rows.items[1].project_path.?);
+    try std.testing.expectEqual(RowKind.overview, rows.items[2].kind);
+    try std.testing.expectEqual(RowKind.open_project, rows.items[3].kind);
+    try std.testing.expectEqualStrings("C:\\open", rows.items[3].project_path.?);
+}
+
 test "handoff edges derive stable nested loop order and depth" {
     const nodes = [_]GraphModel.Node{
         .{ .id = @constCast("child"), .title = @constCast("Child"), .loop_type = @constCast("turnBased"), .state = @constCast("idle"), .activity = @constCast(""), .presence = @constCast("idle") },
@@ -1175,6 +1590,15 @@ test "update banner is a bounded footer action" {
     try std.testing.expect(updateBannerRect(700, true).bottom < errorFooterRect(700).top);
 }
 
+test "error footer exposes an inset wrapping rect" {
+    const footer = errorFooterRect(700);
+    const text = errorFooterTextRect(700);
+    try std.testing.expect(text.left > footer.left);
+    try std.testing.expect(text.right < footer.right);
+    try std.testing.expect(text.top > footer.top);
+    try std.testing.expect(text.bottom < footer.bottom);
+}
+
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
     return .{ .left = left, .top = top, .right = right, .bottom = bottom };
 }
@@ -1202,4 +1626,22 @@ fn drawText(
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var bounds = rect(x, y, 1200, y + size + 8);
     _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+}
+
+fn drawTextRect(
+    hdc: c.HDC,
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    bounds_value: c.RECT,
+    size: i32,
+    color: u32,
+    format: c.UINT,
+) void {
+    _ = size;
+    const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text) catch return;
+    defer allocator.free(wide);
+    _ = c.SetTextColor(hdc, color);
+    _ = c.SetBkMode(hdc, c.TRANSPARENT);
+    var bounds = bounds_value;
+    _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, format);
 }

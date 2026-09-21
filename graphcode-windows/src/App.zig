@@ -136,7 +136,11 @@ const UiaDynamicTarget = union(enum) {
     new_quick_chat,
     needs_you_header,
     needs_you: usize,
+    needs_you_stop: usize,
     activity_header,
+    activity_filter,
+    activity_left,
+    activity_right,
     activity: usize,
     recent_project: []const u8,
     open_project: []const u8,
@@ -189,6 +193,11 @@ pub const App = struct {
     sidebar_state: Sidebar.State,
     sidebar_store: ?Sidebar.Store = null,
     sidebar_hover_y: i32 = -1,
+    sidebar_drag_project_path: []u8 = &.{},
+    sidebar_drag_node_id: []u8 = &.{},
+    sidebar_drag_origin_y: i32 = 0,
+    sidebar_drag_active: bool = false,
+    sidebar_drag_started: bool = false,
     workspace: ?*TerminalWorkspace.Workspace = null,
     navigation_cursor: Navigation.Cursor = .{},
     workspace_controls: WorkspaceControls.State = .{ .panel_visible = false },
@@ -337,6 +346,8 @@ pub const App = struct {
         if (self.pending_previous_subscription.len != 0) self.allocator.free(self.pending_previous_subscription);
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
         if (self.ingress_error.len != 0) self.allocator.free(self.ingress_error);
+        if (self.sidebar_drag_project_path.len != 0) self.allocator.free(self.sidebar_drag_project_path);
+        if (self.sidebar_drag_node_id.len != 0) self.allocator.free(self.sidebar_drag_node_id);
         for (self.declared_entry_ids.items) |id| self.allocator.free(id);
         self.declared_entry_ids.deinit();
         for (self.kept_worktree_paths.items) |path| self.allocator.free(path);
@@ -419,7 +430,7 @@ pub const App = struct {
         self.updateNativeChrome();
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_FIXTURE_ROWS")) |fixture| {
             defer self.allocator.free(fixture);
-            self.installUiaFixture();
+            self.installUiaFixture(true);
             if (envFlag("GRAPHCODE_UIA_SHOW_SWEEP")) self.presentWorktreeSweep();
         } else |_| {}
         const uia_gate = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_GATE") catch null;
@@ -822,6 +833,90 @@ pub const App = struct {
         _ = c.ReleaseCapture();
     }
 
+    fn clearSidebarRootDrag(self: *App) void {
+        if (self.sidebar_drag_project_path.len != 0) self.allocator.free(self.sidebar_drag_project_path);
+        if (self.sidebar_drag_node_id.len != 0) self.allocator.free(self.sidebar_drag_node_id);
+        self.sidebar_drag_project_path = &.{};
+        self.sidebar_drag_node_id = &.{};
+        self.sidebar_drag_origin_y = 0;
+        self.sidebar_drag_active = false;
+        self.sidebar_drag_started = false;
+    }
+
+    fn beginSidebarRootDrag(self: *App, project_path: []const u8, node_id: []const u8, y: i32) void {
+        self.clearSidebarRootDrag();
+        self.sidebar_drag_project_path = self.allocator.dupe(u8, project_path) catch return;
+        self.sidebar_drag_node_id = self.allocator.dupe(u8, node_id) catch {
+            self.allocator.free(self.sidebar_drag_project_path);
+            self.sidebar_drag_project_path = &.{};
+            return;
+        };
+        self.sidebar_drag_origin_y = y;
+        self.sidebar_drag_active = true;
+    }
+
+    fn updateSidebarRootDrag(self: *App, y: i32) void {
+        if (!self.sidebar_drag_active or self.sidebar_drag_started) return;
+        if (@abs(y - self.sidebar_drag_origin_y) < 6) return;
+        self.sidebar_drag_started = true;
+        _ = c.SetCapture(self.window.hwnd);
+    }
+
+    fn sidebarRootDropIndex(self: *App, project_path: []const u8, y: i32) ?usize {
+        var client: c.RECT = undefined;
+        if (c.GetClientRect(self.window.hwnd, &client) == 0) return null;
+        var rows = Sidebar.appendRows(
+            self.allocator,
+            &self.model,
+            if (self.worktree_inspection) |*value| value else null,
+            self.sidebar_scroll,
+            &self.sidebar_state,
+        ) catch return null;
+        defer rows.deinit(self.allocator);
+        var count: usize = 0;
+        for (rows.items) |row| {
+            if (row.kind != .loop or row.depth != 0) continue;
+            if (row.project_path == null or !std.mem.eql(u8, row.project_path.?, project_path)) continue;
+            if (y < row.top + 12) return count;
+            count += 1;
+        }
+        return count;
+    }
+
+    fn completeSidebarRootDrag(self: *App, y: i32) bool {
+        if (!self.sidebar_drag_active) return false;
+        defer {
+            if (self.sidebar_drag_started) _ = c.ReleaseCapture();
+            self.clearSidebarRootDrag();
+        }
+        if (!self.sidebar_drag_started) return false;
+        const graph = self.model.graphFor(self.sidebar_drag_project_path) orelse return true;
+        const drop_index = self.sidebarRootDropIndex(self.sidebar_drag_project_path, y) orelse return true;
+        const changed = Sidebar.reorderRootIDs(
+            &self.sidebar_state,
+            self.allocator,
+            graph.nodes.items,
+            graph.edges.items,
+            self.sidebar_drag_node_id,
+            drop_index,
+        ) catch {
+            self.setStatus("Sidebar root order could not be updated");
+            return true;
+        };
+        if (!changed) return true;
+        if (self.sidebar_store) |*store| store.save(&self.sidebar_state) catch self.setStatus("Sidebar root order could not be saved");
+        var roots = Sidebar.rootIDs(self.allocator, graph.nodes.items, graph.edges.items, &self.sidebar_state) catch {
+            self.setStatus("Sidebar root order could not be collected");
+            return true;
+        };
+        defer roots.deinit(self.allocator);
+        self.client.sendSidebarRootOrder(self.sidebar_drag_project_path, roots.items);
+        self.setStatus("Sidebar root order updated");
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+        return true;
+    }
+
     fn copyEdgeDragSourceForDrop(self: *App) ?[]u8 {
         const source_id = self.canvas.endEdgeDrag() orelse return null;
         return self.allocator.dupe(u8, source_id) catch {
@@ -980,6 +1075,19 @@ pub const App = struct {
         self.model.selectNextAttention();
         if (!self.model.isCompositeOpen()) self.client.setSubgraphAddress(null);
         if (self.model.selected_index) |index| _ = self.selectNodeIndex(index);
+    }
+
+    fn stopAttentionEntry(self: *App, entry: GraphModel.AttentionEntry) void {
+        self.client.sendNodeAction(entry.project_path, entry.node.id, "stopNode", null);
+        const project_name = if (self.model.graphFor(entry.project_path)) |graph| graph.project.name else entry.project_path;
+        const message = std.fmt.allocPrint(self.allocator, "Stopping {s} in {s}...", .{ entry.node.title, project_name }) catch return;
+        self.replaceStatus(message);
+    }
+
+    fn navigateToActivityEvent(self: *App, event: GraphModel.ActivityEvent) void {
+        const graph = self.model.graphFor(event.project_path) orelse return;
+        const index = GraphModel.findNodeIndexByID(graph.nodes.items, event.node_id) orelse return;
+        self.openLoopFromAccessibility(event.project_path, index);
     }
 
     fn selectedEdgeIndex(self: *const App) ?usize {
@@ -1928,12 +2036,31 @@ pub const App = struct {
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
-    fn revealProjectPath(self: *App, path: []const u8) void {
+    fn launchExplorer(self: *App, path: []const u8, success_status: []const u8) void {
         const parameters = WorktreeStatus.explorerParameters(self.allocator, path) catch {
             self.setStatus("Unable to prepare Explorer");
             return;
         };
         defer self.allocator.free(parameters);
+        if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_SHELL_EXECUTE_LOG")) |log_path| {
+            defer self.allocator.free(log_path);
+            const payload = std.fmt.allocPrint(self.allocator, "verb=open\nfile=explorer.exe\nparameters={s}\n", .{parameters}) catch {
+                self.setStatus("Unable to record Explorer request");
+                return;
+            };
+            defer self.allocator.free(payload);
+            var file = std.fs.createFileAbsolute(log_path, .{ .truncate = true }) catch {
+                self.setStatus("Unable to record Explorer request");
+                return;
+            };
+            defer file.close();
+            file.writeAll(payload) catch {
+                self.setStatus("Unable to record Explorer request");
+                return;
+            };
+            self.setStatus(success_status);
+            return;
+        } else |_| {}
         const wide_raw = std.unicode.utf8ToUtf16LeAlloc(self.allocator, parameters) catch {
             self.setStatus("Unable to encode Explorer path");
             return;
@@ -1951,7 +2078,11 @@ pub const App = struct {
             null,
             c.SW_SHOWNORMAL,
         );
-        self.setStatus(if (@intFromPtr(result) <= 32) "Unable to open Explorer" else "Opened project in Explorer");
+        self.setStatus(if (@intFromPtr(result) <= 32) "Unable to open Explorer" else success_status);
+    }
+
+    fn revealProjectPath(self: *App, path: []const u8) void {
+        self.launchExplorer(path, "Opened project in Explorer");
     }
 
     fn trashProjectPath(self: *App, path: []const u8) void {
@@ -2176,8 +2307,8 @@ pub const App = struct {
         self.inspectWorktreesImpl(false);
     }
 
-    fn installUiaFixture(self: *App) void {
-        if (envFlag("GRAPHCODE_UIA_RESET_SIDEBAR")) self.sidebar_state.clearExpandedNodes();
+    fn installUiaFixture(self: *App, reset_sidebar: bool) void {
+        if (reset_sidebar and envFlag("GRAPHCODE_UIA_RESET_SIDEBAR")) self.sidebar_state.clearExpandedNodes();
         const graph_frame =
             \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"uia-graph","project":{"path":"C:\\GraphCode\\fixture","name":"UIA project","remote":false},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"UIA loop A","loopType":"goalBased","state":"succeeded","activity":"checking tests","presence":{"presence":"idle","confidence":"reported"},"goal":{"summary":"All tests pass","predicate":"swift test","metric":{"command":"coverage","direction":"maximize"}},"modelTier":"capable","worktreeBinding":{"path":"C:\\fixture-safe","branch":"feature/parity"}},{"id":"22222222-2222-4222-8222-222222222222","title":"UIA loop B","loopType":"proactive","state":"running","activity":"needs response","presence":{"presence":"awaitingInput","confidence":"reported"},"subGraph":{"nodes":[{"id":"55555555-5555-4555-8555-555555555555","title":"UIA nested A","loopType":"turnBased","state":"idle"},{"id":"66666666-6666-4666-8666-666666666666","title":"UIA nested B","loopType":"goalBased","state":"running"}]}}],"edges":[{"id":"88888888-8888-4888-8888-888888888888","from":"11111111-1111-4111-8111-111111111111","to":"22222222-2222-4222-8222-222222222222","kind":"handoff"}]}}}
         ;
@@ -2474,6 +2605,95 @@ pub const App = struct {
         }
         if (mutation == 15) {
             self.openProductSettings();
+            return;
+        }
+        if (mutation == 16) {
+            const project_path = "C:\\GraphCode\\fixture";
+            if (self.model.graphFor(project_path)) |graph| {
+                if (GraphModel.findNodeIndexByID(graph.nodes.items, "77777777-7777-4777-8777-777777777777") == null) {
+                    const extra = GraphModel.Node{
+                        .id = self.allocator.dupe(u8, "77777777-7777-4777-8777-777777777777") catch return,
+                        .title = self.allocator.dupe(u8, "UIA loop C") catch return,
+                        .loop_type = self.allocator.dupe(u8, "turnBased") catch return,
+                        .state = self.allocator.dupe(u8, "idle") catch return,
+                        .activity = self.allocator.dupe(u8, "") catch return,
+                        .presence = self.allocator.dupe(u8, "idle") catch return,
+                    };
+                    if (self.model.graph) |*current| if (std.mem.eql(u8, current.project.path, project_path)) {
+                        current.nodes.append(extra) catch return;
+                    };
+                    for (self.model.graphs.items) |*summary| {
+                        if (!std.mem.eql(u8, summary.project.path, project_path)) continue;
+                        summary.nodes.append(.{
+                            .id = self.allocator.dupe(u8, extra.id) catch return,
+                            .title = self.allocator.dupe(u8, extra.title) catch return,
+                            .loop_type = self.allocator.dupe(u8, extra.loop_type) catch return,
+                            .state = self.allocator.dupe(u8, extra.state) catch return,
+                            .activity = self.allocator.dupe(u8, extra.activity) catch return,
+                            .presence = self.allocator.dupe(u8, extra.presence) catch return,
+                        }) catch return;
+                    }
+                }
+            } else return;
+            self.syncAccessibility();
+            _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            var rows = Sidebar.appendRows(
+                self.allocator,
+                &self.model,
+                if (self.worktree_inspection) |*value| value else null,
+                self.sidebar_scroll,
+                &self.sidebar_state,
+            ) catch return;
+            defer rows.deinit(self.allocator);
+            var start_y: ?i32 = null;
+            var drop_y: ?i32 = null;
+            for (rows.items) |row| {
+                if (row.kind != .loop or row.depth != 0 or row.project_path == null or !std.mem.eql(u8, row.project_path.?, "C:\\GraphCode\\fixture")) continue;
+                if (row.index == 0) start_y = row.top + 8;
+                if (row.index == 2) drop_y = row.top + 20;
+            }
+            if (start_y) |drag_start| {
+                self.beginSidebarRootDrag("C:\\GraphCode\\fixture", "11111111-1111-4111-8111-111111111111", drag_start);
+                self.updateSidebarRootDrag(drop_y orelse (drag_start + 32));
+                _ = self.completeSidebarRootDrag(drop_y orelse (drag_start + 32));
+            }
+            return;
+        }
+        if (mutation == 17) {
+            self.handleContextAction(.move_project, .{ .project = .{ .path = "C:\\GraphCode\\fixture", .remote = false } });
+            return;
+        }
+        if (mutation == 18) {
+            const baseline =
+                \\{"version":2,"kind":"event","sequence":54,"event":{"graphChanged":{"id":"uia-activity","project":{"path":"C:\\GraphCode\\fixture","name":"UIA project","remote":false},"nodes":[{"id":"act-1","title":"Activity A","loopType":"goalBased","state":"idle"},{"id":"act-2","title":"Activity B","loopType":"goalBased","state":"idle"},{"id":"act-3","title":"Activity C","loopType":"goalBased","state":"idle"},{"id":"act-4","title":"Activity D","loopType":"goalBased","state":"idle"},{"id":"act-5","title":"Activity E","loopType":"goalBased","state":"idle"}],"edges":[]}}}
+            ;
+            const changed =
+                \\{"version":2,"kind":"event","sequence":55,"event":{"graphChanged":{"id":"uia-activity","project":{"path":"C:\\GraphCode\\fixture","name":"UIA project","remote":false},"nodes":[{"id":"act-1","title":"Activity A","loopType":"goalBased","state":"succeeded"},{"id":"act-2","title":"Activity B","loopType":"goalBased","state":"failed"},{"id":"act-3","title":"Activity C","loopType":"goalBased","state":"awaitingInput"},{"id":"act-4","title":"Activity D","loopType":"goalBased","state":"blocked"},{"id":"act-5","title":"Activity E","loopType":"goalBased","state":"running"}],"edges":[]}}}
+            ;
+            _ = self.model.updateFromFrame(baseline) catch return;
+            _ = self.model.updateFromFrame(changed) catch return;
+            self.surface = .project;
+            self.workspace_controls.panel_visible = false;
+            self.layoutWorkspace();
+            self.layoutEmptyStateControls();
+            self.syncAccessibility();
+            _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            return;
+        }
+        if (mutation == 19) {
+            self.setIngressError("Folder could not be opened because the background service returned a detailed error that should wrap cleanly in the sidebar footer.");
+            return;
+        }
+        if (mutation == 20) {
+            self.model.deinit();
+            self.model = GraphModel.Model.init(self.allocator);
+            self.installUiaFixture(false);
+            self.surface = .project;
+            self.workspace_controls.panel_visible = false;
+            self.layoutWorkspace();
+            self.layoutEmptyStateControls();
+            self.syncAccessibility();
+            _ = c.InvalidateRect(self.window.hwnd, null, 0);
             return;
         }
         const dialog = if (self.worktree_dialog) |*value| value else return;
@@ -3054,6 +3274,16 @@ pub const App = struct {
         self.update_lock.lock();
         const update_checking = self.update_thread != null and !self.update_done;
         self.update_lock.unlock();
+        var recent_menu: []MainWindow.RecentFolderItem = &.{};
+        if (self.model.recent_projects.items.len != 0) {
+            recent_menu = self.allocator.alloc(MainWindow.RecentFolderItem, self.model.recent_projects.items.len) catch &.{};
+        }
+        defer if (recent_menu.len != 0) self.allocator.free(recent_menu);
+        if (recent_menu.len != 0) {
+            for (self.model.recent_projects.items, 0..) |project, index| {
+                recent_menu[index] = .{ .path = project.path, .name = project.name };
+            }
+        }
         MainWindow.updateMenu(self.window.hwnd, .{
             .has_project = self.model.graph != null,
             .can_worktrees = if (self.model.graph) |graph| graph.project.isLocalFilesystem() else false,
@@ -3064,6 +3294,7 @@ pub const App = struct {
             .workspace_visible = self.workspace_controls.panel_visible,
             .activity_visible = self.workspace_controls.activity_enabled,
             .update_checking = update_checking,
+            .recent_folders = recent_menu,
         });
         self.layoutEmptyStateControls();
     }
@@ -3249,6 +3480,17 @@ pub const App = struct {
                     return;
                 };
                 self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-row", identity, name, 1, .{ .left = 18, .top = section + 30 + row_offset, .right = 232, .bottom = section + 60 + row_offset }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, entry.node.id), true) catch return;
+                self.appendAccessibilityElement(
+                    &elements,
+                    &owned_identities,
+                    "needs-you-stop",
+                    identity,
+                    "Stop loop",
+                    1,
+                    Sidebar.needsYouStopBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll, index),
+                    false,
+                    true,
+                ) catch return;
             }
         }
         if (self.model.activity.items.len != 0) {
@@ -3256,14 +3498,51 @@ pub const App = struct {
             const attention_rows = @min(self.model.attentionCount(), 4);
             const activity_top = section + 30 + (@as(i32, @intCast(attention_rows)) * 34) + 18;
             self.appendAccessibilityElement(&elements, &owned_identities, "activity-header", "activity", "Activity", 1, .{ .left = 12, .top = activity_top, .right = 232, .bottom = activity_top + 24 }, false, true) catch return;
-            for (self.model.activity.items[0..@min(self.model.activity.items.len, 4)], 0..) |event, index| {
-                const row_offset = @as(i32, @intCast(index)) * 116;
+            self.appendAccessibilityElement(
+                &elements,
+                &owned_identities,
+                "activity-filter",
+                "attention",
+                if (self.sidebar_state.activity_attention_only) "Show all activity" else "Show attention-only activity",
+                1,
+                Sidebar.activityFilterBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll),
+                false,
+                true,
+            ) catch return;
+            const viewport = Sidebar.activityViewport(&self.model, &self.sidebar_state);
+            for (0..viewport.visible_count) |visible_index| {
+                const activity_index = Sidebar.activityEventAtVisible(&self.model, &self.sidebar_state, visible_index) orelse break;
+                const event = self.model.activity.items[activity_index];
                 const identity = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ event.project_path, event.node_id }) catch return;
                 defer self.allocator.free(identity);
-                self.appendAccessibilityElement(&elements, &owned_identities, "activity-row", identity, event.title, 1, .{ .left = 18 + row_offset, .top = activity_top + 24, .right = 130 + row_offset, .bottom = activity_top + 58 }, false, true) catch return;
+                self.appendAccessibilityElement(
+                    &elements,
+                    &owned_identities,
+                    "activity-row",
+                    identity,
+                    event.title,
+                    1,
+                    Sidebar.activityCardBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll, visible_index),
+                    false,
+                    true,
+                ) catch return;
             }
-            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-left", "Scroll activity left", 1, .{ .left = 184, .top = activity_top, .right = 206, .bottom = activity_top + 24 }, false, true) catch return;
-            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-right", "Scroll activity right", 1, .{ .left = 208, .top = activity_top, .right = 230, .bottom = activity_top + 24 }, false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-left", "Scroll activity left", 1, Sidebar.activityControlBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll, .left), false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-right", "Scroll activity right", 1, Sidebar.activityControlBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll, .right), false, true) catch return;
+        }
+        if (self.ingress_error.len != 0) {
+            elements.append(.{
+                .identity = "sidebar-error-footer:ingress",
+                .name = self.ingress_error,
+                .parent = 1,
+                .selected = false,
+                .eligible = false,
+                .invokable = false,
+                .left = Sidebar.errorFooterRect(client.bottom).left,
+                .top = Sidebar.errorFooterRect(client.bottom).top,
+                .right = Sidebar.errorFooterRect(client.bottom).right,
+                .bottom = Sidebar.errorFooterRect(client.bottom).bottom,
+            }) catch return;
         }
         switch (self.surface) {
             .project, .workspace => if (self.model.graph) |graph| {
@@ -3410,6 +3689,9 @@ pub const App = struct {
             .{ .identity = "quick-chat-new:quick-chats", .target = .new_quick_chat },
             .{ .identity = "needs-you-header:needs-you", .target = .needs_you_header },
             .{ .identity = "activity-header:activity", .target = .activity_header },
+            .{ .identity = "activity-filter:attention", .target = .activity_filter },
+            .{ .identity = "activity-control:scroll-left", .target = .activity_left },
+            .{ .identity = "activity-control:scroll-right", .target = .activity_right },
         };
         for (static_targets) |candidate| {
             if (Accessibility.worktreeIdentityPayload(candidate.identity) == payload) target = candidate.target;
@@ -3557,6 +3839,12 @@ pub const App = struct {
                 if (target != null) return false;
                 target = .{ .needs_you = index };
             }
+            const stop_identity = std.fmt.allocPrint(self.allocator, "needs-you-stop:{s}:{s}", .{ entry.project_path, entry.node.id }) catch return false;
+            defer self.allocator.free(stop_identity);
+            if (Accessibility.worktreeIdentityPayload(stop_identity) == payload) {
+                if (target != null) return false;
+                target = .{ .needs_you_stop = index };
+            }
         }
         for (self.model.activity.items, 0..) |event, index| {
             const identity = std.fmt.allocPrint(self.allocator, "activity-row:{s}:{s}", .{ event.project_path, event.node_id }) catch return false;
@@ -3564,14 +3852,6 @@ pub const App = struct {
             if (Accessibility.worktreeIdentityPayload(identity) == payload) {
                 if (target != null) return false;
                 target = .{ .activity = index };
-            }
-        }
-        for ([_][]const u8{ "scroll-left", "scroll-right" }) |control| {
-            const identity = std.fmt.allocPrint(self.allocator, "activity-control:{s}", .{control}) catch return false;
-            defer self.allocator.free(identity);
-            if (Accessibility.worktreeIdentityPayload(identity) == payload) {
-                if (target != null) return false;
-                target = .{ .activity = if (std.mem.eql(u8, control, "scroll-left")) 0 else 1 };
             }
         }
         const resolved = target orelse return false;
@@ -3592,13 +3872,15 @@ pub const App = struct {
                 const entry = self.model.attention_entries.items[index];
                 if (self.selectProject(entry.project_path)) _ = self.model.setSelectedID(entry.node.id);
             },
-            .activity_header => {},
-            .activity => |index| {
-                if (index < self.model.activity.items.len) {
-                    const event = self.model.activity.items[index];
-                    if (self.selectProject(event.project_path)) _ = self.model.setSelectedID(event.node_id);
-                }
+            .needs_you_stop => |index| {
+                if (index >= self.model.attention_entries.items.len) return false;
+                self.stopAttentionEntry(self.model.attention_entries.items[index]);
             },
+            .activity_header => {},
+            .activity_filter => Sidebar.toggleActivityAttentionOnly(&self.sidebar_state, &self.model),
+            .activity_left => Sidebar.stepActivity(&self.sidebar_state, &self.model, .left),
+            .activity_right => Sidebar.stepActivity(&self.sidebar_state, &self.model, .right),
+            .activity => |index| if (index < self.model.activity.items.len) self.navigateToActivityEvent(self.model.activity.items[index]),
             .recent_project => |path| self.openProject(path),
             .open_project => |path| {
                 if (self.selectProject(path)) {
@@ -3906,6 +4188,11 @@ fn onWindowMessage(
                 app.openFolder();
             } else if (id == MainWindow.empty_new_loop_id) {
                 if (app.surface == .quick_chats) app.handleAction(.quick_chat) else app.handleAction(.create_node);
+            } else if (MainWindow.isRecentFolderCommand(id)) {
+                const recent_index = id - MainWindow.recent_folder_command_base;
+                if (recent_index < app.model.recent_projects.items.len) {
+                    app.openProject(app.model.recent_projects.items[recent_index].path);
+                }
             } else if (MainWindow.commandFromId(id)) |command| {
                 switch (command) {
                     .open_folder => app.openFolder(),
@@ -4260,6 +4547,22 @@ fn onWindowMessage(
             else
                 routing.workspace_top;
             const rail_left = routing.rail_left;
+            if (app.workspace_controls.rail_visible and x < rail_left) {
+                const inspection = if (app.worktree_inspection) |*value| value else null;
+                if (Sidebar.rowAt(x, y, &app.model, inspection, app.sidebar_scroll, workspace_top, &app.sidebar_state)) |row| {
+                    if (row.kind == .loop and row.depth == 0 and x < 198) {
+                        if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
+                            if (row.index < graph.nodes.items.len) app.beginSidebarRootDrag(path, graph.nodes.items[row.index].id, y);
+                        };
+                    } else {
+                        app.clearSidebarRootDrag();
+                    }
+                } else {
+                    app.clearSidebarRootDrag();
+                }
+            } else {
+                app.clearSidebarRootDrag();
+            }
             if ((app.workspace_controls.panel_visible or app.surface == .workspace) and x >= rail_left and y >= workspace_top) {
                 if (app.surface == .workspace) {
                     if (workspaceGraph(&app.model)) |graph| {
@@ -4427,11 +4730,31 @@ fn onWindowMessage(
                 return true;
             }
             if (app.workspace_controls.rail_visible) {
+                if (app.completeSidebarRootDrag(y)) {
+                    result.* = 0;
+                    return true;
+                }
                 app.update_lock.lock();
                 const update_available = app.update_state.state == .available;
                 app.update_lock.unlock();
                 if (Sidebar.updateBannerAt(x, y, routing.canvas.bottom, update_available, app.ingress_error.len != 0)) {
                     app.showCurrentUpdateOffer();
+                    result.* = 0;
+                    return true;
+                }
+                if (Sidebar.needsYouStopAt(
+                    x,
+                    y,
+                    &app.model,
+                    if (app.worktree_inspection) |*value| value else null,
+                    &app.sidebar_state,
+                    app.sidebar_scroll,
+                )) |attention_index| {
+                    if (attention_index < app.model.attention_entries.items.len) {
+                        app.stopAttentionEntry(app.model.attention_entries.items[attention_index]);
+                    }
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
                     result.* = 0;
                     return true;
                 }
@@ -4450,6 +4773,38 @@ fn onWindowMessage(
                             app.syncAccessibility();
                             _ = c.InvalidateRect(hwnd, null, 0);
                         }
+                    }
+                    result.* = 0;
+                    return true;
+                }
+                if (Sidebar.activityControlAt(
+                    x,
+                    y,
+                    &app.model,
+                    if (app.worktree_inspection) |*value| value else null,
+                    &app.sidebar_state,
+                    app.sidebar_scroll,
+                )) |control| {
+                    switch (control) {
+                        .filter => Sidebar.toggleActivityAttentionOnly(&app.sidebar_state, &app.model),
+                        .left => Sidebar.stepActivity(&app.sidebar_state, &app.model, .left),
+                        .right => Sidebar.stepActivity(&app.sidebar_state, &app.model, .right),
+                    }
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                    result.* = 0;
+                    return true;
+                }
+                if (Sidebar.activityCardAt(
+                    x,
+                    y,
+                    &app.model,
+                    if (app.worktree_inspection) |*value| value else null,
+                    &app.sidebar_state,
+                    app.sidebar_scroll,
+                )) |activity_index| {
+                    if (activity_index < app.model.activity.items.len) {
+                        app.navigateToActivityEvent(app.model.activity.items[activity_index]);
                     }
                     result.* = 0;
                     return true;
@@ -4552,6 +4907,7 @@ fn onWindowMessage(
                             app.setStatus("Opening quick chat...");
                         },
                     }
+                    app.clearSidebarRootDrag();
                     app.clampSidebarScroll();
                     app.syncAccessibility();
                     _ = c.InvalidateRect(hwnd, null, 0);
@@ -4559,6 +4915,7 @@ fn onWindowMessage(
                     return true;
                 }
             }
+            app.clearSidebarRootDrag();
             result.* = 0;
             return true;
         },
@@ -4727,6 +5084,7 @@ fn onWindowMessage(
         c.WM_MOUSEMOVE => {
             const hover_y = mouseY(lparam);
             const hover_x = mouseX(lparam);
+            app.updateSidebarRootDrag(hover_y);
             const next_hover = if (mouseX(lparam) >= 0 and mouseX(lparam) < Tokens.sidebar_width) hover_y else -1;
             if (next_hover != app.sidebar_hover_y) {
                 app.sidebar_hover_y = next_hover;

@@ -393,6 +393,18 @@ pub const DaemonClient = struct {
         self.sendCommand(command);
     }
 
+    pub fn sendSidebarRootOrder(
+        self: *DaemonClient,
+        project_path: []const u8,
+        node_ids: []const []const u8,
+    ) void {
+        const command = Wire.commandGraphSidebarNodesReordered(self.allocator, project_path, node_ids) catch {
+            self.publishState(self.connectionState(), "sidebar root order command encoding failed");
+            return;
+        };
+        self.sendCommand(command);
+    }
+
     pub fn sendRenameNode(self: *DaemonClient, project_path: []const u8, node_id: []const u8, title: []const u8) void {
         const command = Wire.commandGraphRenameNode(self.allocator, project_path, node_id, title) catch {
             self.publishState(self.connectionState(), "rename node command encoding failed");
@@ -573,11 +585,21 @@ pub const DaemonClient = struct {
             };
             self.allocator.free(command_json);
         }
+        self.recordUiaCommand(addressed);
         _ = self.sendCommandInternal(addressed, null);
     }
 
     fn sendCommandWithRequestID(self: *DaemonClient, command_json: []u8, request_id: [36]u8) bool {
+        self.recordUiaCommand(command_json);
         return self.sendCommandInternal(command_json, request_id);
+    }
+
+    fn recordUiaCommand(self: *DaemonClient, command_json: []const u8) void {
+        const log_path = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_DAEMON_COMMAND_LOG") catch return;
+        defer self.allocator.free(log_path);
+        var file = std.fs.createFileAbsolute(log_path, .{ .truncate = true }) catch return;
+        defer file.close();
+        file.writeAll(command_json) catch {};
     }
 
     fn sendCommandInternal(self: *DaemonClient, command_json: []u8, request_id: ?[36]u8) bool {

@@ -590,6 +590,26 @@ pub fn commandGraphRefreshUsage(allocator: std.mem.Allocator, project_path: []co
         "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"refreshUsage\":{{}}}}}}}}", .{path});
 }
 
+pub fn commandGraphSidebarNodesReordered(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    node_ids: []const []const u8,
+) ![]u8 {
+    const path = try quoteJson(allocator, project_path);
+    defer allocator.free(path);
+    var quoted_ids: std.ArrayList([]u8) = .empty;
+    defer {
+        for (quoted_ids.items) |item| allocator.free(item);
+        quoted_ids.deinit(allocator);
+    }
+    for (node_ids) |node_id| try quoted_ids.append(allocator, try quoteJson(allocator, node_id));
+    const joined = try std.mem.join(allocator, ",", quoted_ids.items);
+    defer allocator.free(joined);
+    return std.fmt.allocPrint(allocator,
+        "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"sidebarNodesReordered\":{{\"_0\":[{s}]}}}}}}}}",
+        .{ path, joined });
+}
+
 fn graphUnaryUUID(allocator: std.mem.Allocator, project_path: []const u8, name: []const u8, node_id: []const u8) ![]u8 {
     const path = try quoteJson(allocator, project_path); defer allocator.free(path);
     const id = try quoteJson(allocator, node_id); defer allocator.free(id);
@@ -1072,6 +1092,12 @@ test "graph commands match Swift Codable associated-value shapes" {
     try std.testing.expectEqualStrings(
         "{\"graphCommand\":{\"projectPath\":\"C:\\\\work\\\\graph\",\"command\":{\"deleteEdge\":{\"_0\":\"33333333-3333-4333-8333-333333333333\"}}}}",
         delete,
+    );
+    const reordered = try commandGraphSidebarNodesReordered(allocator, project, &.{ node, "22222222-2222-4222-8222-222222222222" });
+    defer allocator.free(reordered);
+    try std.testing.expectEqualStrings(
+        "{\"graphCommand\":{\"projectPath\":\"C:\\\\work\\\\graph\",\"command\":{\"sidebarNodesReordered\":{\"_0\":[\"11111111-1111-4111-8111-111111111111\",\"22222222-2222-4222-8222-222222222222\"]}}}}",
+        reordered,
     );
 }
 
