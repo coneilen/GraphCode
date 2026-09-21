@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("Win32.zig").c;
 const Tokens = @import("DesignTokens.zig");
+const AppFont = @import("AppFont.zig");
 
 extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
 
@@ -832,8 +833,7 @@ fn createControl(
         c.GetModuleHandleW(null),
         null,
     ) orelse return null;
-    if (c.GetStockObject(c.DEFAULT_GUI_FONT)) |font|
-        _ = c.SendMessageW(control, c.WM_SETFONT, @intFromPtr(font), 1);
+    AppFont.apply(control, AppFont.control_size, false);
     return control;
 }
 
@@ -1194,7 +1194,7 @@ fn createOperationControl(hwnd: c.HWND, class: []const u8, text: []const u8, x: 
         @as(c.DWORD, @intCast(c.WS_VISIBLE)) |
         (if (std.mem.eql(u8, class, "BUTTON")) @as(c.DWORD, @intCast(c.WS_TABSTOP)) else 0);
     const control = c.CreateWindowExW(0, wide_class.ptr, wide_text.ptr, style, x, y, width, height, hwnd, controlId(id), c.GetModuleHandleW(null), null) orelse return null;
-    _ = c.SendMessageW(control, c.WM_SETFONT, @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
+    AppFont.apply(control, AppFont.control_size, false);
     return control;
 }
 

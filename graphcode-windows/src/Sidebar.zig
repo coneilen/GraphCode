@@ -3,6 +3,7 @@ const GraphModel = @import("GraphModel.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
 const Tokens = @import("DesignTokens.zig");
 const c = @import("Win32.zig").c;
+const AppFont = @import("AppFont.zig");
 
 pub const State = struct {
     allocator: std.mem.Allocator,
@@ -1622,10 +1623,12 @@ fn drawText(
 ) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text) catch return;
     defer allocator.free(wide);
+    const old_font = AppFont.select(hdc, size, false);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var bounds = rect(x, y, 1200, y + size + 8);
     _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+    _ = c.SelectObject(hdc, old_font);
 }
 
 fn drawTextRect(
@@ -1637,11 +1640,12 @@ fn drawTextRect(
     color: u32,
     format: c.UINT,
 ) void {
-    _ = size;
     const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text) catch return;
     defer allocator.free(wide);
+    const old_font = AppFont.select(hdc, size, false);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var bounds = bounds_value;
     _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, format);
+    _ = c.SelectObject(hdc, old_font);
 }

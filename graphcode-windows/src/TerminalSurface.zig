@@ -2,6 +2,7 @@ const std = @import("std");
 const c = @import("Win32.zig").c;
 const WorkspaceLayout = @import("WorkspaceLayout.zig");
 const Tokens = @import("DesignTokens.zig");
+const AppFont = @import("AppFont.zig");
 
 const columns: usize = 120;
 const rows: usize = 40;
@@ -1735,10 +1736,12 @@ fn fillRect(hdc: c.HDC, bounds: c.RECT, color: u32) void {
 fn drawUtf8(hdc: c.HDC, text: []const u8, x: i32, y: i32, size: i32, color: u32) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text) catch return;
     defer std.heap.page_allocator.free(wide);
+    const old_font = AppFont.select(hdc, size, false);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var bounds = c.RECT{ .left = x, .top = y, .right = x + 220, .bottom = y + size + 8 };
     _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, c.DT_LEFT | c.DT_SINGLELINE);
+    _ = c.SelectObject(hdc, old_font);
 }
 
 fn tabLabel(tab: WorkspaceLayout.Tab, index: usize) []const u8 {

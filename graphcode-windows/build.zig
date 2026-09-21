@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) !void {
     for ([_][]const u8{
         "user32",
         "gdi32",
+        "gdiplus",
         "opengl32",
         "kernel32",
         "imm32",

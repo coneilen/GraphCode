@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @import("Win32.zig").c;
+const AppFont = @import("AppFont.zig");
 
 pub const Action = enum {
     later,
@@ -145,7 +146,7 @@ fn createStatic(
 ) void {
     const wide = wideZ(allocator, text) catch return;
     defer allocator.free(wide);
-    _ = c.CreateWindowExW(
+    const control = c.CreateWindowExW(
         0,
         std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr,
         wide.ptr,
@@ -159,6 +160,7 @@ fn createStatic(
         c.GetModuleHandleW(null),
         null,
     );
+    AppFont.apply(control, AppFont.control_size, false);
 }
 
 fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32, enabled: bool) void {
@@ -180,6 +182,7 @@ fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32, enabl
         c.GetModuleHandleW(null),
         null,
     ) orelse return;
+    AppFont.apply(button, AppFont.control_size, false);
     _ = c.EnableWindow(button, if (enabled) 1 else 0);
 }
 

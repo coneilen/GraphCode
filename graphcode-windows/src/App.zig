@@ -2,6 +2,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const DaemonClient = @import("DaemonClient.zig").DaemonClient;
 const GraphCanvas = @import("GraphCanvas.zig");
+const GdiplusAA = @import("GdiplusAA.zig");
 const CanvasInput = @import("CanvasInput.zig");
 const CanvasLayoutStore = @import("CanvasLayoutStore.zig");
 const GraphContextMenu = @import("GraphContextMenu.zig");
@@ -373,6 +374,7 @@ pub const App = struct {
         const com_result = c.CoInitializeEx(null, c.COINIT_APARTMENTTHREADED);
         if (com_result < 0) return error.ComInitializationFailed;
         defer c.CoUninitialize();
+        GdiplusAA.init();
         try self.window.create(self, &onWindowMessage, title.ptr);
         self.tray.test_hook_enabled = self.tray_test_hook_enabled;
         self.tray.add(self.window.hwnd) catch self.setStatus("System tray unavailable; GraphCode remains open");
