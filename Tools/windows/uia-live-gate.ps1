@@ -823,6 +823,11 @@ try {
     $null = $card.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   }
   $projectCardIds = @($projectCards | ForEach-Object { $_.Current.AutomationId })
+  $attentionAction = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.Name -eq "Reply" }) | Select-Object -First 1
+  Require ($null -ne $attentionAction) "NEEDS YOU card omitted its reason-specific Reply action"
+  Require (($attentionAction.Current.BoundingRectangle.Width -gt 0) -and
+           ($attentionAction.Current.BoundingRectangle.Height -gt 0)) "Reply attention action had empty bounds"
+  $null = $attentionAction.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
   $reclaimOffer = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.Name -eq "Reclaim" }) | Select-Object -First 1
   $keepOffer = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.Name -eq "Keep" }) | Select-Object -First 1
   Require ($null -ne $reclaimOffer) "resolved card with a reclaimable worktree omitted its Reclaim descendant"
@@ -838,7 +843,7 @@ try {
   # and Projects above) instead of assuming cards and the offer are contiguous blocks.
   $graphChildIds = @(Get-DirectChildren $graph $rawWalker |
     ForEach-Object { $_.Current.AutomationId } | Where-Object { $_ })
-  $expectedGraphIds = @($projectCardIds + @($connectionAlert.Current.AutomationId, $reclaimOffer.Current.AutomationId, $keepOffer.Current.AutomationId) + $canvasActionIds)
+  $expectedGraphIds = @($projectCardIds + @($attentionAction.Current.AutomationId, $connectionAlert.Current.AutomationId, $reclaimOffer.Current.AutomationId, $keepOffer.Current.AutomationId) + $canvasActionIds)
   Require ((@($graphChildIds | Sort-Object) -join ",") -eq (@($expectedGraphIds | Sort-Object) -join ",")) `
     "Graph exposed unexpected or missing children: $($graphChildIds -join ',')"
   $null = Assert-FragmentLinks $graph $rawWalker $graphChildIds "RawView Graph"
@@ -1006,6 +1011,72 @@ try {
     "workspace chrome omitted a split control (found $($workspaceControls.Count) of 3: $(@($workspaceControls | ForEach-Object { $_.Current.Name }) -join '|'))"
   Require ($workspaceTabs.Count -ge 1) `
     "workspace chrome exposed no tab children; found $(@($workspaceChildren | ForEach-Object { $_.Current.AutomationId }) -join '|')"
+  $workspacePanelToggle = @($workspaceChildren | Where-Object {
+    $_.Current.AutomationId -match '^workspace-toggle-panel-' -and $_.Current.Name -eq "Collapse loop panel"
+  }) | Select-Object -First 1
+  $workspaceSparkline = @($workspaceChildren | Where-Object {
+    $_.Current.AutomationId -match '^workspace-detail-sparkline-' -and $_.Current.Name -eq "Metric sparkline"
+  }) | Select-Object -First 1
+  $workspaceStart = @($workspaceChildren | Where-Object {
+    $_.Current.AutomationId -match '^workspace-detail-start-' -and $_.Current.Name -eq "Start time"
+  }) | Select-Object -First 1
+  $workspaceUsage = @($workspaceChildren | Where-Object {
+    $_.Current.AutomationId -match '^workspace-detail-usage-' -and $_.Current.Name -match 'tokens$'
+  }) | Select-Object -First 1
+  Require ($null -ne $workspacePanelToggle) "workspace right panel omitted collapse control"
+  Require ($null -ne $workspaceSparkline) "workspace right panel omitted metric sparkline child"
+  Require ($null -ne $workspaceStart) "workspace right panel omitted start-time child"
+  Require ($null -ne $workspaceUsage) "workspace right panel omitted token-usage child"
+  foreach ($detailChild in @($workspacePanelToggle, $workspaceSparkline, $workspaceStart, $workspaceUsage)) {
+    Require (($detailChild.Current.BoundingRectangle.Width -gt 0) -and
+             ($detailChild.Current.BoundingRectangle.Height -gt 0)) `
+      "workspace right panel child $($detailChild.Current.AutomationId) has empty bounds"
+  }
+  $workspacePanelToggle.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
+  $workspacePanelToggle = @($workspaceChildren | Where-Object {
+    $_.Current.AutomationId -match '^workspace-toggle-panel-' -and $_.Current.Name -eq "Expand loop panel"
+  }) | Select-Object -First 1
+  Require ($null -ne $workspacePanelToggle) "workspace right panel did not expose expand control after collapse"
+  $workspacePanelToggle.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
+  $workspaceTabs = @($workspaceChildren | Where-Object {
+    $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$'
+  })
+  $initialWorkspaceTabId = $workspaceTabs[0].Current.AutomationId
+  $newTab = @($workspaceChildren | Where-Object {
+    $_.Current.AutomationId -match '^workspace-new-tab-' -and $_.Current.Name -eq "New Tab"
+  }) | Select-Object -First 1
+  Require ($null -ne $newTab) "workspace omitted New Tab before mounted-tab preservation check"
+  $newTab.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    Start-Sleep -Milliseconds 100
+    $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
+    $workspaceTabs = @($workspaceChildren | Where-Object {
+      $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$'
+    })
+    if ($workspaceTabs.Count -ge 2) { break }
+  }
+  Require ($workspaceTabs.Count -ge 2) "New Tab did not expose a mounted background tab"
+  $newWorkspaceTabId = $workspaceTabs[1].Current.AutomationId
+  $workspaceTabs[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  $workspaceTabs = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$'
+  })
+  Require (($workspaceTabs[0].Current.AutomationId -eq $initialWorkspaceTabId) -and
+           ($workspaceTabs[1].Current.AutomationId -eq $newWorkspaceTabId)) `
+    "switching to the mounted background tab changed terminal tab identity"
+  $workspaceTabs[1].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  $workspaceTabs = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$'
+  })
+  Require (($workspaceTabs[0].Current.AutomationId -eq $initialWorkspaceTabId) -and
+           ($workspaceTabs[1].Current.AutomationId -eq $newWorkspaceTabId)) `
+    "switching back from the mounted background tab changed terminal tab identity"
   $surfaceActionPatterns["overview-destination"].Invoke()
   Start-Sleep -Milliseconds 150
   Require ([GraphCodeUiaGateState]::PostTaggedExitCollision($process.MainWindowHandle)) `

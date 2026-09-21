@@ -22,6 +22,8 @@ pub const Node = struct {
     stall_after_seconds: ?f64 = null,
     created_at: ?u64 = null,
     metric_passes: u32 = 0,
+    metric_samples: [8]f64 = [_]f64{0} ** 8,
+    metric_sample_count: u8 = 0,
     token_usage: ?u32 = null,
     worktree_path: []u8 = @constCast(""),
     worktree_branch: []u8 = &.{},
@@ -1026,6 +1028,8 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .stall_after_seconds = node.stall_after_seconds,
         .created_at = node.created_at,
         .metric_passes = node.metric_passes,
+        .metric_samples = node.metric_samples,
+        .metric_sample_count = node.metric_sample_count,
         .token_usage = node.token_usage,
         .worktree_path = try allocator.dupe(u8, node.worktree_path),
         .worktree_branch = try allocator.dupe(u8, node.worktree_branch),
@@ -1071,6 +1075,7 @@ fn decodeNodes(
         const object = bytes[start .. end + 1];
         const scalar_object = try withoutJsonObjectField(allocator, object, "subGraph");
         defer allocator.free(scalar_object);
+        const samples = jsonMetricSamples(scalar_object, "metricHistory");
         try nodes.append(.{
             .id = try duplicateJsonString(allocator, scalar_object, "id"),
             .title = try duplicateJsonStringOr(allocator, scalar_object, "title", "Untitled"),
@@ -1091,6 +1096,8 @@ fn decodeNodes(
             .stall_after_seconds = jsonFloat(scalar_object, "stallAfterSeconds"),
             .created_at = jsonNumber64(scalar_object, "createdAt"),
             .metric_passes = jsonArrayObjectCount(scalar_object, "metricHistory"),
+            .metric_samples = samples.values,
+            .metric_sample_count = samples.count,
             .token_usage = jsonUsageTotal(scalar_object),
             .worktree_path = try duplicateWorktreePath(allocator, scalar_object),
             .worktree_branch = try duplicateWorktreeBranch(allocator, scalar_object),
@@ -1166,6 +1173,40 @@ fn jsonArrayObjectCount(object: []const u8, key: []const u8) u32 {
         if (value == '{') count += 1;
     }
     return count;
+}
+
+const MetricSamples = struct {
+    values: [8]f64 = [_]f64{0} ** 8,
+    count: u8 = 0,
+};
+
+fn jsonMetricSamples(object: []const u8, key: []const u8) MetricSamples {
+    const needle = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":[", .{key}) catch return .{};
+    defer std.heap.page_allocator.free(needle);
+    const start = std.mem.indexOf(u8, object, needle) orelse return .{};
+    const close = std.mem.indexOfScalarPos(u8, object, start + needle.len, ']') orelse return .{};
+    const array = object[start + needle.len .. close];
+    var result = MetricSamples{};
+    var cursor: usize = 0;
+    while (cursor < array.len) {
+        const value_key = std.mem.indexOfPos(u8, array, cursor, "\"value\":") orelse break;
+        const value = std.mem.trimLeft(u8, array[value_key + "\"value\":".len ..], " ");
+        var end: usize = 0;
+        while (end < value.len and (std.ascii.isDigit(value[end]) or value[end] == '.' or value[end] == '-' or value[end] == '+' or value[end] == 'e' or value[end] == 'E')) : (end += 1) {}
+        if (end != 0) {
+            if (std.fmt.parseFloat(f64, value[0..end])) |sample| {
+                if (result.count == result.values.len) {
+                    std.mem.copyForwards(f64, result.values[0 .. result.values.len - 1], result.values[1..]);
+                    result.values[result.values.len - 1] = sample;
+                } else {
+                    result.values[result.count] = sample;
+                    result.count += 1;
+                }
+            } else |_| {}
+        }
+        cursor = value_key + "\"value\":".len + end;
+    }
+    return result;
 }
 
 fn jsonUsageTotal(object: []const u8) ?u32 {
@@ -1815,6 +1856,20 @@ test "fireCount parses complete positive numeric tokens" {
     try std.testing.expectEqual(@as(u32, 1), model.graph.?.edges.items[0].fire_count);
     try std.testing.expectEqual(@as(u32, 123), model.graph.?.edges.items[1].fire_count);
     try std.testing.expectEqual(@as(usize, 0), model.attentionCount());
+}
+
+test "metric history samples retain recent values for sparklines" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const frame =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"a","title":"A","state":"running","metricHistory":[{"value":5},{"value":4},{"value":3},{"value":2},{"value":1},{"value":0},{"value":-1},{"value":-2},{"value":-3}]}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(frame);
+    const node = model.graph.?.nodes.items[0];
+    try std.testing.expectEqual(@as(u32, 9), node.metric_passes);
+    try std.testing.expectEqual(@as(u8, 8), node.metric_sample_count);
+    try std.testing.expectEqual(@as(f64, 4), node.metric_samples[0]);
+    try std.testing.expectEqual(@as(f64, -3), node.metric_samples[7]);
 }
 
 test "attention cursor is independent from ordinary selection" {

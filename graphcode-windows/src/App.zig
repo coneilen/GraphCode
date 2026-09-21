@@ -166,6 +166,7 @@ const UiaDynamicTarget = union(enum) {
     workspace_new_tab,
     workspace_split_right,
     workspace_split_down,
+    workspace_toggle_panel,
     workspace_tab: usize,
     workspace_tab_close: usize,
 };
@@ -2310,7 +2311,7 @@ pub const App = struct {
     fn installUiaFixture(self: *App, reset_sidebar: bool) void {
         if (reset_sidebar and envFlag("GRAPHCODE_UIA_RESET_SIDEBAR")) self.sidebar_state.clearExpandedNodes();
         const graph_frame =
-            \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"uia-graph","project":{"path":"C:\\GraphCode\\fixture","name":"UIA project","remote":false},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"UIA loop A","loopType":"goalBased","state":"succeeded","activity":"checking tests","presence":{"presence":"idle","confidence":"reported"},"goal":{"summary":"All tests pass","predicate":"swift test","metric":{"command":"coverage","direction":"maximize"}},"modelTier":"capable","worktreeBinding":{"path":"C:\\fixture-safe","branch":"feature/parity"}},{"id":"22222222-2222-4222-8222-222222222222","title":"UIA loop B","loopType":"proactive","state":"running","activity":"needs response","presence":{"presence":"awaitingInput","confidence":"reported"},"subGraph":{"nodes":[{"id":"55555555-5555-4555-8555-555555555555","title":"UIA nested A","loopType":"turnBased","state":"idle"},{"id":"66666666-6666-4666-8666-666666666666","title":"UIA nested B","loopType":"goalBased","state":"running"}]}}],"edges":[{"id":"88888888-8888-4888-8888-888888888888","from":"11111111-1111-4111-8111-111111111111","to":"22222222-2222-4222-8222-222222222222","kind":"handoff"}]}}}
+            \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"uia-graph","project":{"path":"C:\\GraphCode\\fixture","name":"UIA project","remote":false},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"UIA loop A","loopType":"goalBased","state":"succeeded","activity":"checking tests","presence":{"presence":"idle","confidence":"reported"},"createdAt":788918400,"goal":{"summary":"All tests pass","predicate":"swift test","metric":{"command":"coverage","direction":"maximize"}},"metricHistory":[{"value":1},{"value":2},{"value":3}],"usage":{"inputTokens":1200,"outputTokens":345},"modelTier":"capable","worktreeBinding":{"path":"C:\\fixture-safe","branch":"feature/parity"}},{"id":"22222222-2222-4222-8222-222222222222","title":"UIA loop B","loopType":"proactive","state":"running","activity":"needs response","presence":{"presence":"awaitingInput","confidence":"reported"},"createdAt":788918400,"usage":{"inputTokens":12,"outputTokens":34},"subGraph":{"nodes":[{"id":"55555555-5555-4555-8555-555555555555","title":"UIA nested A","loopType":"turnBased","state":"idle"},{"id":"66666666-6666-4666-8666-666666666666","title":"UIA nested B","loopType":"goalBased","state":"running"}]}}],"edges":[{"id":"88888888-8888-4888-8888-888888888888","from":"11111111-1111-4111-8111-111111111111","to":"22222222-2222-4222-8222-222222222222","kind":"handoff"}]}}}
         ;
         const chats_frame =
             \\{"version":2,"kind":"event","sequence":2,"event":{"quickChatsListed":[{"id":"33333333-3333-4333-8333-333333333333","title":"UIA chat A","backend":"claudeCode","createdAt":0,"activity":null},{"id":"44444444-4444-4444-8444-444444444444","title":"UIA chat B","backend":"copilot","createdAt":1,"activity":null}]}}
@@ -3123,6 +3124,15 @@ pub const App = struct {
         self.handleAction(InputRouter.keyAction(key, ctrl, shift));
     }
 
+    fn toggleWorkspaceDetailPanel(self: *App) void {
+        self.workspace_controls.panel_visible = !self.workspace_controls.panel_visible;
+        if (self.workspace_controls.panel_visible) self.surface = .workspace;
+        self.layoutWorkspace();
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+        self.setStatus(if (self.workspace_controls.panel_visible) "Loop detail panel expanded" else "Loop detail panel collapsed");
+    }
+
     fn layoutWorkspace(self: *App) void {
         var client: c.RECT = undefined;
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
@@ -3151,7 +3161,7 @@ pub const App = struct {
                 if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
                 if (full_workspace) Tokens.header_height + Tokens.loop_bar_height else @max(0, client.bottom - panel_height),
                 @max(0, client.right - (if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0) -
-                    (if (full_workspace) Tokens.loop_detail_width else 0)),
+                    (if (full_workspace and self.workspace_controls.panel_visible) Tokens.loop_detail_width else 0)),
                 panel_height,
             );
         }
@@ -3569,6 +3579,9 @@ pub const App = struct {
                     const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ graph.project.path, node.id }) catch return;
                     defer self.allocator.free(key);
                     self.appendAccessibilityElement(&elements, &owned_identities, "project-card", key, node.title, 4, bounds, self.model.selected_index == index, false) catch return;
+                    if (GraphCanvas.hitTestAttentionAction(graph.nodes.items, graph.edges.items, bounds.right - 20, bounds.bottom - 12, &self.canvas) != null) {
+                        self.appendAccessibilityElement(&elements, &owned_identities, "attention-action", key, GraphCanvas.attentionActionLabel(node), 4, GraphCanvas.attentionActionBounds(bounds, &self.canvas), false, false) catch return;
+                    }
                     if (GraphCanvas.hasReclaimOffer(node, if (self.worktree_inspection) |*value| value else null, self.kept_worktree_paths.items)) {
                         const offer = GraphCanvas.reclaimOfferBounds(bounds);
                         self.appendAccessibilityElement(&elements, &owned_identities, "reclaim", key, "Reclaim", 4, offer.reclaim, false, false) catch return;
@@ -3578,13 +3591,34 @@ pub const App = struct {
                 if (self.surface == .workspace) {
                     if (self.workspace) |workspace| {
                         const workspace_left = if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0;
-                        const workspace_right = client.right - Tokens.loop_detail_width;
+                        const workspace_right = client.right - (if (self.workspace_controls.panel_visible) Tokens.loop_detail_width else 0);
                         const selected_index = self.model.selectedIndex() orelse 0;
                         self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toolbar", graph.project.path, graph.project.name, 4, .{ .left = workspace_left, .top = 0, .right = workspace_right, .bottom = Tokens.header_height }, false, false) catch return;
                         self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", if (selected_index < graph.nodes.items.len) graph.nodes.items[selected_index].id else "none", "Selected loop workspace", 4, .{ .left = workspace_left, .top = Tokens.header_height, .right = workspace_right, .bottom = Tokens.header_height + Tokens.loop_bar_height }, false, false) catch return;
                         self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .left = workspace_right - 104, .top = Tokens.header_height + 10, .right = workspace_right - 12, .bottom = Tokens.header_height + 36 }, false, false) catch return;
                         if (selected_index < graph.nodes.items.len and !isResolvedLoopState(graph.nodes.items[selected_index].state)) {
                             self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .left = workspace_right - 196, .top = Tokens.header_height + 10, .right = workspace_right - 112, .bottom = Tokens.header_height + 36 }, false, false) catch return;
+                        }
+                        const panel_toggle = if (self.workspace_controls.panel_visible)
+                            GraphCanvas.loopDetailCollapseBounds(client.right)
+                        else
+                            GraphCanvas.loopDetailExpandBounds(client.right);
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toggle-panel", "control", if (self.workspace_controls.panel_visible) "Collapse loop panel" else "Expand loop panel", 4, panel_toggle, false, true) catch return;
+                        if (self.workspace_controls.panel_visible and selected_index < graph.nodes.items.len) {
+                            const detail_left = client.right - Tokens.loop_detail_width;
+                            const selected_node = graph.nodes.items[selected_index];
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-sparkline", selected_node.id, "Metric sparkline", 4, .{ .left = detail_left + 18, .top = client.bottom - 102, .right = client.right - 18, .bottom = client.bottom - 70 }, false, false) catch return;
+                            if (selected_node.created_at != null) {
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-start", selected_node.id, "Start time", 4, .{ .left = detail_left + 18, .top = client.bottom - 64, .right = client.right - 18, .bottom = client.bottom - 44 }, false, false) catch return;
+                            }
+                            if (selected_node.token_usage) |tokens| {
+                                const usage_name = std.fmt.allocPrint(self.allocator, "{d} tokens", .{tokens}) catch return;
+                                owned_identities.append(usage_name) catch {
+                                    self.allocator.free(usage_name);
+                                    return;
+                                };
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-usage", selected_node.id, usage_name, 4, .{ .left = detail_left + 18, .top = client.bottom - 44, .right = client.right - 18, .bottom = client.bottom - 24 }, false, false) catch return;
+                            }
                         }
                         for (workspace.layout.tabs.items, 0..) |tab, tab_index| {
                             const tab_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
@@ -3732,6 +3766,8 @@ pub const App = struct {
                 defer self.allocator.free(overview_identity);
                 const project_card_identity = std.fmt.allocPrint(self.allocator, "project-card:{s}", .{key}) catch return false;
                 defer self.allocator.free(project_card_identity);
+                const attention_identity = std.fmt.allocPrint(self.allocator, "attention-action:{s}", .{key}) catch return false;
+                defer self.allocator.free(attention_identity);
                 const reclaim_identity = std.fmt.allocPrint(self.allocator, "reclaim:{s}", .{key}) catch return false;
                 defer self.allocator.free(reclaim_identity);
                 const keep_identity = std.fmt.allocPrint(self.allocator, "keep:{s}", .{key}) catch return false;
@@ -3740,7 +3776,8 @@ pub const App = struct {
                 defer self.allocator.free(loop_disclosure_identity);
                 if (Accessibility.worktreeIdentityPayload(sidebar_identity) == payload or
                     Accessibility.worktreeIdentityPayload(overview_identity) == payload or
-                    Accessibility.worktreeIdentityPayload(project_card_identity) == payload)
+                    Accessibility.worktreeIdentityPayload(project_card_identity) == payload or
+                    Accessibility.worktreeIdentityPayload(attention_identity) == payload)
                 {
                     if (target != null) return false;
                     target = .{ .loop = .{ .project_path = graph.project.path, .index = index } };
@@ -3798,6 +3835,7 @@ pub const App = struct {
             .{ .identity = "workspace-new-tab:control", .target = .workspace_new_tab },
             .{ .identity = "workspace-split-right:control", .target = .workspace_split_right },
             .{ .identity = "workspace-split-down:control", .target = .workspace_split_down },
+            .{ .identity = "workspace-toggle-panel:control", .target = .workspace_toggle_panel },
         };
         for (workspace_static) |candidate| {
             if (Accessibility.worktreeIdentityPayload(candidate.identity) == payload) {
@@ -3934,6 +3972,7 @@ pub const App = struct {
             .workspace_new_tab => self.handleAction(.new_tab),
             .workspace_split_right => self.handleAction(.split_horizontal),
             .workspace_split_down => self.handleAction(.split_vertical),
+            .workspace_toggle_panel => self.toggleWorkspaceDetailPanel(),
             .workspace_tab => |index| if (self.workspace) |workspace| workspace.selectTab(index) catch return false,
             .workspace_tab_close => |index| if (self.workspace) |workspace| workspace.closeTab(index) catch return false,
         }
@@ -4266,11 +4305,12 @@ fn onWindowMessage(
             if (app.workspace_controls.panel_visible or app.surface == .workspace) {
                 if (app.surface == .workspace) {
                     if (workspaceGraph(&app.model)) |graph| {
+                        const workspace_right = clientRight(hwnd) - (if (app.workspace_controls.panel_visible) Tokens.loop_detail_width else 0);
                         TerminalWorkspace.Workspace.paintWorkspaceToolbar(
                             hdc,
                             app.allocator,
                             if (app.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
-                            clientRight(hwnd) - Tokens.loop_detail_width,
+                            workspace_right,
                             graph.project.name,
                             graph.project.path,
                         );
@@ -4281,7 +4321,7 @@ fn onWindowMessage(
                                 hdc,
                                 app.allocator,
                                 if (app.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
-                                clientRight(hwnd) - Tokens.loop_detail_width,
+                                workspace_right,
                                 graph.project.name,
                                 node.title,
                                 node.loop_type,
@@ -4294,10 +4334,11 @@ fn onWindowMessage(
                                 isResolvedLoopState(node.state),
                             );
                         }
+                        if (!app.workspace_controls.panel_visible) GraphCanvas.paintLoopDetailExpandControl(hdc, app.allocator, clientRight(hwnd));
                     }
                 }
                 if (app.workspace) |workspace| workspace.paintChrome(hdc);
-                if (app.surface == .workspace) {
+                if (app.surface == .workspace and app.workspace_controls.panel_visible) {
                     if (workspaceGraph(&app.model)) |graph| {
                         const index = app.model.selectedIndex() orelse graph.nodes.items.len;
                         GraphCanvas.paintLoopDetailRail(
@@ -4565,6 +4606,12 @@ fn onWindowMessage(
             }
             if ((app.workspace_controls.panel_visible or app.surface == .workspace) and x >= rail_left and y >= workspace_top) {
                 if (app.surface == .workspace) {
+                    if (GraphCanvas.hitTestLoopDetailCollapse(x, y, client.right, app.workspace_controls.panel_visible)) {
+                        app.toggleWorkspaceDetailPanel();
+                        _ = c.InvalidateRect(hwnd, null, 0);
+                        result.* = 0;
+                        return true;
+                    }
                     if (workspaceGraph(&app.model)) |graph| {
                         const index = app.model.selectedIndex() orelse graph.nodes.items.len;
                         if (index < graph.nodes.items.len) {
@@ -4701,6 +4748,9 @@ fn onWindowMessage(
                                 .keep => app.keepWorktreeOffer(path),
                             }
                             _ = c.InvalidateRect(hwnd, null, 0);
+                        } else if (GraphCanvas.hitTestAttentionAction(graph.nodes.items, graph.edges.items, x, y, &app.canvas)) |index| {
+                            _ = app.selectNodeIndex(index);
+                            app.openSelectedNode();
                         } else if (GraphCanvas.hitTestConnector(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
                             if (app.edge_drag_source_id.len != 0) app.allocator.free(app.edge_drag_source_id);
                             app.edge_drag_source_id = app.allocator.dupe(u8, graph.nodes.items[index].id) catch &.{};

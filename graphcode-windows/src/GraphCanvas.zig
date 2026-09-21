@@ -279,6 +279,7 @@ pub const OverviewHit = struct { graph_index: usize, node_index: usize };
 pub const OverviewLaneAction = enum { open_project, inspect_worktrees };
 pub const ZoomControl = enum { out, actual, in, fit };
 pub const HeaderAction = enum { review_attention, inspect_worktrees, jump, toggle_panel };
+pub const AttentionAction = enum { reply, inspect };
 pub const ReclaimAction = enum { reclaim, keep };
 pub const ReclaimHit = struct { node_index: usize, action: ReclaimAction };
 
@@ -288,6 +289,24 @@ pub fn attentionRailBounds(width: i32) c.RECT {
 
 pub fn hitTestAttentionRail(x: i32, y: i32, width: i32) bool {
     return insideGraph(x, y, attentionRailBounds(width));
+}
+
+pub fn loopDetailCollapseBounds(client_right: i32) c.RECT {
+    return rect(client_right - Tokens.loop_detail_width + 172, Tokens.header_height + 12, client_right - 18, Tokens.header_height + 34);
+}
+
+pub fn loopDetailExpandBounds(client_right: i32) c.RECT {
+    return rect(client_right - 104, Tokens.header_height + 8, client_right - 14, Tokens.header_height + 30);
+}
+
+pub fn hitTestLoopDetailCollapse(x: i32, y: i32, client_right: i32, visible: bool) bool {
+    return insideGraph(x, y, if (visible) loopDetailCollapseBounds(client_right) else loopDetailExpandBounds(client_right));
+}
+
+pub fn paintLoopDetailExpandControl(hdc: c.HDC, allocator: std.mem.Allocator, client_right: i32) void {
+    const bounds = loopDetailExpandBounds(client_right);
+    fill(hdc, bounds, 0x00303035);
+    drawTextRect(hdc, allocator, "Loop panel", bounds, 10, 0x00D8D8DE, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
 }
 
 pub fn renderBounds(client_right: i32, client_bottom: i32, controls: WorkspaceControls.State) RenderBounds {
@@ -413,8 +432,7 @@ pub fn paint(
             hdc,
             allocator,
             model,
-            rect(0, client.bottom - workspace_height - Tokens.activity_strip_height,
-                client.right, client.bottom - workspace_height),
+            rect(0, client.bottom - workspace_height - Tokens.activity_strip_height, client.right, client.bottom - workspace_height),
         );
     }
 }
@@ -458,62 +476,62 @@ pub fn hitTestCompositeBack(model: *const GraphModel.Model, x: i32, y: i32, boun
 }
 
 fn drawOverview(
-        hdc: c.HDC,
-        allocator: std.mem.Allocator,
-        model: *const GraphModel.Model,
-        bounds: c.RECT,
-        state: *const CanvasState,
-    ) void {
-        if (model.graphs.items.len == 0) {
-            const center_y = bounds.top + @divTrunc(bounds.bottom - bounds.top, 2) - 60;
-            drawTextRect(hdc, allocator, "Nothing running yet", rect(bounds.left + 40, center_y, bounds.right - 40, center_y + 34), 20, 0x00F2F2F2, c.DT_CENTER | c.DT_SINGLELINE);
-            drawTextRect(hdc, allocator, "Loops from every folder you open show up here, wired to how they run.", rect(bounds.left + 100, center_y + 40, bounds.right - 100, center_y + 86), 13, 0x00A8A8AE, c.DT_CENTER | c.DT_WORDBREAK);
-            return;
-        }
-        for (model.graphs.items, 0..) |graph, graph_index| {
-            const lane = overviewLaneBounds(model, graph_index, bounds, state);
-            roundedCard(hdc, lane, 0x001D1D21, false);
-            drawText(hdc, allocator, graph.project.name, lane.left + scaledValue(18, state.zoom), lane.top + scaledValue(16, state.zoom), scaledValue(14, state.zoom), 0x00E8E8E8);
-            const open = rect(lane.right - scaledValue(132, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(76, state.zoom), lane.top + scaledValue(30, state.zoom));
-            const worktrees = rect(lane.right - scaledValue(72, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(18, state.zoom), lane.top + scaledValue(30, state.zoom));
-            fill(hdc, open, 0x002D2418);
-            fill(hdc, worktrees, 0x00352B1C);
-            drawTextRect(hdc, allocator, "Open", open, scaledValue(9, state.zoom), 0x00E6E6E6, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
-            drawTextRect(hdc, allocator, "Worktrees", worktrees, scaledValue(8, state.zoom), 0x00FFCD7A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
-            var index: usize = 0;
-            while (index < graph.nodes.items.len) : (index += 1) {
-                const card = overviewCardBounds(model, graph_index, index, bounds, state);
-                roundedCard(hdc, card, 0x00262626, false);
-                fill(hdc, rect(card.left, card.top, card.left + scaledValue(4, state.zoom), card.bottom), loopTypeColor(graph.nodes.items[index].loop_type));
-                drawText(hdc, allocator, graph.nodes.items[index].title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(16, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF);
-                drawText(hdc, allocator, graph.nodes.items[index].state, card.left + scaledValue(14, state.zoom), card.top + scaledValue(46, state.zoom), scaledValue(10, state.zoom), 0x00B8B8B8);
-            }
+    hdc: c.HDC,
+    allocator: std.mem.Allocator,
+    model: *const GraphModel.Model,
+    bounds: c.RECT,
+    state: *const CanvasState,
+) void {
+    if (model.graphs.items.len == 0) {
+        const center_y = bounds.top + @divTrunc(bounds.bottom - bounds.top, 2) - 60;
+        drawTextRect(hdc, allocator, "Nothing running yet", rect(bounds.left + 40, center_y, bounds.right - 40, center_y + 34), 20, 0x00F2F2F2, c.DT_CENTER | c.DT_SINGLELINE);
+        drawTextRect(hdc, allocator, "Loops from every folder you open show up here, wired to how they run.", rect(bounds.left + 100, center_y + 40, bounds.right - 100, center_y + 86), 13, 0x00A8A8AE, c.DT_CENTER | c.DT_WORDBREAK);
+        return;
+    }
+    for (model.graphs.items, 0..) |graph, graph_index| {
+        const lane = overviewLaneBounds(model, graph_index, bounds, state);
+        roundedCard(hdc, lane, 0x001D1D21, false);
+        drawText(hdc, allocator, graph.project.name, lane.left + scaledValue(18, state.zoom), lane.top + scaledValue(16, state.zoom), scaledValue(14, state.zoom), 0x00E8E8E8);
+        const open = rect(lane.right - scaledValue(132, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(76, state.zoom), lane.top + scaledValue(30, state.zoom));
+        const worktrees = rect(lane.right - scaledValue(72, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(18, state.zoom), lane.top + scaledValue(30, state.zoom));
+        fill(hdc, open, 0x002D2418);
+        fill(hdc, worktrees, 0x00352B1C);
+        drawTextRect(hdc, allocator, "Open", open, scaledValue(9, state.zoom), 0x00E6E6E6, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+        drawTextRect(hdc, allocator, "Worktrees", worktrees, scaledValue(8, state.zoom), 0x00FFCD7A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+        var index: usize = 0;
+        while (index < graph.nodes.items.len) : (index += 1) {
+            const card = overviewCardBounds(model, graph_index, index, bounds, state);
+            roundedCard(hdc, card, 0x00262626, false);
+            fill(hdc, rect(card.left, card.top, card.left + scaledValue(4, state.zoom), card.bottom), loopTypeColor(graph.nodes.items[index].loop_type));
+            drawText(hdc, allocator, graph.nodes.items[index].title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(16, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF);
+            drawText(hdc, allocator, graph.nodes.items[index].state, card.left + scaledValue(14, state.zoom), card.top + scaledValue(46, state.zoom), scaledValue(10, state.zoom), 0x00B8B8B8);
         }
     }
+}
 
 fn drawQuickChats(
-        hdc: c.HDC,
-        allocator: std.mem.Allocator,
-        model: *const GraphModel.Model,
-        bounds: c.RECT,
-        state: *const CanvasState,
-    ) void {
-        if (model.quick_chats.items.len == 0) {
-            const center_y = bounds.top + @divTrunc(bounds.bottom - bounds.top, 2) - 60;
-            drawTextRect(hdc, allocator, "No chats yet", rect(bounds.left + 40, center_y, bounds.right - 40, center_y + 34), 20, 0x00F2F2F2, c.DT_CENTER | c.DT_SINGLELINE);
-            drawTextRect(hdc, allocator, "A quick chat is a bare session for questions that are not a loop's work.", rect(bounds.left + 100, center_y + 40, bounds.right - 100, center_y + 86), 13, 0x00A8A8AE, c.DT_CENTER | c.DT_WORDBREAK);
-            return;
-        }
-        const rows = (model.quick_chats.items.len + 2) / 3;
-        const band = transformedRect(bounds, state, 24, 34, @max(760, bounds.right - bounds.left - 48), @as(i32, @intCast(rows * 104 + 32)));
-        roundedCard(hdc, band, 0x001D1D21, false);
-        for (model.quick_chats.items, 0..) |chat, index| {
-            const card = quickChatCardBounds(index, bounds, state);
-            roundedCard(hdc, card, 0x00262626, false);
-            fill(hdc, rect(card.left, card.top, card.left + scaledValue(4, state.zoom), card.bottom), 0x007A7A7A);
-            drawText(hdc, allocator, chat.title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(12, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF);
-            drawText(hdc, allocator, if (std.mem.eql(u8, chat.backend, "claudeCode")) "chat" else chat.backend, card.left + scaledValue(14, state.zoom), card.top + scaledValue(37, state.zoom), scaledValue(10, state.zoom), 0x009A9A9A);
-        }
+    hdc: c.HDC,
+    allocator: std.mem.Allocator,
+    model: *const GraphModel.Model,
+    bounds: c.RECT,
+    state: *const CanvasState,
+) void {
+    if (model.quick_chats.items.len == 0) {
+        const center_y = bounds.top + @divTrunc(bounds.bottom - bounds.top, 2) - 60;
+        drawTextRect(hdc, allocator, "No chats yet", rect(bounds.left + 40, center_y, bounds.right - 40, center_y + 34), 20, 0x00F2F2F2, c.DT_CENTER | c.DT_SINGLELINE);
+        drawTextRect(hdc, allocator, "A quick chat is a bare session for questions that are not a loop's work.", rect(bounds.left + 100, center_y + 40, bounds.right - 100, center_y + 86), 13, 0x00A8A8AE, c.DT_CENTER | c.DT_WORDBREAK);
+        return;
+    }
+    const rows = (model.quick_chats.items.len + 2) / 3;
+    const band = transformedRect(bounds, state, 24, 34, @max(760, bounds.right - bounds.left - 48), @as(i32, @intCast(rows * 104 + 32)));
+    roundedCard(hdc, band, 0x001D1D21, false);
+    for (model.quick_chats.items, 0..) |chat, index| {
+        const card = quickChatCardBounds(index, bounds, state);
+        roundedCard(hdc, card, 0x00262626, false);
+        fill(hdc, rect(card.left, card.top, card.left + scaledValue(4, state.zoom), card.bottom), 0x007A7A7A);
+        drawText(hdc, allocator, chat.title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(12, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF);
+        drawText(hdc, allocator, if (std.mem.eql(u8, chat.backend, "claudeCode")) "chat" else chat.backend, card.left + scaledValue(14, state.zoom), card.top + scaledValue(37, state.zoom), scaledValue(10, state.zoom), 0x009A9A9A);
+    }
 }
 
 fn overviewLaneHeight(node_count: usize) i32 {
@@ -826,9 +844,20 @@ fn attentionRail(
     const rail = attentionRailBounds(width);
     fill(hdc, rail, 0x002D2418);
     drawText(hdc, allocator, label, Tokens.sidebar_width + 34, Tokens.header_height + 21, 12, 0x00FFCD7A);
-    const oldest = if (model.attention_entries.items.len != 0) model.attention_entries.items[0].node.title else "none";
+    var age_buffer: [96]u8 = undefined;
+    const oldest = if (model.attention_entries.items.len != 0)
+        attentionAgeLabel(&age_buffer, model.attention_entries.items[0].node)
+    else
+        "none";
     drawText(hdc, allocator, "Review", Tokens.sidebar_width + 210, Tokens.header_height + 21, 11, 0x00E6E6E6);
     drawText(hdc, allocator, oldest, Tokens.sidebar_width + 274, Tokens.header_height + 21, 10, 0x00B8B8B8);
+}
+
+fn attentionAgeLabel(buffer: []u8, node: GraphModel.Node) []const u8 {
+    if (node.created_at) |created| {
+        return std.fmt.bufPrint(buffer, "oldest {s}: {s}", .{ elapsedLabel(created), node.title }) catch node.title;
+    }
+    return node.title;
 }
 
 fn activityStrip(
@@ -969,7 +998,7 @@ fn edgeKindColor(kind: []const u8) u32 {
 fn edgeLabel(buffer: []u8, edge: GraphModel.Edge) []const u8 {
     const kind = if (edge.kind.len == 0) "handoff" else edge.kind;
     if (edge.fire_count != 0)
-        return std.fmt.bufPrint(buffer, "{s} · {s} · fired {d}", .{ kind, edge.condition, edge.fire_count }) catch kind;
+        return std.fmt.bufPrint(buffer, "{s} · {s} · retry ×{d}", .{ kind, edge.condition, edge.fire_count }) catch kind;
     if (!std.mem.eql(u8, edge.condition, "always"))
         return std.fmt.bufPrint(buffer, "{s} · {s}", .{ kind, edge.condition }) catch kind;
     return kind;
@@ -1055,18 +1084,56 @@ fn drawNode(
         if (role == .unwired and !reclaim_offer)
             drawText(hdc, allocator, "No connections · right-click to recover", x + scaled(14, state), y + layout.state_y + scaled(43, state), scaled(8, state), 0x00FFCD7A);
     }
-    if (layout.show_attention) drawText(hdc, allocator, "NEEDS YOU", bounds.right - scaled(88, state), y + scaled(8, state), scaled(9, state), 0x00FFB340);
+    if (layout.show_attention) {
+        drawText(hdc, allocator, "NEEDS YOU", bounds.right - scaled(88, state), y + scaled(8, state), scaled(9, state), 0x00FFB340);
+        const action = attentionActionBounds(bounds, state);
+        fill(hdc, action, 0x00FF9F0A);
+        drawTextRect(hdc, allocator, attentionActionLabel(node), action, scaled(9, state), 0x00241703, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+    }
     if (state.hovered_connector == index) {
         const connector = connectorPositionForIndex(nodes, index, true, state);
         fill(hdc, rect(connector.x - connectorRadius(state), connector.y - connectorRadius(state), connector.x + connectorRadius(state), connector.y + connectorRadius(state)), 0x00FFCD7A);
         drawTextRect(hdc, allocator, "+", rect(connector.x - scaled(8, state), connector.y - scaled(8, state), connector.x + scaled(8, state), connector.y + scaled(8, state)), scaled(12, state), 0x00262626, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
     }
+
     if (reclaim_offer) {
         const offer = reclaimOfferBounds(bounds);
         fill(hdc, offer.reclaim, 0x003A3A44);
         drawTextRect(hdc, allocator, "Reclaim", offer.reclaim, scaled(9, state), 0x00E6E6E6, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
         drawTextRect(hdc, allocator, "Keep", offer.keep, scaled(9, state), 0x008A8A8A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
     }
+}
+
+pub fn attentionActionLabel(node: GraphModel.Node) []const u8 {
+    return switch (attentionActionForNode(node)) {
+        .reply => "Reply",
+        .inspect => "Inspect",
+    };
+}
+
+pub fn attentionActionForNode(node: GraphModel.Node) AttentionAction {
+    if (std.mem.eql(u8, node.state, "running") and std.mem.eql(u8, node.presence, "awaitingInput")) return .reply;
+    return .inspect;
+}
+
+pub fn attentionActionBounds(bounds: c.RECT, state: *const CanvasState) c.RECT {
+    return rect(bounds.right - scaled(78, state), bounds.bottom - scaled(28, state), bounds.right - scaled(12, state), bounds.bottom - scaled(8, state));
+}
+
+pub fn hitTestAttentionAction(
+    nodes: []const GraphModel.Node,
+    edges: []const GraphModel.Edge,
+    x: i32,
+    y: i32,
+    state: *const CanvasState,
+) ?usize {
+    var index = nodes.len;
+    while (index > 0) {
+        index -= 1;
+        if (!needsAttention(nodes[index], nodes, edges)) continue;
+        if (insideGraph(x, y, attentionActionBounds(nodeBounds(index, state), state))) return index;
+    }
+    return null;
 }
 
 const ReclaimOfferBounds = struct { reclaim: c.RECT, keep: c.RECT };
@@ -1120,13 +1187,82 @@ fn nodePrimaryDetail(node: GraphModel.Node) []const u8 {
 }
 
 fn nodeMetadata(buffer: []u8, node: GraphModel.Node) []const u8 {
-    if (node.worktree_branch.len != 0 and node.model_tier.len != 0)
-        return std.fmt.bufPrint(buffer, "{s} · {s}", .{ node.worktree_branch, node.model_tier }) catch node.worktree_branch;
-    if (node.worktree_branch.len != 0) return node.worktree_branch;
-    if (node.model_tier.len != 0) return node.model_tier;
+    var stream = std.io.fixedBufferStream(buffer);
+    const writer = stream.writer();
+    var wrote = false;
+    if (node.metric_passes != 0) {
+        writer.print("pass {d}", .{node.metric_passes}) catch return buffer[0..stream.pos];
+        wrote = true;
+    }
+    if (node.metric_sample_count >= 2) {
+        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
+        writeMetricChange(writer, node) catch return buffer[0..stream.pos];
+        wrote = true;
+    }
+    if (node.backend.len != 0) {
+        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
+        writer.writeAll(node.backend) catch return buffer[0..stream.pos];
+        wrote = true;
+    }
+
+    if (node.created_at) |created| {
+        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
+        writer.writeAll(elapsedLabel(created)) catch return buffer[0..stream.pos];
+        wrote = true;
+    }
+    if (node.token_usage) |tokens| {
+        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
+        formatTokenUsage(writer, tokens) catch return buffer[0..stream.pos];
+        wrote = true;
+    }
+    if (node.worktree_branch.len != 0) {
+        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
+        writer.writeAll(node.worktree_branch) catch return buffer[0..stream.pos];
+        wrote = true;
+    }
+    if (node.model_tier.len != 0) {
+        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
+        writer.writeAll(node.model_tier) catch return buffer[0..stream.pos];
+        wrote = true;
+    }
     if (node.metric_command.len != 0)
-        return std.fmt.bufPrint(buffer, "metric · {s}", .{if (node.metric_direction.len != 0) node.metric_direction else "configured"}) catch "metric";
-    return "";
+        if (!wrote) return std.fmt.bufPrint(buffer, "metric · {s}", .{if (node.metric_direction.len != 0) node.metric_direction else "configured"}) catch "metric";
+    return buffer[0..stream.pos];
+}
+
+fn writeMetricChange(writer: anytype, node: GraphModel.Node) !void {
+    const first = node.metric_samples[0];
+    const last = node.metric_samples[@as(usize, node.metric_sample_count) - 1];
+    const gain = if (std.mem.eql(u8, node.metric_direction, "minimize")) first - last else last - first;
+    try writer.writeAll("metric ");
+    try writeMetricNumber(writer, first);
+    try writer.writeAll(" -> ");
+    try writeMetricNumber(writer, last);
+    try writer.writeAll(if (gain > 0) " better" else if (gain < 0) " worse" else " flat");
+}
+
+fn writeMetricNumber(writer: anytype, value: f64) !void {
+    if (@abs(value) < 1_000_000 and value == @round(value))
+        return writer.print("{d}", .{@as(i64, @intFromFloat(value))});
+    return writer.print("{d:.2}", .{value});
+}
+
+fn elapsedLabel(created_at: u64) []const u8 {
+    const normalized = if (created_at < 1_000_000_000_000) created_at *| 1000 else created_at;
+    const now = std.time.milliTimestamp();
+    const created: i64 = @intCast(@min(normalized, @as(u64, std.math.maxInt(i64))));
+    const elapsed_ms: u64 = if (now > created) @intCast(now - created) else 0;
+    const seconds = elapsed_ms / 1000;
+    if (seconds < 60) return "0m";
+    if (seconds < 3600) return "<1h";
+    if (seconds < 86_400) return ">1h";
+    return ">1d";
+}
+
+fn formatTokenUsage(writer: anytype, tokens: u32) !void {
+    if (tokens >= 1_000_000) return writer.print("{d}M tok", .{tokens / 1_000_000});
+    if (tokens >= 1000) return writer.print("{d}k tok", .{tokens / 1000});
+    return writer.print("{d} tok", .{tokens});
 }
 
 pub fn nodeBounds(index: usize, state: *const CanvasState) c.RECT {
@@ -1334,6 +1470,9 @@ pub fn paintLoopDetailRail(
     fill(hdc, rect(left, top, client_right, client_bottom), 0x0028282C);
     fill(hdc, rect(left, top, left + 1, client_bottom), 0x0045454B);
     drawText(hdc, allocator, "LOOP MAP", left + 18, top + 16, 11, 0x009898A0);
+    const collapse = loopDetailCollapseBounds(client_right);
+    fill(hdc, collapse, 0x00303035);
+    drawTextRect(hdc, allocator, "Collapse", collapse, 10, 0x00D8D8DE, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
 
     const map_top = top + 44;
     roundedCard(hdc, rect(left + 18, map_top, client_right - 18, map_top + 72), 0x00303035, false);
@@ -1388,14 +1527,84 @@ pub fn paintLoopDetailRail(
         y += 34;
     }
 
-    const footer_top = @max(y + 18, client_bottom - 148);
+    const footer_top = @max(y + 18, client_bottom - 188);
     fill(hdc, rect(left + 18, footer_top, client_right - 18, footer_top + 1), 0x0045454B);
     drawText(hdc, allocator, "DETAIL", left + 18, footer_top + 14, 11, 0x009898A0);
     const branch = if (node.worktree_branch.len != 0) node.worktree_branch else if (node.worktree_path.len != 0) node.worktree_path else "Primary checkout";
     drawText(hdc, allocator, branch, left + 18, footer_top + 38, 12, 0x00D8D8DE);
     const metric = if (node.metric_command.len != 0) node.metric_command else if (node.goal_summary.len != 0) node.goal_summary else "No metric configured";
     drawText(hdc, allocator, metric, left + 18, footer_top + 62, 12, 0x009898A0);
-    if (node.model_tier.len != 0) drawText(hdc, allocator, node.model_tier, left + 18, footer_top + 86, 12, 0x007AB8FF);
+    paintMetricSparkline(hdc, node, rect(left + 18, footer_top + 86, client_right - 18, footer_top + 118));
+    var meta: [160]u8 = undefined;
+    const meta_text = loopDetailFooter(&meta, node);
+    if (meta_text.len != 0) drawText(hdc, allocator, meta_text, left + 18, footer_top + 124, 11, 0x007AB8FF);
+    if (node.model_tier.len != 0) drawText(hdc, allocator, node.model_tier, left + 18, footer_top + 148, 12, 0x007AB8FF);
+}
+
+fn loopDetailFooter(buffer: []u8, node: GraphModel.Node) []const u8 {
+    var stream = std.io.fixedBufferStream(buffer);
+    const writer = stream.writer();
+    var wrote = false;
+    if (node.created_at) |created| {
+        writer.writeAll("started ") catch return buffer[0..stream.pos];
+        writer.writeAll(startTimeLabel(created)) catch return buffer[0..stream.pos];
+        wrote = true;
+    }
+    if (node.token_usage) |tokens| {
+        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
+        formatTokenUsage(writer, tokens) catch return buffer[0..stream.pos];
+        wrote = true;
+    }
+    if (node.backend.len != 0) {
+        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
+        writer.writeAll(node.backend) catch return buffer[0..stream.pos];
+    }
+    return buffer[0..stream.pos];
+}
+
+fn startTimeLabel(created_at: u64) []const u8 {
+    const normalized = if (created_at < 1_000_000_000_000) created_at *| 1000 else created_at;
+    const now = std.time.milliTimestamp();
+    const created: i64 = @intCast(@min(normalized, @as(u64, std.math.maxInt(i64))));
+    const elapsed_ms: u64 = if (now > created) @intCast(now - created) else 0;
+    const minutes = elapsed_ms / 1000 / 60;
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return "<1h ago";
+    if (minutes < 1440) return "today";
+    return "earlier";
+}
+
+fn paintMetricSparkline(hdc: c.HDC, node: GraphModel.Node, bounds: c.RECT) void {
+    fill(hdc, bounds, 0x00222226);
+    if (node.metric_sample_count == 0) {
+        drawTextRect(hdc, std.heap.page_allocator, "No metric samples", bounds, 10, 0x007A7A82, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+        return;
+    }
+    const samples = node.metric_samples[0..@as(usize, node.metric_sample_count)];
+    var min = samples[0];
+    var max = samples[0];
+    for (samples) |value| {
+        min = @min(min, value);
+        max = @max(max, value);
+    }
+    const range = if (max > min) max - min else 1;
+    const count: i32 = @intCast(samples.len);
+    var previous_x = bounds.left + 8;
+    var previous_y = bounds.bottom - 8 - @as(i32, @intFromFloat(((samples[0] - min) / range) * @as(f64, @floatFromInt(bounds.bottom - bounds.top - 16))));
+    const pen = c.CreatePen(c.PS_SOLID, 2, 0x007AB8FF);
+    if (pen == null) return;
+    const old = c.SelectObject(hdc, pen);
+    var index: usize = 1;
+    while (index < samples.len) : (index += 1) {
+        const x = bounds.left + 8 + @divTrunc(@as(i32, @intCast(index)) * @max(1, bounds.right - bounds.left - 16), @max(1, count - 1));
+        const y = bounds.bottom - 8 - @as(i32, @intFromFloat(((samples[index] - min) / range) * @as(f64, @floatFromInt(bounds.bottom - bounds.top - 16))));
+        _ = c.MoveToEx(hdc, previous_x, previous_y, null);
+        _ = c.LineTo(hdc, x, y);
+        previous_x = x;
+        previous_y = y;
+    }
+    _ = c.SelectObject(hdc, old);
+    _ = c.DeleteObject(pen);
 }
 
 fn paintRelationRow(
@@ -1488,8 +1697,18 @@ fn drawTextRect(
     const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text_value) catch return;
     defer allocator.free(wide);
     const font = c.CreateFontW(
-        -size, 0, 0, 0, c.FW_NORMAL, 0, 0, 0, c.DEFAULT_CHARSET,
-        c.OUT_DEFAULT_PRECIS, c.CLIP_DEFAULT_PRECIS, c.CLEARTYPE_QUALITY,
+        -size,
+        0,
+        0,
+        0,
+        c.FW_NORMAL,
+        0,
+        0,
+        0,
+        c.DEFAULT_CHARSET,
+        c.OUT_DEFAULT_PRECIS,
+        c.CLIP_DEFAULT_PRECIS,
+        c.CLEARTYPE_QUALITY,
         c.DEFAULT_PITCH | c.FF_DONTCARE,
         std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI").ptr,
     );
@@ -1721,6 +1940,53 @@ test "loop card detail prioritizes goal and preserves metadata" {
     try std.testing.expectEqualStrings("All tests pass", nodePrimaryDetail(node));
     var buffer: [128]u8 = undefined;
     try std.testing.expectEqualStrings("feature/parity · capable", nodeMetadata(&buffer, node));
+}
+
+test "loop card metadata includes backend elapsed and token usage when reported" {
+    const node = GraphModel.Node{
+        .id = @constCast("node"),
+        .title = @constCast("Live"),
+        .loop_type = @constCast("goalBased"),
+        .state = @constCast("running"),
+        .activity = @constCast(""),
+        .presence = @constCast("busy"),
+        .backend = @constCast("copilotCLI"),
+        .created_at = 0,
+        .metric_passes = 3,
+        .metric_samples = [_]f64{ 1, 2, 3, 0, 0, 0, 0, 0 },
+        .metric_sample_count = 3,
+        .metric_direction = @constCast("maximize"),
+        .token_usage = 12_345,
+    };
+    var buffer: [128]u8 = undefined;
+    const metadata = nodeMetadata(&buffer, node);
+    try std.testing.expect(std.mem.indexOf(u8, metadata, "pass 3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, metadata, "metric 1 -> 3 better") != null);
+    try std.testing.expect(std.mem.indexOf(u8, metadata, "copilotCLI") != null);
+    try std.testing.expect(std.mem.indexOf(u8, metadata, "12k tok") != null);
+}
+
+test "attention cards expose reason-specific primary actions" {
+    const awaiting = GraphModel.Node{
+        .id = @constCast("awaiting"),
+        .title = @constCast("Question"),
+        .loop_type = @constCast("turnBased"),
+        .state = @constCast("running"),
+        .activity = @constCast(""),
+        .presence = @constCast("awaitingInput"),
+    };
+    const failed = GraphModel.Node{
+        .id = @constCast("failed"),
+        .title = @constCast("Broken"),
+        .loop_type = @constCast("goalBased"),
+        .state = @constCast("failed"),
+        .activity = @constCast(""),
+        .presence = @constCast("idle"),
+    };
+    try std.testing.expectEqual(AttentionAction.reply, attentionActionForNode(awaiting));
+    try std.testing.expectEqualStrings("Reply", attentionActionLabel(awaiting));
+    try std.testing.expectEqual(AttentionAction.inspect, attentionActionForNode(failed));
+    try std.testing.expectEqualStrings("Inspect", attentionActionLabel(failed));
 }
 
 test "unwired roles require explicit session entry acknowledgement" {
