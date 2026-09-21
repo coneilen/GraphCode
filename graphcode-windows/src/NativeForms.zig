@@ -598,17 +598,25 @@ fn registerClass() !void {
 // every native form/sheet (node, edge, update, jump, worktree policy/sweep)
 // paints with the app's dark native language instead of default Win32 gray.
 var dark_field_brush: c.HBRUSH = null;
+var dark_panel_brush: c.HBRUSH = null;
 
 fn darkFieldBrush() c.HBRUSH {
     if (dark_field_brush == null) dark_field_brush = c.CreateSolidBrush(Tokens.dialog_field_background);
     return dark_field_brush;
 }
 
+// WM_ERASEBKGND fires repeatedly while a form lays out and repaints (every
+// moved control can trigger one), so the panel brush is created once and
+// reused rather than allocated/freed on every erase.
+fn darkPanelBrush() c.HBRUSH {
+    if (dark_panel_brush == null) dark_panel_brush = c.CreateSolidBrush(Tokens.dialog_panel);
+    return dark_panel_brush;
+}
+
 fn fillFormBackground(hdc: c.HDC, bounds: c.RECT) void {
-    const brush = c.CreateSolidBrush(Tokens.dialog_panel);
+    const brush = darkPanelBrush();
     if (brush == null) return;
     _ = c.FillRect(hdc, &bounds, brush);
-    _ = c.DeleteObject(brush);
 }
 
 fn formCtlColorStatic(hwnd: c.HWND, wparam: c.WPARAM, validation_label: c.HWND) c.LRESULT {
