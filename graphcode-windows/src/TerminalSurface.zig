@@ -3,6 +3,7 @@ const c = @import("Win32.zig").c;
 const WorkspaceLayout = @import("WorkspaceLayout.zig");
 const Tokens = @import("DesignTokens.zig");
 const AppFont = @import("AppFont.zig");
+const GdiGradient = @import("GdiGradient.zig");
 
 const columns: usize = 120;
 const rows: usize = 40;
@@ -703,12 +704,19 @@ pub const Workspace = struct {
         };
 
         fillRect(hdc, tab_bar, Tokens.workspace_rail);
+        // Theme.tabBarGloss painted over the strip, lit from above; approximated as a
+        // vertical GradientFill (see Tokens.tab_bar_gloss_top/_bottom).
+        GdiGradient.fillVertical(hdc, tab_bar, Tokens.tab_bar_gloss_top, Tokens.tab_bar_gloss_bottom);
+        // Theme.tabBarHighlight -- the one-point specular line along the strip's top edge.
+        fillRect(hdc, .{ .left = tab_bar.left, .top = tab_bar.top, .right = tab_bar.right, .bottom = tab_bar.top + 1 }, Tokens.tab_bar_highlight);
         const controls_left = self.chromeControlsLeft();
         for (self.layout.tabs.items, 0..) |tab, index| {
             const left = self.layout_origin_x + @as(i32, @intCast(index)) * 120;
             if (left + 112 > controls_left) break;
             const bounds = tabBounds(self.layout_origin_x, self.layout_origin_y, index);
-            fillRect(hdc, bounds, if (index == self.layout.selected_tab) 0x00345D8C else 0x00262626);
+            // Selected: Theme.tabSelectedBackground. Was previously 0x00345D8C, an
+            // unintentional blue that did not correspond to any Theme.swift value.
+            fillRect(hdc, bounds, if (index == self.layout.selected_tab) Tokens.tab_selected_background else 0x00262626);
             fillRect(hdc, .{ .left = bounds.left + 8, .top = bounds.top + 9, .right = bounds.left + 14, .bottom = bounds.top + 15 }, tabIndicatorColor(self, tab));
             drawUtf8(hdc, tabLabel(tab, index), bounds.left + 19, bounds.top + 4, 10, 0x00E6E6E6);
             var shortcut: [16]u8 = undefined;
@@ -719,7 +727,9 @@ pub const Workspace = struct {
         const labels = [_][]const u8{ "New Tab", "Split R", "Split D" };
         for (labels, 0..) |label, index| {
             const bounds = chromeControlBounds(self.layout_origin_x, self.layout_origin_y, self.layout_width, index);
-            fillRect(hdc, bounds, 0x00262626);
+            // Theme.controlGloss: a small control on the tab strip, lit a step
+            // brighter than the strip itself so it reads as raised off it.
+            GdiGradient.fillVertical(hdc, bounds, Tokens.control_gloss_top, Tokens.control_gloss_bottom);
             drawUtf8(hdc, label, bounds.left + 7, bounds.top + 5, 10, 0x00D8D8D8);
         }
         for (self.surfaces, 0..) |slot, index| {
@@ -771,7 +781,8 @@ pub const Workspace = struct {
         resolved: bool,
     ) void {
         const top = Tokens.header_height;
-        fillRect(hdc, .{ .left = left, .top = top, .right = right, .bottom = top + Tokens.loop_bar_height }, 0x00222226);
+        // Theme.loopBar: lit like the tab strip, one step lighter.
+        GdiGradient.fillVertical(hdc, .{ .left = left, .top = top, .right = right, .bottom = top + Tokens.loop_bar_height }, Tokens.loop_bar_top, Tokens.loop_bar_bottom);
         fillRect(hdc, .{
             .left = left + 14,
             .top = top + 11,
@@ -797,7 +808,9 @@ pub const Workspace = struct {
             drawUtf8(hdc, "Stop loop", right - 184, top + 17, 10, 0x00D8D8DC);
         }
         drawUtf8(hdc, "Show in graph", right - 100, top + 17, 10, 0x008E8E93);
-        fillRect(hdc, .{ .left = left, .top = top + Tokens.loop_bar_height - 1, .right = right, .bottom = top + Tokens.loop_bar_height }, 0x00131315);
+        // Theme.tabBarShadowLine, blended flat over the loop bar's own bottom stop --
+        // the edge where the strip's gloss meets the terminal below it.
+        fillRect(hdc, .{ .left = left, .top = top + Tokens.loop_bar_height - 1, .right = right, .bottom = top + Tokens.loop_bar_height }, Tokens.tab_bar_shadow_line);
         _ = allocator;
     }
 

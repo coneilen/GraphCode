@@ -60,6 +60,7 @@ pub fn build(b: *std.Build) !void {
         "user32",
         "gdi32",
         "gdiplus",
+        "msimg32",
         "opengl32",
         "kernel32",
         "imm32",

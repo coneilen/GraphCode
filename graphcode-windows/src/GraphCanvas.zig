@@ -492,7 +492,7 @@ fn drawOverview(
     }
     for (model.graphs.items, 0..) |graph, graph_index| {
         const lane = overviewLaneBounds(model, graph_index, bounds, state);
-        roundedCard(hdc, lane, 0x001D1D21, false);
+        roundedCard(hdc, lane, Tokens.workspace_rail, false);
         drawText(hdc, allocator, graph.project.name, lane.left + scaledValue(18, state.zoom), lane.top + scaledValue(16, state.zoom), scaledValue(14, state.zoom), 0x00E8E8E8);
         const open = rect(lane.right - scaledValue(132, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(76, state.zoom), lane.top + scaledValue(30, state.zoom));
         const worktrees = rect(lane.right - scaledValue(72, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(18, state.zoom), lane.top + scaledValue(30, state.zoom));
@@ -503,7 +503,7 @@ fn drawOverview(
         var index: usize = 0;
         while (index < graph.nodes.items.len) : (index += 1) {
             const card = overviewCardBounds(model, graph_index, index, bounds, state);
-            roundedCard(hdc, card, 0x00262626, false);
+            roundedCard(hdc, card, Tokens.loop_card_bottom, false);
             fill(hdc, rect(card.left, card.top, card.left + scaledValue(4, state.zoom), card.bottom), loopTypeColor(graph.nodes.items[index].loop_type));
             drawText(hdc, allocator, graph.nodes.items[index].title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(16, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF);
             drawText(hdc, allocator, graph.nodes.items[index].state, card.left + scaledValue(14, state.zoom), card.top + scaledValue(46, state.zoom), scaledValue(10, state.zoom), 0x00B8B8B8);
@@ -526,10 +526,10 @@ fn drawQuickChats(
     }
     const rows = (model.quick_chats.items.len + 2) / 3;
     const band = transformedRect(bounds, state, 24, 34, @max(760, bounds.right - bounds.left - 48), @as(i32, @intCast(rows * 104 + 32)));
-    roundedCard(hdc, band, 0x001D1D21, false);
+    roundedCard(hdc, band, Tokens.workspace_rail, false);
     for (model.quick_chats.items, 0..) |chat, index| {
         const card = quickChatCardBounds(index, bounds, state);
-        roundedCard(hdc, card, 0x00262626, false);
+        roundedCard(hdc, card, Tokens.loop_card_bottom, false);
         fill(hdc, rect(card.left, card.top, card.left + scaledValue(4, state.zoom), card.bottom), 0x007A7A7A);
         drawText(hdc, allocator, chat.title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(12, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF);
         drawText(hdc, allocator, if (std.mem.eql(u8, chat.backend, "claudeCode")) "chat" else chat.backend, card.left + scaledValue(14, state.zoom), card.top + scaledValue(37, state.zoom), scaledValue(10, state.zoom), 0x009A9A9A);
@@ -1072,7 +1072,11 @@ fn drawNode(
     const y = bounds.top;
     const attention = needsAttention(node, nodes, edges);
     const selected_card = selected == index;
-    roundedCard(hdc, bounds, if (selected_card) 0x00345D8C else 0x00262626, selected_card);
+    // Theme.loopCard's bottom stop (#232326), used for both states: selection is
+    // carried by the border/ring (Tokens.canvas_selection via roundedCard's
+    // `selected` flag), matching mac -- there is no "selected node fill" color in
+    // Theme.swift. Previously an ad-hoc 0x00345D8C blue with no Theme.swift source.
+    roundedCard(hdc, bounds, Tokens.loop_card_bottom, selected_card);
     const stripe = loopTypeColor(node.loop_type);
     fill(hdc, rect(x, y, x + scaled(Tokens.loop_card_stripe, state), y + bounds.bottom - y), stripe);
     const role = nodeRole(edges, node.id, declared_entries);
@@ -1668,7 +1672,9 @@ fn fill(hdc: c.HDC, bounds: c.RECT, color: u32) void {
 
 fn roundedCard(hdc: c.HDC, bounds: c.RECT, color: u32, selected: bool) void {
     const border_width: f32 = if (selected) 2 else 1;
-    const border_color: u32 = if (selected) 0x007AB8FF else 0x00383838;
+    // Selected: Tokens.canvas_selection. Unselected: Tokens.loop_card_border, i.e.
+    // macOS's Theme.loopCardBorder (white 9% over the card fill) pre-blended flat.
+    const border_color: u32 = if (selected) Tokens.canvas_selection else Tokens.loop_card_border;
     // Anti-aliased path first: matches macOS's smoothly-curved node cards
     // and selection rings instead of GDI's jagged RoundRect corners.
     if (GdiplusAA.drawRoundedRect(hdc, bounds, 12, color, border_color, border_width)) return;
