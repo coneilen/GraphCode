@@ -686,34 +686,47 @@ fn drawTile(state: *DialogState, tile_index: usize, draw_item: *c.DRAWITEMSTRUCT
     if ((draw_item.itemState & c.ODS_FOCUS) != 0) _ = c.DrawFocusRect(draw_item.hDC, &bounds);
 }
 
+// Teaching-tile title/description fonts are painted repeatedly (every
+// WM_DRAWITEM redraw of every tile), so they are created lazily once per
+// process and reused rather than created/destroyed on every paint. This
+// keeps tile-heavy dialogs (e.g. Node creation) as cheap to open and redraw
+// as the plain-control forms they replaced.
+var tile_bold_font: c.HFONT = null;
+var tile_regular_font: c.HFONT = null;
+
+fn cachedTileFont(size: i32, bold: bool) c.HFONT {
+    const slot = if (bold) &tile_bold_font else &tile_regular_font;
+    if (slot.* == null) {
+        slot.* = c.CreateFontW(
+            -size,
+            0,
+            0,
+            0,
+            if (bold) c.FW_SEMIBOLD else c.FW_NORMAL,
+            0,
+            0,
+            0,
+            c.DEFAULT_CHARSET,
+            c.OUT_DEFAULT_PRECIS,
+            c.CLIP_DEFAULT_PRECIS,
+            c.CLEARTYPE_QUALITY,
+            c.DEFAULT_PITCH | c.FF_DONTCARE,
+            std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI").ptr,
+        );
+    }
+    return slot.*;
+}
+
 fn formDrawText(hdc: c.HDC, text: []const u8, bounds_value: c.RECT, size: i32, color: u32, bold: bool) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.c_allocator, text) catch return;
     defer std.heap.c_allocator.free(wide);
-    const font = c.CreateFontW(
-        -size,
-        0,
-        0,
-        0,
-        if (bold) c.FW_SEMIBOLD else c.FW_NORMAL,
-        0,
-        0,
-        0,
-        c.DEFAULT_CHARSET,
-        c.OUT_DEFAULT_PRECIS,
-        c.CLIP_DEFAULT_PRECIS,
-        c.CLEARTYPE_QUALITY,
-        c.DEFAULT_PITCH | c.FF_DONTCARE,
-        std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI").ptr,
-    );
+    const font = cachedTileFont(size, bold);
     const old_font = if (font != null) c.SelectObject(hdc, font) else null;
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var bounds = bounds_value;
     _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, c.DT_LEFT | c.DT_WORDBREAK | c.DT_END_ELLIPSIS);
-    if (font != null) {
-        _ = c.SelectObject(hdc, old_font);
-        _ = c.DeleteObject(font);
-    }
+    if (font != null) _ = c.SelectObject(hdc, old_font);
 }
 
 fn configureFields(state: *DialogState) void {
