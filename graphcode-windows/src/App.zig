@@ -24,6 +24,7 @@ const ProductSettings = @import("WindowsProductSettings.zig");
 const RepositoryDialogs = @import("WindowsRepositoryDialogs.zig");
 const Onboarding = @import("WindowsOnboarding.zig");
 const WindowsUpdates = @import("WindowsUpdates.zig");
+const UpdateOfferDialog = @import("UpdateOfferDialog.zig");
 const WorktreeDialog = @import("WorktreeDialog.zig");
 const Accessibility = @import("Accessibility.zig");
 const Navigation = @import("Navigation.zig");
@@ -435,6 +436,7 @@ pub const App = struct {
             if (self.workspace) |workspace| try workspace.startInputWorker();
         }
         self.layoutWorkspace();
+        if (envFlag("GRAPHCODE_UIA_SHOW_UPDATE")) self.showCurrentUpdateOffer();
         if (!envFlag("GRAPHCODE_UIA_UPDATE_AVAILABLE")) self.requestUpdateCheck(false);
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON")) |value| {
             defer self.allocator.free(value);
@@ -954,6 +956,7 @@ pub const App = struct {
                     self.setStatus("Unable to open quick chat workspace");
                 };
             }
+            self.syncAccessibility();
             return;
         }
     }
@@ -1384,40 +1387,35 @@ pub const App = struct {
             self.setStatus("Update release URL is not a trusted GraphCode release page");
             return;
         };
-        const message = std.fmt.allocPrint(
+        const action = UpdateOfferDialog.show(
+            self.window.hwnd,
             self.allocator,
-            "GraphCode {s} is available.\n\nOpen the verified GitHub release page to review release notes?\n\nIn-app Windows installation and relaunch are not available. Release assets may target other platforms.",
-            .{if (version.len == 0) "update" else version},
+            version,
+            "In-app Windows installation is unavailable until a published, signed Windows artifact exists.",
         ) catch {
             self.setStatus("Unable to prepare the update offer");
             return;
         };
-        defer self.allocator.free(message);
-        const message_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, message) catch {
-            self.setStatus("Unable to encode the update offer");
-            return;
-        };
-        defer self.allocator.free(message_wide);
-        if (c.MessageBoxW(
-            self.window.hwnd,
-            message_wide.ptr,
-            std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Update Available").ptr,
-            c.MB_ICONINFORMATION | c.MB_YESNO | c.MB_DEFBUTTON1,
-        ) != c.IDYES) return;
-        const url_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, url) catch {
-            self.setStatus("Unable to encode the release URL");
-            return;
-        };
-        defer self.allocator.free(url_wide);
-        const result = c.ShellExecuteW(
-            self.window.hwnd,
-            std.unicode.utf8ToUtf16LeStringLiteral("open").ptr,
-            url_wide.ptr,
-            null,
-            null,
-            c.SW_SHOWNORMAL,
-        );
-        self.setStatus(if (@intFromPtr(result) <= 32) "Unable to open the release page" else "Opened the GraphCode release page");
+        switch (action) {
+            .later => self.setStatus("Update offer deferred"),
+            .install_unavailable => self.setStatus("Install is unavailable until a signed Windows artifact is published"),
+            .release_notes => {
+                const url_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, url) catch {
+                    self.setStatus("Unable to encode the release URL");
+                    return;
+                };
+                defer self.allocator.free(url_wide);
+                const result = c.ShellExecuteW(
+                    self.window.hwnd,
+                    std.unicode.utf8ToUtf16LeStringLiteral("open").ptr,
+                    url_wide.ptr,
+                    null,
+                    null,
+                    c.SW_SHOWNORMAL,
+                );
+                self.setStatus(if (@intFromPtr(result) <= 32) "Unable to open the release page" else "Opened the GraphCode release page");
+            },
+        }
     }
 
     fn showCurrentUpdateOffer(self: *App) void {
@@ -1818,10 +1816,11 @@ pub const App = struct {
                     },
                     .move_project => self.revealProjectPath(stable.path),
                     .trash_project => {
+                        if (stable.remote) return;
                         if (!GraphContextMenu.confirm(
                             self.window.hwnd,
                             "Move Project to Recycle Bin",
-                            "Move this project folder to the Windows Recycle Bin?\n\nThe project will also be removed from GraphCode.",
+                            "Move this project folder to the Windows Recycle Bin?\n\nIts files will be removed from the filesystem but can be restored from the Recycle Bin. The project will also be removed from GraphCode.",
                         )) return;
                         self.trashProjectPath(stable.path);
                     },
@@ -3207,6 +3206,34 @@ pub const App = struct {
                 else => {},
             }
         }
+        if (self.surface == .workspace) if (self.selected_quick_chat) |chat_index| {
+            if (chat_index < self.model.quick_chats.items.len) {
+                const chat = self.model.quick_chats.items[chat_index];
+                const identity = std.fmt.allocPrint(self.allocator, "quick-chat-workspace:{s}", .{chat.id}) catch return;
+                owned_identities.append(identity) catch {
+                    self.allocator.free(identity);
+                    return;
+                };
+                const workspace_bounds = c.RECT{
+                    .left = canvas_rect.left,
+                    .top = inputBounds(client.right, client.bottom, self.workspace_controls).workspace_top,
+                    .right = canvas_rect.right,
+                    .bottom = client.bottom,
+                };
+                elements.append(.{
+                    .identity = identity,
+                    .name = "Quick Chat terminal workspace",
+                    .parent = 4,
+                    .selected = true,
+                    .eligible = false,
+                    .invokable = false,
+                    .left = workspace_bounds.left,
+                    .top = workspace_bounds.top,
+                    .right = workspace_bounds.right,
+                    .bottom = workspace_bounds.bottom,
+                }) catch return;
+            }
+        };
         if (self.model.attention_entries.items.len != 0) {
             const section = Sidebar.sidebarSectionBottom(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state);
             self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-header", "needs-you", "Needs you", 1, .{ .left = 12, .top = section + 4, .right = 232, .bottom = section + 28 }, false, true) catch return;
@@ -3338,11 +3365,6 @@ pub const App = struct {
                 .bottom = bounds.bottom,
             }) catch return;
         }
-        if (self.worktree_dialog == null) if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_FIXTURE_ROWS") catch null) |fixture| {
-            defer self.allocator.free(fixture);
-            provider.syncStatus(self.status());
-            return;
-        };
         const policy = if (self.worktree_dialog) |dialog| dialog.policy else WorktreeStatus.Policy{};
         provider.syncElements(self.status(), elements.items, policy);
     }
@@ -3607,8 +3629,21 @@ pub const App = struct {
                 .keep => self.keepWorktreeOffer(offer.path),
             },
             .quick_chat => |id| {
-                self.client.sendOpenQuickChat(id);
                 self.setStatus("Opening quick chat...");
+                if (envFlag("GRAPHCODE_UIA_GATE")) {
+                    for (self.model.quick_chats.items, 0..) |chat, index| {
+                        if (!std.mem.eql(u8, chat.id, id)) continue;
+                        self.selected_quick_chat = index;
+                        self.surface = .workspace;
+                        self.workspace_controls.panel_visible = true;
+                        self.layoutWorkspace();
+                        self.layoutEmptyStateControls();
+                        self.syncAccessibility();
+                        break;
+                    }
+                } else {
+                    self.client.sendOpenQuickChat(id);
+                }
             },
             .workspace_show_graph => self.handleAction(.show_graph),
             .workspace_stop => self.stopSelectedNode(),
