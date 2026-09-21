@@ -1,6 +1,7 @@
 const std = @import("std");
 const Forms = @import("Forms.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
+const Tokens = @import("DesignTokens.zig");
 const c = @import("Win32.zig").c;
 
 const DialogState = struct {
@@ -30,12 +31,18 @@ const DialogState = struct {
     lock_edge_endpoints: bool = true,
     immediate_policy_path: []const u8 = "",
     confirmation_armed: bool = false,
+    tile_field_index: ?usize = null,
+    tile_buttons: [max_tiles]c.HWND = .{null} ** max_tiles,
+    tile_count: usize = 0,
 };
 
+const max_tiles = 8;
+const tile_base_id = 9600;
+
 const Kind = enum { node, edge, update, settings, jump, worktree_policy, worktree_sweep };
-const InputKind = enum { edit, readonly, combo, checkbox };
+const InputKind = enum { edit, readonly, combo, checkbox, tiles };
 const ChoiceGroup = enum { none, loop_type, backend, model_tier, metric_direction, optional_metric_direction, edge_kind, edge_condition, transform };
-const Choice = struct { label: []const u8, value: []const u8 };
+const Choice = struct { label: []const u8, value: []const u8, description: []const u8 = "", accent: u32 = Tokens.canvas_selection };
 pub const EdgeEndpoint = struct { id: []const u8, title: []const u8 };
 pub const WorktreeSweepResult = struct {
     selected: [256]bool = .{false} ** 256,
@@ -51,11 +58,18 @@ var active_state_storage: DialogState = undefined;
 
 const ModalCommand = enum { submit, cancel, close, destroy };
 
+/// Loop-type teaching-tile accents, converted from the exact RGB values macOS
+/// uses for the same four types (LoopTypeAppearance.swift's `accent`), so the
+/// Windows tiles read as the same visual language rather than a new palette.
+fn tileColor(red: u8, green: u8, blue: u8) u32 {
+    return @as(u32, red) | (@as(u32, green) << 8) | (@as(u32, blue) << 16);
+}
+
 const loop_type_choices = [_]Choice{
-    .{ .label = "Turn-based — pause for review", .value = "turnBased" },
-    .{ .label = "Time-based — repeat a prompt", .value = "timeBased" },
-    .{ .label = "Goal-based — work toward done", .value = "goalBased" },
-    .{ .label = "Proactive — design a nested workflow", .value = "proactive" },
+    .{ .label = "Turn-based", .value = "turnBased", .description = "Pauses for you each turn", .accent = tileColor(213, 81, 129) },
+    .{ .label = "Time-based", .value = "timeBased", .description = "Runs again on a schedule", .accent = tileColor(201, 133, 0) },
+    .{ .label = "Goal-based", .value = "goalBased", .description = "Works until a condition is met", .accent = tileColor(25, 158, 112) },
+    .{ .label = "Proactive", .value = "proactive", .description = "A group of loops, armed later", .accent = tileColor(144, 133, 233) },
 };
 const backend_choices = [_]Choice{
     .{ .label = "Use workspace default", .value = "" },
@@ -122,6 +136,21 @@ fn choiceValue(group: ChoiceGroup, index: usize, previous: []const u8) []const u
     if (group == .loop_type and index == 3 and std.mem.eql(u8, previous, "composite"))
         return previous;
     return options[index].value;
+}
+
+/// Applies a teaching-tile click: updates the bound field's value, redraws
+/// every tile so the new selection highlight and old one both repaint, and
+/// re-runs the same conditional-visibility/validation reset a combo change
+/// would have triggered.
+fn selectTile(state: *DialogState, tile_index: usize) void {
+    const field_index = state.tile_field_index orelse return;
+    const next = choiceValue(state.choice_groups[field_index], tile_index, state.values[field_index]);
+    const value = state.allocator.dupe(u8, next) catch return;
+    state.allocator.free(state.values[field_index]);
+    state.values[field_index] = value;
+    updateConditionalVisibility(state);
+    setStaticText(state, state.validation, "");
+    for (0..state.tile_count) |i| _ = c.InvalidateRect(state.tile_buttons[i], null, 1);
 }
 
 fn applyModalCommand(state: *DialogState, command: ModalCommand) void {
@@ -559,8 +588,132 @@ fn registerClass() !void {
     window_class.hInstance = c.GetModuleHandleW(null);
     window_class.lpszClassName = class_name.ptr;
     window_class.hCursor = c.LoadCursorW(null, @ptrFromInt(32512));
+    window_class.hbrBackground = null;
     if (c.RegisterClassW(&window_class) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
         return error.ClassRegistrationFailed;
+}
+
+// Dark sheet theme: same panel/text palette as the validated
+// WindowsProductSettings.zig window (see DesignTokens.zig), applied here so
+// every native form/sheet (node, edge, update, jump, worktree policy/sweep)
+// paints with the app's dark native language instead of default Win32 gray.
+var dark_field_brush: c.HBRUSH = null;
+
+fn darkFieldBrush() c.HBRUSH {
+    if (dark_field_brush == null) dark_field_brush = c.CreateSolidBrush(Tokens.dialog_field_background);
+    return dark_field_brush;
+}
+
+fn fillFormBackground(hdc: c.HDC, bounds: c.RECT) void {
+    const brush = c.CreateSolidBrush(Tokens.dialog_panel);
+    if (brush == null) return;
+    _ = c.FillRect(hdc, &bounds, brush);
+    _ = c.DeleteObject(brush);
+}
+
+fn formCtlColorStatic(hwnd: c.HWND, wparam: c.WPARAM, validation_label: c.HWND) c.LRESULT {
+    const hdc = deviceContextFrom(wparam);
+    _ = c.SetTextColor(hdc, if (hwnd == validation_label) Tokens.dialog_error_text else Tokens.dialog_body_text);
+    _ = c.SetBkMode(hdc, c.TRANSPARENT);
+    return @intCast(@intFromPtr(c.GetStockObject(c.NULL_BRUSH)));
+}
+
+fn formCtlColorEdit(wparam: c.WPARAM) c.LRESULT {
+    const hdc = deviceContextFrom(wparam);
+    _ = c.SetTextColor(hdc, Tokens.dialog_title_text);
+    _ = c.SetBkColor(hdc, Tokens.dialog_field_background);
+    _ = c.SetBkMode(hdc, c.OPAQUE);
+    return @intCast(@intFromPtr(darkFieldBrush()));
+}
+
+fn deviceContextFrom(wparam: c.WPARAM) c.HDC {
+    @setRuntimeSafety(false);
+    return @ptrFromInt(wparam);
+}
+
+fn controlHandleFrom(lparam: c.LPARAM) c.HWND {
+    @setRuntimeSafety(false);
+    return @ptrFromInt(@as(usize, @bitCast(lparam)));
+}
+
+/// Blends `overlay` into `base` at `percent` strength (0-100), approximating
+/// the translucent accent fills LoopTypeChooser.swift layers over its dark
+/// background (`type.accent.opacity(0.12)` selected / `Color.white.opacity(0.035)`
+/// idle) using plain GDI solid fills.
+fn blendColor(base: u32, overlay: u32, percent: u8) u32 {
+    const inv: u32 = 100 - percent;
+    const br = base & 0xFF;
+    const bg = (base >> 8) & 0xFF;
+    const bb = (base >> 16) & 0xFF;
+    const orr = overlay & 0xFF;
+    const og = (overlay >> 8) & 0xFF;
+    const ob = (overlay >> 16) & 0xFF;
+    const r = (br * inv + orr * percent) / 100;
+    const g = (bg * inv + og * percent) / 100;
+    const b = (bb * inv + ob * percent) / 100;
+    return r | (g << 8) | (b << 16);
+}
+
+fn drawTile(state: *DialogState, tile_index: usize, draw_item: *c.DRAWITEMSTRUCT) void {
+    const field_index = state.tile_field_index orelse return;
+    const options = choices(state.choice_groups[field_index]);
+    if (tile_index >= options.len) return;
+    const choice = options[tile_index];
+    const selected = std.mem.eql(u8, choice.value, state.values[field_index]) or
+        (std.mem.eql(u8, choice.value, "proactive") and std.mem.eql(u8, state.values[field_index], "composite"));
+    const bounds = draw_item.rcItem;
+    const card_color = if (selected) blendColor(Tokens.dialog_panel, choice.accent, 22) else blendColor(Tokens.dialog_panel, 0x00FFFFFF, 4);
+    const border_color = if (selected) choice.accent else Tokens.dialog_field_border;
+    const brush = c.CreateSolidBrush(card_color);
+    const pen = c.CreatePen(c.PS_SOLID, if (selected) 2 else 1, border_color);
+    if (brush != null and pen != null) {
+        const old_brush = c.SelectObject(draw_item.hDC, brush);
+        const old_pen = c.SelectObject(draw_item.hDC, pen);
+        _ = c.RoundRect(draw_item.hDC, bounds.left, bounds.top, bounds.right, bounds.bottom, 9, 9);
+        _ = c.SelectObject(draw_item.hDC, old_pen);
+        _ = c.SelectObject(draw_item.hDC, old_brush);
+    }
+    if (pen != null) _ = c.DeleteObject(pen);
+    if (brush != null) _ = c.DeleteObject(brush);
+    const chip = c.RECT{ .left = bounds.left + 12, .top = bounds.top + 10, .right = bounds.left + 20, .bottom = bounds.top + 18 };
+    const chip_brush = c.CreateSolidBrush(choice.accent);
+    if (chip_brush != null) {
+        _ = c.FillRect(draw_item.hDC, &chip, chip_brush);
+        _ = c.DeleteObject(chip_brush);
+    }
+    formDrawText(draw_item.hDC, choice.label, .{ .left = bounds.left + 28, .top = bounds.top + 6, .right = bounds.right - 8, .bottom = bounds.top + 24 }, 12, Tokens.dialog_title_text, true);
+    formDrawText(draw_item.hDC, choice.description, .{ .left = bounds.left + 12, .top = bounds.top + 28, .right = bounds.right - 8, .bottom = bounds.bottom - 6 }, 10, Tokens.dialog_muted_text, false);
+    if ((draw_item.itemState & c.ODS_FOCUS) != 0) _ = c.DrawFocusRect(draw_item.hDC, &bounds);
+}
+
+fn formDrawText(hdc: c.HDC, text: []const u8, bounds_value: c.RECT, size: i32, color: u32, bold: bool) void {
+    const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.c_allocator, text) catch return;
+    defer std.heap.c_allocator.free(wide);
+    const font = c.CreateFontW(
+        -size,
+        0,
+        0,
+        0,
+        if (bold) c.FW_SEMIBOLD else c.FW_NORMAL,
+        0,
+        0,
+        0,
+        c.DEFAULT_CHARSET,
+        c.OUT_DEFAULT_PRECIS,
+        c.CLIP_DEFAULT_PRECIS,
+        c.CLEARTYPE_QUALITY,
+        c.DEFAULT_PITCH | c.FF_DONTCARE,
+        std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI").ptr,
+    );
+    const old_font = if (font != null) c.SelectObject(hdc, font) else null;
+    _ = c.SetTextColor(hdc, color);
+    _ = c.SetBkMode(hdc, c.TRANSPARENT);
+    var bounds = bounds_value;
+    _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, c.DT_LEFT | c.DT_WORDBREAK | c.DT_END_ELLIPSIS);
+    if (font != null) {
+        _ = c.SelectObject(hdc, old_font);
+        _ = c.DeleteObject(font);
+    }
 }
 
 fn configureFields(state: *DialogState) void {
@@ -576,7 +729,7 @@ fn configureFields(state: *DialogState) void {
     for (0..state.field_count) |index| state.visible[index] = true;
     switch (state.kind) {
         .node => {
-            state.input_kinds[1] = .combo;
+            state.input_kinds[1] = .tiles;
             state.choice_groups[1] = .loop_type;
             state.input_kinds[5] = .checkbox;
             state.input_kinds[11] = .combo;
@@ -732,6 +885,24 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             createButton(safe_hwnd, "Cancel", cancel_id, 393, client.bottom - 38);
             return 0;
         },
+        c.WM_ERASEBKGND => {
+            const hdc: c.HDC = @ptrFromInt(wparam);
+            var client: c.RECT = undefined;
+            _ = c.GetClientRect(safe_hwnd, &client);
+            fillFormBackground(hdc, client);
+            return 1;
+        },
+        c.WM_CTLCOLORSTATIC => return formCtlColorStatic(controlHandleFrom(lparam), wparam, value.validation),
+        c.WM_CTLCOLOREDIT => return formCtlColorEdit(wparam),
+        c.WM_CTLCOLORLISTBOX => return formCtlColorEdit(wparam),
+        c.WM_DRAWITEM => {
+            const draw_item: *c.DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            if (value.tile_field_index != null and draw_item.CtlID >= tile_base_id and draw_item.CtlID < tile_base_id + max_tiles) {
+                drawTile(value, draw_item.CtlID - tile_base_id, draw_item);
+                return 1;
+            }
+            return 0;
+        },
         c.WM_SIZE => {
             var client: c.RECT = undefined;
             _ = c.GetClientRect(safe_hwnd, &client);
@@ -773,6 +944,11 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
         c.WM_COMMAND => {
             const command = @as(u16, @truncate(wparam));
             const notification: u16 = @truncate(wparam >> 16);
+            if (notification == c.BN_CLICKED and command >= tile_base_id and command < tile_base_id + max_tiles) {
+                selectTile(value, command - tile_base_id);
+                layoutForm(safe_hwnd, value);
+                return 0;
+            }
             if ((notification == c.EN_SETFOCUS or notification == c.CBN_SETFOCUS or notification == c.BN_SETFOCUS) and command >= 9100 and command < 9120) {
                 ensureControlVisible(safe_hwnd, value, command - 9100);
                 return 0;
@@ -869,6 +1045,38 @@ fn inputControlHeight(kind: InputKind) i32 {
     return if (kind == .combo) 180 else 24;
 }
 
+/// Teaching tiles: one owner-drawn, tab-stop BUTTON per loop-type choice,
+/// painted in `drawTile` as a color-accented card with title + description —
+/// the same "explain itself" grid LoopTypeChooser.swift uses on macOS,
+/// replacing the plain drop-down this field used to be.
+fn createTileButtons(hwnd: c.HWND, state: *DialogState, index: usize) c.HWND {
+    state.tile_field_index = index;
+    const options = choices(state.choice_groups[index]);
+    state.tile_count = @min(options.len, max_tiles);
+    var first: c.HWND = null;
+    for (0..state.tile_count) |i| {
+        const wide = utf8ToWideZ(state.allocator, options[i].label) catch continue;
+        defer state.allocator.free(wide);
+        const button = c.CreateWindowExW(
+            0,
+            std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
+            wide.ptr,
+            c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | @as(c.DWORD, @intCast(c.BS_OWNERDRAW)),
+            18,
+            0,
+            250,
+            52,
+            hwnd,
+            childId(tile_base_id + i),
+            c.GetModuleHandleW(null),
+            null,
+        );
+        state.tile_buttons[i] = button;
+        if (first == null) first = button;
+    }
+    return first;
+}
+
 fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
     createStatic(
         hwnd,
@@ -884,6 +1092,7 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
         @as(c.DWORD, @intCast(c.WS_VISIBLE)) |
         @as(c.DWORD, @intCast(c.WS_TABSTOP));
     const input = switch (state.input_kinds[index]) {
+        .tiles => createTileButtons(hwnd, state, index),
         .combo => c.CreateWindowExW(
             c.WS_EX_CLIENTEDGE,
             std.unicode.utf8ToUtf16LeStringLiteral("COMBOBOX").ptr,
@@ -933,6 +1142,7 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
     } orelse return;
     state.edits[index] = input;
     switch (state.input_kinds[index]) {
+        .tiles => {},
         .combo => {
             if (isEndpointCombo(state, index)) {
                 for (state.edge_endpoints) |endpoint| {
@@ -973,44 +1183,69 @@ fn setStaticText(state: *DialogState, hwnd: c.HWND, text: []const u8) void {
     _ = c.SetWindowTextW(hwnd, wide.ptr);
 }
 
-fn layoutForm(hwnd: c.HWND, state: *DialogState) void {
-    var row: i32 = 0;
-    for (0..state.field_count) |index| {
-        const shown = state.visible[index];
-        const command = if (shown) c.SW_SHOW else c.SW_HIDE;
-        _ = c.ShowWindow(state.labels[index], command);
-        _ = c.ShowWindow(state.edits[index], command);
-        _ = c.ShowWindow(state.helps[index], command);
-        if (!shown) continue;
-        const y = 54 + row * 64 - state.scroll_offset;
-        _ = c.MoveWindow(state.labels[index], 18, y, 530, 18, 1);
-        _ = c.MoveWindow(state.edits[index], 18, y + 18, 530, inputControlHeight(state.input_kinds[index]), 1);
-        _ = c.MoveWindow(state.helps[index], 18, y + 43, 530, 18, 1);
-        row += 1;
-    }
-    updateScrollBar(hwnd, state);
+fn rowHeight(state: *const DialogState, index: usize) i32 {
+    return if (state.input_kinds[index] == .tiles) tile_row_height else 64;
 }
 
-fn visibleRowFor(state: *const DialogState, target: usize) ?usize {
-    var row: usize = 0;
+fn fieldTop(state: *const DialogState, target: usize) ?i32 {
+    var y: i32 = 54;
     for (0..state.field_count) |index| {
         if (!state.visible[index]) continue;
-        if (index == target) return row;
-        row += 1;
+        if (index == target) return y;
+        y += rowHeight(state, index);
     }
     return null;
 }
 
-fn visibleFieldCount(state: *const DialogState) usize {
-    var count: usize = 0;
-    for (state.visible[0..state.field_count]) |shown| if (shown) {
-        count += 1;
-    };
-    return count;
+fn layoutForm(hwnd: c.HWND, state: *DialogState) void {
+    var y: i32 = 54;
+    for (0..state.field_count) |index| {
+        const shown = state.visible[index];
+        const command = if (shown) c.SW_SHOW else c.SW_HIDE;
+        _ = c.ShowWindow(state.labels[index], command);
+        if (state.input_kinds[index] == .tiles) {
+            for (0..state.tile_count) |t| _ = c.ShowWindow(state.tile_buttons[t], command);
+        } else {
+            _ = c.ShowWindow(state.edits[index], command);
+        }
+        _ = c.ShowWindow(state.helps[index], if (state.input_kinds[index] == .tiles) c.SW_HIDE else command);
+        if (!shown) continue;
+        const top = y - state.scroll_offset;
+        _ = c.MoveWindow(state.labels[index], 18, top, 530, 18, 1);
+        if (state.input_kinds[index] == .tiles) {
+            layoutTiles(state, index, 18, top + 20, 530);
+        } else {
+            _ = c.MoveWindow(state.edits[index], 18, top + 18, 530, inputControlHeight(state.input_kinds[index]), 1);
+            _ = c.MoveWindow(state.helps[index], 18, top + 43, 530, 18, 1);
+        }
+        y += rowHeight(state, index);
+    }
+    updateScrollBar(hwnd, state);
+}
+
+const tile_columns = 2;
+const tile_row_height = 150;
+
+fn layoutTiles(state: *DialogState, index: usize, x: i32, y: i32, width: i32) void {
+    _ = index;
+    const gap: i32 = 8;
+    const tile_width = @divTrunc(width - gap * (tile_columns - 1), tile_columns);
+    const tile_height: i32 = 58;
+    for (0..state.tile_count) |i| {
+        const col: i32 = @intCast(i % tile_columns);
+        const tile_row: i32 = @intCast(i / tile_columns);
+        const tx = x + col * (tile_width + gap);
+        const ty = y + tile_row * (tile_height + gap);
+        _ = c.MoveWindow(state.tile_buttons[i], tx, ty, tile_width, tile_height, 1);
+    }
 }
 
 fn contentHeight(state: *const DialogState) i32 {
-    return @intCast(54 + visibleFieldCount(state) * 64 + 12);
+    var y: i32 = 54;
+    for (0..state.field_count) |index| {
+        if (state.visible[index]) y += rowHeight(state, index);
+    }
+    return y + 12;
 }
 
 fn clientHeight(hwnd: c.HWND) i32 {
@@ -1058,10 +1293,9 @@ fn updateScrollBar(hwnd: c.HWND, state: *DialogState) void {
 }
 
 fn ensureControlVisible(hwnd: c.HWND, state: *DialogState, index: usize) void {
-    const row = visibleRowFor(state, index) orelse return;
+    const top = fieldTop(state, index) orelse return;
     const viewport = clientHeight(hwnd);
-    const top: i32 = @intCast(54 + row * 64);
-    const bottom = top + 61;
+    const bottom = top + rowHeight(state, index) - 3;
     const visible_top = state.scroll_offset;
     const visible_bottom = state.scroll_offset + @max(1, viewport - 48);
     if (top < visible_top) {
@@ -1160,6 +1394,7 @@ fn readValues(state: *DialogState) void {
 fn readValue(state: *DialogState, index: usize) void {
     if (state.edits[index] == null) return;
     switch (state.input_kinds[index]) {
+        .tiles => {},
         .combo => {
             const selected = c.SendMessageW(state.edits[index], c.CB_GETCURSEL, 0, 0);
             if (selected < 0) return;
@@ -1511,4 +1746,46 @@ test "scrollbar thumb positions seek and clamp the dialog content" {
     const max_offset = boundedScrollOffset(content, viewport, 0, 100000);
     try std.testing.expectEqual(@min(@as(i32, 200), max_offset), std.math.clamp(@as(i32, 200), 0, max_offset));
     try std.testing.expectEqual(max_offset, std.math.clamp(@as(i32, 100000), 0, max_offset));
+}
+
+test "loop type teaching tiles carry the exact macOS accent colors" {
+    // LoopTypeAppearance.swift: turnBased #D55181, timeBased #C98500,
+    // goalBased #199E70, composite/proactive #9085E9. tileColor packs a
+    // COLORREF (0x00BBGGRR) so these render as the true RGB on screen,
+    // unlike the pre-existing R/B-swapped literals elsewhere in this codebase.
+    try std.testing.expectEqual(@as(u32, 0x00_81_51_D5), loop_type_choices[0].accent);
+    try std.testing.expectEqual(@as(u32, 0x00_00_85_C9), loop_type_choices[1].accent);
+    try std.testing.expectEqual(@as(u32, 0x00_70_9E_19), loop_type_choices[2].accent);
+    try std.testing.expectEqual(@as(u32, 0x00_E9_85_90), loop_type_choices[3].accent);
+    try std.testing.expectEqualStrings("Turn-based", loop_type_choices[0].label);
+    try std.testing.expect(loop_type_choices[0].description.len > 0);
+    try std.testing.expect(loop_type_choices[3].description.len > 0);
+}
+
+test "tile rows reserve full teaching-tile height while other rows stay compact" {
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    state.field_count = 3;
+    state.input_kinds[0] = .edit;
+    state.input_kinds[1] = .tiles;
+    state.input_kinds[2] = .combo;
+    state.visible[0] = true;
+    state.visible[1] = true;
+    state.visible[2] = true;
+    try std.testing.expectEqual(@as(i32, 64), rowHeight(&state, 0));
+    try std.testing.expectEqual(@as(i32, tile_row_height), rowHeight(&state, 1));
+    try std.testing.expectEqual(@as(i32, 64), rowHeight(&state, 2));
+    try std.testing.expectEqual(@as(i32, 54), fieldTop(&state, 0).?);
+    try std.testing.expectEqual(@as(i32, 118), fieldTop(&state, 1).?);
+    try std.testing.expectEqual(@as(i32, 118 + tile_row_height), fieldTop(&state, 2).?);
+    try std.testing.expectEqual(@as(i32, 118 + tile_row_height + 64 + 12), contentHeight(&state));
+}
+
+test "blendColor tints toward the overlay color proportionally to strength" {
+    try std.testing.expectEqual(@as(u32, 0x00_00_00_00), blendColor(0x00000000, 0x00FFFFFF, 0));
+    try std.testing.expectEqual(@as(u32, 0x00_FF_FF_FF), blendColor(0x00000000, 0x00FFFFFF, 100));
+    // A light 22% selected-state tint should stay much closer to the base
+    // panel color than to the accent, matching the subtle macOS fill.
+    const tinted = blendColor(Tokens.dialog_panel, tileColor(213, 81, 129), 22);
+    try std.testing.expect(tinted != Tokens.dialog_panel);
+    try std.testing.expect(tinted != tileColor(213, 81, 129));
 }
