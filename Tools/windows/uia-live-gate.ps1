@@ -823,7 +823,9 @@ try {
     $null = $card.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   }
   $projectCardIds = @($projectCards | ForEach-Object { $_.Current.AutomationId })
-  $attentionAction = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.Name -eq "Reply" }) | Select-Object -First 1
+  $attentionAction = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^attention-action-' -and $_.Current.Name -eq "Reply"
+  }) | Select-Object -First 1
   Require ($null -ne $attentionAction) "NEEDS YOU card omitted its reason-specific Reply action"
   Require (($attentionAction.Current.BoundingRectangle.Width -gt 0) -and
            ($attentionAction.Current.BoundingRectangle.Height -gt 0)) "Reply attention action had empty bounds"
