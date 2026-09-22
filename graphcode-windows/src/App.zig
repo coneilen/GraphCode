@@ -375,10 +375,12 @@ pub const App = struct {
         if (com_result < 0) return error.ComInitializationFailed;
         defer c.CoUninitialize();
         const daemon_supervisor_test_hook = envFlag(daemon_supervisor_test_hook_environment);
+        const uia_gate = envFlag("GRAPHCODE_UIA_GATE");
         // GDI+ may create a process-owned helper window. The daemon handoff
-        // test intentionally identifies the shell through its sole top-level
-        // window, so keep that visual-only subsystem disabled for this hook.
-        if (!daemon_supervisor_test_hook) GdiplusAA.init();
+        // and UIA live tests depend on deterministic top-level window and
+        // foreground behavior, so keep that visual-only subsystem disabled
+        // for both explicit automation hooks.
+        if (!daemon_supervisor_test_hook and !uia_gate) GdiplusAA.init();
         try self.window.create(self, &onWindowMessage, title.ptr);
         self.tray.test_hook_enabled = self.tray_test_hook_enabled;
         self.tray.add(self.window.hwnd) catch self.setStatus("System tray unavailable; GraphCode remains open");
@@ -423,7 +425,7 @@ pub const App = struct {
         if (self.onboarding_store) |store| {
             const shell_test = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON") catch null;
             defer if (shell_test) |value| self.allocator.free(value);
-            if (!envFlag("GRAPHCODE_UIA_GATE") and
+            if (!uia_gate and
                 !daemon_supervisor_test_hook and
                 (shell_test == null or !std.mem.eql(u8, shell_test.?, "1")))
             {
