@@ -457,6 +457,16 @@ function Ensure-ShellForeground(
   # foreground ownership of the GraphCode shell immediately before any
   # command/UIA path that depends on the shell being foreground, retrying
   # within a bounded deadline instead of assuming a prior activation holds.
+  #
+  # Only fall back to ActivateWindow's invasive Alt-tap foreground-lock
+  # bypass (keybd_event + SetForegroundWindow) when the shell does not
+  # already hold true foreground ownership: that trick injects a global
+  # synthetic Alt key press/release, and issuing it when it is not needed
+  # (the shell is already foreground) races the very next native window
+  # this gate creates and can desynchronize its subsequent close handling.
+  if ([GraphCodeUiaGateState]::IsForegroundWindow($window)) {
+    return $true
+  }
   $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
   $acquired = $false
   do {
