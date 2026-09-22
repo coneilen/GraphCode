@@ -3990,14 +3990,14 @@ pub const App = struct {
                 if (target != null) return false;
                 target = .{ .activity = index };
             }
-            if (self.workspace_list) |list| {
-                for (list.items, 0..) |workspace, workspace_index| {
-                    const identity = std.fmt.allocPrint(self.allocator, "workspace-switch:{s}", .{workspace.path}) catch return false;
-                    defer self.allocator.free(identity);
-                    if (Accessibility.worktreeIdentityPayload(identity) == payload) {
-                        if (target != null) return false;
-                        target = .{ .workspace_switch = workspace_index };
-                    }
+        }
+        if (self.workspace_list) |list| {
+            for (list.items, 0..) |workspace, workspace_index| {
+                const workspace_identity = std.fmt.allocPrint(self.allocator, "workspace-switch:{s}", .{workspace.path}) catch return false;
+                defer self.allocator.free(workspace_identity);
+                if (Accessibility.worktreeIdentityPayload(workspace_identity) == payload) {
+                    if (target != null) return false;
+                    target = .{ .workspace_switch = workspace_index };
                 }
             }
         }
@@ -4161,9 +4161,9 @@ pub const App = struct {
         if (self.workspace_path.len != 0) self.allocator.free(self.workspace_path);
         self.workspace_path = current;
         if (self.workspace_list) |*list| list.deinit(self.allocator);
-        self.workspace_list = WorkspaceLifecycle.list(self.allocator) catch {
+        self.workspace_list = WorkspaceLifecycle.list(self.allocator) catch blk: {
             self.setStatus("Workspace list could not be loaded");
-            null;
+            break :blk null;
         };
     }
 
