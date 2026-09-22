@@ -34,6 +34,7 @@ const DialogState = struct {
     tile_field_index: ?usize = null,
     tile_buttons: [max_tiles]c.HWND = .{null} ** max_tiles,
     tile_count: usize = 0,
+    foreground_reassert_ticks: usize = 0,
 };
 
 const max_tiles = 8;
@@ -53,6 +54,18 @@ const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeNativeForm")
 const ok_id = 1;
 const cancel_id = 2;
 const reveal_id = 3;
+
+// A single SetForegroundWindow call right after ShowWindow can lose a race
+// against another process that keeps re-stealing the foreground shortly
+// after (observed in CI as a hosted runner agent's own periodic console
+// activation). Rather than relying on one attempt, keep reasserting for a
+// short window after the modal opens -- this is cheap, product-side, and
+// gives up once the modal genuinely holds the foreground or a bounded
+// number of ticks elapses, so it can never loop forever or fight a user
+// who deliberately switches away.
+const foreground_reassert_timer_id: usize = 771;
+const foreground_reassert_interval_ms: c.UINT = 120;
+const foreground_reassert_max_ticks: usize = 20;
 var active_state: bool = false;
 var active_state_storage: DialogState = undefined;
 
@@ -904,6 +917,8 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             createButton(safe_hwnd, if (value.kind == .node) "Create" else if (value.kind == .worktree_policy) "Done" else if (value.kind == .worktree_sweep) "Remove Selected" else "OK", ok_id, 478, client.bottom - 38);
             if (value.kind == .worktree_sweep) createButton(safe_hwnd, "Show in Explorer", reveal_id, 300, client.bottom - 38);
             createButton(safe_hwnd, "Cancel", cancel_id, 393, client.bottom - 38);
+            value.foreground_reassert_ticks = 0;
+            _ = c.SetTimer(safe_hwnd, foreground_reassert_timer_id, foreground_reassert_interval_ms, null);
             return 0;
         },
         c.WM_ERASEBKGND => {
@@ -1026,6 +1041,18 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             applyModalCommand(value, .close);
             return 0;
         },
+        c.WM_TIMER => {
+            if (wparam == foreground_reassert_timer_id) {
+                value.foreground_reassert_ticks += 1;
+                if (c.GetForegroundWindow() == safe_hwnd or value.foreground_reassert_ticks >= foreground_reassert_max_ticks) {
+                    _ = c.KillTimer(safe_hwnd, foreground_reassert_timer_id);
+                } else {
+                    _ = c.AllowSetForegroundWindow(c.GetCurrentProcessId());
+                    _ = c.SetForegroundWindow(safe_hwnd);
+                }
+                return 0;
+            }
+        },
         c.WM_SETFOCUS => {
             if (c.GetFocus()) |focused| {
                 for (0..20) |index| {
@@ -1037,6 +1064,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             }
         },
         c.WM_DESTROY => {
+            _ = c.KillTimer(safe_hwnd, foreground_reassert_timer_id);
             applyModalCommand(value, .destroy);
             return 0;
         },
