@@ -2019,17 +2019,15 @@ try {
     "sidebar root reorder did not use the sidebar-order daemon command: $reorderCommand"
 
   $moveProjectUnavailableReason = "Project relocation is unavailable: the daemon wire contract has no authoritative moveProject command."
-  $moveProjectAction = Find-FragmentById $root "move-project-unavailable" $rawWalker
-  Require ($null -ne $moveProjectAction) "project Move action was not exposed as a disabled UIA menu item"
-  Require ($moveProjectAction.Current.Name -match '(?i)unavailable' -and
-           $moveProjectAction.Current.Name -match '(?i)daemon support') `
-    "project Move menu item did not expose its explicit daemon-support-required text: $($moveProjectAction.Current.Name)"
-  $moveProjectInvokePattern = $null
-  $moveProjectInvokable = $moveProjectAction.TryGetCurrentPattern(
-    [System.Windows.Automation.InvokePattern]::Pattern,
-    [ref] $moveProjectInvokePattern
-  )
-  Require (-not $moveProjectInvokable) "project Move menu item exposed InvokePattern despite being unavailable"
+  $actionsMenu = Find-FragmentById $root "actions" $rawWalker
+  Require ($null -ne $actionsMenu) "actions menu was not exposed for the project Move omission check"
+  $actionsMenuChildIds = @(Get-DirectChildren $actionsMenu $rawWalker | ForEach-Object { $_.Current.AutomationId })
+  Require (-not (@($actionsMenuChildIds | Where-Object { $_ -match '(?i)move' }))) `
+    "project Move must be omitted from the actions menu once relocation is unavailable, found: $($actionsMenuChildIds -join ',')"
+  Assert-Ids $actionsMenuChildIds @(
+    "inspect-worktrees", "reclaim-worktrees", "reveal-worktree",
+    "edit-worktree-policy", "save-worktree-policy", "allow-reclaim", "confirm-each-reclaim"
+  ) "actions menu"
 
   Remove-Item -LiteralPath $shellExecuteLogPath -Force -ErrorAction SilentlyContinue
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 17)) `
