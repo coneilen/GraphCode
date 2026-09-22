@@ -4167,8 +4167,8 @@ pub const App = struct {
         };
     }
 
-    fn showWorkspaceText(self: *App, dialog_title: []const u8, labels: []const []const u8, initial: []const []const u8) ?NativeForms.Result {
-        return NativeForms.textWithDescription(
+    fn showWorkspaceText(self: *App, dialog_title: []const u8, labels: []const []const u8, initial: []const []const u8) ?NativeDialogs.Result {
+        return NativeDialogs.textWithDescription(
             self.window.hwnd,
             self.allocator,
             dialog_title,
