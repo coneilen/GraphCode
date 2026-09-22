@@ -66,6 +66,31 @@ const reveal_id = 3;
 const foreground_reassert_timer_id: usize = 771;
 const foreground_reassert_interval_ms: c.UINT = 120;
 const foreground_reassert_max_ticks: usize = 20;
+
+/// A plain SetForegroundWindow call can be silently ignored by Windows'
+/// foreground-lock heuristic when the calling process/thread hasn't
+/// recently received real input -- exactly the situation for a window
+/// driven purely by UI Automation Invoke calls rather than real keyboard
+/// or mouse input. Temporarily attaching this thread's input queue to the
+/// current foreground window's thread (the documented technique for this
+/// exact restriction) makes SetForegroundWindow reliable regardless of
+/// that heuristic, then detaches immediately afterward so no lasting
+/// input-queue coupling remains between the two processes.
+fn forceForeground(hwnd: c.HWND, current_foreground: c.HWND) void {
+    const our_thread = c.GetCurrentThreadId();
+    var attached = false;
+    var foreground_thread: c.DWORD = 0;
+    if (current_foreground != null) {
+        foreground_thread = c.GetWindowThreadProcessId(current_foreground, null);
+        if (foreground_thread != 0 and foreground_thread != our_thread) {
+            attached = c.AttachThreadInput(our_thread, foreground_thread, 1) != 0;
+        }
+    }
+    _ = c.BringWindowToTop(hwnd);
+    _ = c.ShowWindow(hwnd, c.SW_SHOW);
+    _ = c.SetForegroundWindow(hwnd);
+    if (attached) _ = c.AttachThreadInput(our_thread, foreground_thread, 0);
+}
 var active_state: bool = false;
 var active_state_storage: DialogState = undefined;
 
@@ -1044,11 +1069,11 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
         c.WM_TIMER => {
             if (wparam == foreground_reassert_timer_id) {
                 value.foreground_reassert_ticks += 1;
-                if (c.GetForegroundWindow() == safe_hwnd or value.foreground_reassert_ticks >= foreground_reassert_max_ticks) {
+                const current = c.GetForegroundWindow();
+                if (current == safe_hwnd or value.foreground_reassert_ticks >= foreground_reassert_max_ticks) {
                     _ = c.KillTimer(safe_hwnd, foreground_reassert_timer_id);
                 } else {
-                    _ = c.AllowSetForegroundWindow(c.GetCurrentProcessId());
-                    _ = c.SetForegroundWindow(safe_hwnd);
+                    forceForeground(safe_hwnd, current);
                 }
                 return 0;
             }
