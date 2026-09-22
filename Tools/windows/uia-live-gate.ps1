@@ -7,6 +7,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Sustained hosted-runner foreground contention (e.g. a hosted-compute-agent
+# process reasserting foreground continuously, not just stealing it once)
+# has been observed to exhaust the previous 10s foreground-recovery budget
+# on every single attempt. This raises the ceiling specifically for waits
+# that opt into foreground recovery (RecoverForeground), giving the retry
+# loop meaningfully more time to find a gap in sustained contention, while
+# leaving every other (non-recovering) wait's default timeout untouched.
+$script:ForegroundRecoveryTimeoutMilliseconds = 30000
+
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -TypeDefinition @"
@@ -327,6 +337,17 @@ function Wait-ForDesktopElement(
   [int] $PollMilliseconds = 50,
   [switch] $RecoverForeground
 ) {
+  # When recovering foreground ownership, a hosted CI runner agent has been
+  # observed asserting foreground *continuously* for several seconds at a
+  # time (not a single, brief steal), which can exhaust the default 10s
+  # budget with every single recovery attempt losing the race. Give the
+  # recovery loop meaningfully more wall-clock time to outlast a sustained
+  # contention window before giving up, without slowing down waits that
+  # never lose foreground in the first place (those still resolve on their
+  # first FindFirst() and never touch this larger ceiling).
+  if ($RecoverForeground -and $TimeoutMilliseconds -eq 10000) {
+    $TimeoutMilliseconds = $script:ForegroundRecoveryTimeoutMilliseconds
+  }
   $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
   $element = $null
   $foregroundRecoveries = 0
