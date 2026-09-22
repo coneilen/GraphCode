@@ -1136,6 +1136,12 @@ pub const App = struct {
         const path = self.allocator.dupe(u8, current_path) catch return;
         defer self.allocator.free(path);
         const settings = self.product_settings orelse return;
+        // Generated before the dialog opens (rather than at send time, as every other
+        // draft field is) so a file picked mid-dialog can be copied straight into the
+        // attachments directory this node will end up owning, instead of a temporary
+        // location that would need a second copy once the real id is known.
+        var draft_id_buffer: [36]u8 = undefined;
+        Forms.generateDraftId(&draft_id_buffer);
         const initial = Forms.NodeDraft{
             .title = "",
             .backend = settings.default_backend,
@@ -1151,15 +1157,11 @@ pub const App = struct {
         };
         defer templates.deinit();
         if (templates.templates.items.len == 0) {
-            var draft = NativeForms.node(self.window.hwnd, self.allocator, initial) catch {
-                self.setStatus("Unable to open node form");
+            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, initial) catch |err| {
+                self.setStatus(nodeFormErrorStatus(err));
                 return;
             } orelse return;
             defer draft.deinit(self.allocator);
-            Forms.validateNode(draft) catch {
-                self.setStatus("Invalid node form");
-                return;
-            };
             self.client.sendCreateNodeDraft(path, draft);
             return;
         }
@@ -1185,8 +1187,8 @@ pub const App = struct {
         var owns_current = false;
         defer if (owns_current) current.deinit(self.allocator);
         while (true) {
-            const result = NativeForms.nodeWithTemplates(self.window.hwnd, self.allocator, current, true) catch {
-                self.setStatus("Unable to open node form");
+            const result = NativeForms.nodeWithTemplates(self.window.hwnd, self.allocator, path, &draft_id_buffer, current, true) catch |err| {
+                self.setStatus(nodeFormErrorStatus(err));
                 return;
             };
             switch (result) {
@@ -1194,10 +1196,6 @@ pub const App = struct {
                 .draft => |draft| {
                     var submitted = draft;
                     defer submitted.deinit(self.allocator);
-                    Forms.validateNode(submitted) catch {
-                        self.setStatus("Invalid node form");
-                        return;
-                    };
                     self.client.sendCreateNodeDraft(path, submitted);
                     return;
                 },
@@ -1216,6 +1214,34 @@ pub const App = struct {
                 },
             }
         }
+    }
+
+    fn nodeFormErrorStatus(err: anyerror) []const u8 {
+        return switch (err) {
+            error.EmptyTitle,
+            error.MissingSource,
+            error.MissingTarget,
+            error.SameEndpoint,
+            error.UnsupportedLoopType,
+            error.UnsupportedEdgeKind,
+            error.UnsupportedEdgeCondition,
+            error.UnsupportedTransform,
+            error.UnsupportedBackend,
+            error.UnsupportedModelTier,
+            error.UnsupportedMetricDirection,
+            error.InvalidGoal,
+            error.InvalidWorktree,
+            error.InvalidSubgraph,
+            error.InvalidCreatedBy,
+            error.InvalidCycleGuard,
+            error.InvalidNumericInput,
+            error.MissingFirstInstruction,
+            error.MissingTriggerPrompt,
+            error.EmptyJumpQuery,
+            error.TooManyAttachments,
+            => "Invalid node form",
+            else => "Unable to open node form",
+        };
     }
 
     fn editSelectedNode(self: *App) void {
@@ -5780,6 +5806,21 @@ test "jump matching ranks exact results across projects" {
     try std.testing.expectEqual(@as(usize, 1), prefix.project_index);
     try std.testing.expectEqual(@as(usize, 0), prefix.node_index);
     try std.testing.expectEqual(@as(u8, 2), prefix.score);
+}
+
+test "node form validation errors keep the validation status" {
+    try std.testing.expectEqualStrings(
+        "Invalid node form",
+        App.nodeFormErrorStatus(error.MissingFirstInstruction),
+    );
+    try std.testing.expectEqualStrings(
+        "Invalid node form",
+        App.nodeFormErrorStatus(error.TooManyAttachments),
+    );
+    try std.testing.expectEqualStrings(
+        "Unable to open node form",
+        App.nodeFormErrorStatus(error.FormCreationFailed),
+    );
 }
 
 fn runSmokeWorkspaceActions(self: *App) void {
