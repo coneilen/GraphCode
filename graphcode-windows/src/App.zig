@@ -3991,12 +3991,12 @@ pub const App = struct {
                 target = .{ .activity = index };
             }
             if (self.workspace_list) |list| {
-                for (list.items, 0..) |workspace, index| {
+                for (list.items, 0..) |workspace, workspace_index| {
                     const identity = std.fmt.allocPrint(self.allocator, "workspace-switch:{s}", .{workspace.path}) catch return false;
                     defer self.allocator.free(identity);
                     if (Accessibility.worktreeIdentityPayload(identity) == payload) {
                         if (target != null) return false;
-                        target = .{ .workspace_switch = index };
+                        target = .{ .workspace_switch = workspace_index };
                     }
                 }
             }
@@ -4133,9 +4133,9 @@ pub const App = struct {
         defer self.allocator.free(user);
         const path = try WorkspaceLifecycle.currentPath(self.allocator);
         defer self.allocator.free(path);
-        const digest = std.crypto.hash.sha2.Sha256.hash(path, .{});
-        var digest_text: [64]u8 = undefined;
-        _ = std.fmt.bufPrint(&digest_text, "{s}", .{std.fmt.fmtSliceHexLower(&digest)}) catch unreachable;
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(path, &digest, .{});
+        const digest_text = std.fmt.bytesToHex(digest, .lower);
         const name = try std.fmt.allocPrint(self.allocator, "{s}{s}-{s}", .{ instance_prefix, user, digest_text[0..20] });
         defer self.allocator.free(name);
         const raw_wide = try std.unicode.utf8ToUtf16LeAlloc(self.allocator, name);
