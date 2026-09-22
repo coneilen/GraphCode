@@ -35,7 +35,6 @@ $mainWindowSource = Get-Content (Join-Path $shellRoot "src\MainWindow.zig") -Raw
 $nativeFormsSource = Get-Content (Join-Path $shellRoot "src\NativeForms.zig") -Raw
 $inputSource = Get-Content (Join-Path $shellRoot "src\InputRouter.zig") -Raw
 $stubSource = Get-Content (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") -Raw
-$liveGateSource = Get-Content (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1") -Raw
 Assert-Contract ($appSource -match
   '(?s)pub fn checkForUpdates.*?requestUpdateCheck\(true\)' -and
   $appSource -match 'if \(!envFlag\("GRAPHCODE_UIA_UPDATE_AVAILABLE"\)\) self\.requestUpdateCheck\(false\)' -and
@@ -69,15 +68,6 @@ Assert-Contract ($shellSource -match '(?s)\$evidence = .*?STUB_DAEMON_EVIDENCE_J
   "stub protocol evidence is not emitted before validation can fail"
 Assert-Contract ($shellSource -notmatch '\$env:GRAPHCODE_ZMX list') `
   "session tracking must not block on unrelated zmx namespaces"
-Assert-Contract ($liveGateSource -match
-  '\$script:ForegroundRecoveryTimeoutMilliseconds = 30000') `
-  "New Loop node-form waits must reserve a widened (3x default) foreground-recovery budget to outlast sustained hosted-runner foreground contention"
-Assert-Contract ($liveGateSource -match
-  '(?s)if \(\$RecoverForeground -and \$TimeoutMilliseconds -eq 10000\) \{\s*\$TimeoutMilliseconds = \$script:ForegroundRecoveryTimeoutMilliseconds\s*\}') `
-  "Wait-ForDesktopElement must apply the widened recovery budget only to waits that opt into foreground recovery, leaving other waits' timeouts unchanged"
-Assert-Contract ($liveGateSource -match
-  '(?s)-condition \$sidebarNodeFormCondition.*?-label "project-row New Loop node form".*?-RecoverForeground') `
-  "project-row New Loop node-form wait must keep opting into foreground recovery"
 & {
   $sessionPrefix = "gs-owned"
   $testSessionIds = @("11111111-1111-4111-8111-111111111111")

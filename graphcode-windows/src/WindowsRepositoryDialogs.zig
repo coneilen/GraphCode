@@ -6,7 +6,7 @@ const AppFont = @import("AppFont.zig");
 extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
 
 fn darkDialogEraseBackground(hwnd: c.HWND, wparam: c.WPARAM) c.LRESULT {
-    const hdc: c.HDC = @ptrFromInt(wparam);
+    const hdc = deviceContextFrom(wparam);
     var client: c.RECT = undefined;
     _ = c.GetClientRect(hwnd, &client);
     const brush = c.CreateSolidBrush(Tokens.dialog_panel);

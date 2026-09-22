@@ -34,7 +34,6 @@ const DialogState = struct {
     tile_field_index: ?usize = null,
     tile_buttons: [max_tiles]c.HWND = .{null} ** max_tiles,
     tile_count: usize = 0,
-    foreground_reassert_ticks: usize = 0,
 };
 
 const max_tiles = 8;
@@ -55,42 +54,6 @@ const ok_id = 1;
 const cancel_id = 2;
 const reveal_id = 3;
 
-// A single SetForegroundWindow call right after ShowWindow can lose a race
-// against another process that keeps re-stealing the foreground shortly
-// after (observed in CI as a hosted runner agent's own periodic console
-// activation). Rather than relying on one attempt, keep reasserting for a
-// short window after the modal opens -- this is cheap, product-side, and
-// gives up once the modal genuinely holds the foreground or a bounded
-// number of ticks elapses, so it can never loop forever or fight a user
-// who deliberately switches away.
-const foreground_reassert_timer_id: usize = 771;
-const foreground_reassert_interval_ms: c.UINT = 120;
-const foreground_reassert_max_ticks: usize = 20;
-
-/// A plain SetForegroundWindow call can be silently ignored by Windows'
-/// foreground-lock heuristic when the calling process/thread hasn't
-/// recently received real input -- exactly the situation for a window
-/// driven purely by UI Automation Invoke calls rather than real keyboard
-/// or mouse input. Temporarily attaching this thread's input queue to the
-/// current foreground window's thread (the documented technique for this
-/// exact restriction) makes SetForegroundWindow reliable regardless of
-/// that heuristic, then detaches immediately afterward so no lasting
-/// input-queue coupling remains between the two processes.
-fn forceForeground(hwnd: c.HWND, current_foreground: c.HWND) void {
-    const our_thread = c.GetCurrentThreadId();
-    var attached = false;
-    var foreground_thread: c.DWORD = 0;
-    if (current_foreground != null) {
-        foreground_thread = c.GetWindowThreadProcessId(current_foreground, null);
-        if (foreground_thread != 0 and foreground_thread != our_thread) {
-            attached = c.AttachThreadInput(our_thread, foreground_thread, 1) != 0;
-        }
-    }
-    _ = c.BringWindowToTop(hwnd);
-    _ = c.ShowWindow(hwnd, c.SW_SHOW);
-    _ = c.SetForegroundWindow(hwnd);
-    if (attached) _ = c.AttachThreadInput(our_thread, foreground_thread, 0);
-}
 var active_state: bool = false;
 var active_state_storage: DialogState = undefined;
 
@@ -682,6 +645,15 @@ fn controlHandleFrom(lparam: c.LPARAM) c.HWND {
     return @ptrFromInt(@as(usize, @bitCast(lparam)));
 }
 
+/// Win32 passes the `DRAWITEMSTRUCT` address through `lparam`. Safety is
+/// disabled for the same reason as the handle conversions above: the value
+/// arrives as a raw integer and must not be subjected to Zig's pointer
+/// alignment assertions, which abort the process rather than fail softly.
+fn drawItemFrom(lparam: c.LPARAM) *c.DRAWITEMSTRUCT {
+    @setRuntimeSafety(false);
+    return @ptrFromInt(@as(usize, @bitCast(lparam)));
+}
+
 /// Blends `overlay` into `base` at `percent` strength (0-100), approximating
 /// the translucent accent fills LoopTypeChooser.swift layers over its dark
 /// background (`type.accent.opacity(0.12)` selected / `Color.white.opacity(0.035)`
@@ -911,7 +883,15 @@ fn fieldHelp(kind: Kind, index: usize) []const u8 {
 
 fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
     if (!active_state) return c.DefWindowProcW(hwnd, message, wparam, lparam);
-    const safe_hwnd: c.HWND = @ptrFromInt(@intFromPtr(hwnd.?));
+    // `hwnd` is already a `c.HWND`; the previous `@ptrFromInt(@intFromPtr(...))`
+    // round-trip only re-derived the same value, but it reintroduced a
+    // pointer-alignment safety check against a value that is a Win32 *handle*,
+    // not a real aligned pointer. Window handles are opaque, arbitrarily
+    // valued tokens, so whenever the window manager happened to hand out an
+    // unaligned handle the round-trip aborted the process with
+    // "panic: incorrect alignment" while the form was laying out. Use the
+    // parameter directly so no alignment assumption is made about a handle.
+    const safe_hwnd: c.HWND = hwnd;
     const value = &active_state_storage;
     switch (message) {
         c.WM_CREATE => {
@@ -942,12 +922,10 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             createButton(safe_hwnd, if (value.kind == .node) "Create" else if (value.kind == .worktree_policy) "Done" else if (value.kind == .worktree_sweep) "Remove Selected" else "OK", ok_id, 478, client.bottom - 38);
             if (value.kind == .worktree_sweep) createButton(safe_hwnd, "Show in Explorer", reveal_id, 300, client.bottom - 38);
             createButton(safe_hwnd, "Cancel", cancel_id, 393, client.bottom - 38);
-            value.foreground_reassert_ticks = 0;
-            _ = c.SetTimer(safe_hwnd, foreground_reassert_timer_id, foreground_reassert_interval_ms, null);
             return 0;
         },
         c.WM_ERASEBKGND => {
-            const hdc: c.HDC = @ptrFromInt(wparam);
+            const hdc = deviceContextFrom(wparam);
             var client: c.RECT = undefined;
             _ = c.GetClientRect(safe_hwnd, &client);
             fillFormBackground(hdc, client);
@@ -957,7 +935,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
         c.WM_CTLCOLOREDIT => return formCtlColorEdit(wparam),
         c.WM_CTLCOLORLISTBOX => return formCtlColorEdit(wparam),
         c.WM_DRAWITEM => {
-            const draw_item: *c.DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            const draw_item = drawItemFrom(lparam);
             if (value.tile_field_index != null and draw_item.CtlID >= tile_base_id and draw_item.CtlID < tile_base_id + max_tiles) {
                 drawTile(value, draw_item.CtlID - tile_base_id, draw_item);
                 return 1;
@@ -1066,18 +1044,6 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             applyModalCommand(value, .close);
             return 0;
         },
-        c.WM_TIMER => {
-            if (wparam == foreground_reassert_timer_id) {
-                value.foreground_reassert_ticks += 1;
-                const current = c.GetForegroundWindow();
-                if (current == safe_hwnd or value.foreground_reassert_ticks >= foreground_reassert_max_ticks) {
-                    _ = c.KillTimer(safe_hwnd, foreground_reassert_timer_id);
-                } else {
-                    forceForeground(safe_hwnd, current);
-                }
-                return 0;
-            }
-        },
         c.WM_SETFOCUS => {
             if (c.GetFocus()) |focused| {
                 for (0..20) |index| {
@@ -1089,7 +1055,6 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             }
         },
         c.WM_DESTROY => {
-            _ = c.KillTimer(safe_hwnd, foreground_reassert_timer_id);
             applyModalCommand(value, .destroy);
             return 0;
         },
@@ -1658,6 +1623,34 @@ fn utf8ToWideZ(allocator: std.mem.Allocator, value: []const u8) ![]u16 {
     @memcpy(result[0..raw.len], raw);
     result[raw.len] = 0;
     return result;
+}
+
+// Win32 handles (HWND/HDC) and message-supplied struct addresses are opaque
+// integers, not guaranteed-aligned pointers. Converting them with a plain
+// `@ptrFromInt` makes Zig assert pointer alignment and abort the process with
+// "panic: incorrect alignment" whenever the window manager hands back an
+// unaligned value -- which crashed the node form mid-layout. Every conversion
+// must therefore go through a `@setRuntimeSafety(false)` helper. These odd
+// (deliberately unaligned) values reproduce the original panic if that
+// guarantee regresses.
+test "win32 handle conversions tolerate unaligned handle values" {
+    const unaligned: usize = 0x0002_0311;
+    try std.testing.expectEqual(unaligned, @intFromPtr(deviceContextFrom(unaligned)));
+    try std.testing.expectEqual(
+        unaligned,
+        @intFromPtr(controlHandleFrom(@as(c.LPARAM, @bitCast(unaligned)))),
+    );
+    try std.testing.expectEqual(
+        unaligned,
+        @intFromPtr(drawItemFrom(@as(c.LPARAM, @bitCast(unaligned)))),
+    );
+    // A handle whose low bit is set is the exact shape that aborted before.
+    const odd: usize = 0x000b_0b0b;
+    try std.testing.expectEqual(odd, @intFromPtr(deviceContextFrom(odd)));
+    try std.testing.expectEqual(
+        odd,
+        @intFromPtr(controlHandleFrom(@as(c.LPARAM, @bitCast(odd)))),
+    );
 }
 
 test "modal submit and cancel transitions always terminate the loop" {
