@@ -8,6 +8,7 @@ const CanvasLayoutStore = @import("CanvasLayoutStore.zig");
 const GraphContextMenu = @import("GraphContextMenu.zig");
 const Forms = @import("Forms.zig");
 const NativeForms = @import("NativeForms.zig");
+const TemplateLibrary = @import("TemplateLibrary.zig");
 const JumpPalette = @import("JumpPalette.zig");
 const NativeDialogs = @import("WindowsNativeDialogs.zig");
 const Sidebar = @import("Sidebar.zig");
@@ -1135,7 +1136,7 @@ pub const App = struct {
         const path = self.allocator.dupe(u8, current_path) catch return;
         defer self.allocator.free(path);
         const settings = self.product_settings orelse return;
-        var draft = NativeForms.node(self.window.hwnd, self.allocator, .{
+        const initial = Forms.NodeDraft{
             .title = "",
             .backend = settings.default_backend,
             .model_tier = settings.default_model,
@@ -1143,16 +1144,78 @@ pub const App = struct {
             .copilot_permissions = settings.copilot_permissions,
             .briefing_enabled = settings.briefing,
             .activity_enabled = settings.activity,
-        }) catch {
-            self.setStatus("Unable to open node form");
-            return;
-        } orelse return;
-        defer draft.deinit(self.allocator);
-        Forms.validateNode(draft) catch {
-            self.setStatus("Invalid node form");
+        };
+        var templates = TemplateLibrary.load(self.allocator, path) catch {
+            self.setStatus("Unable to load saved templates");
             return;
         };
-        self.client.sendCreateNodeDraft(path, draft);
+        defer templates.deinit();
+        if (templates.templates.items.len == 0) {
+            var draft = NativeForms.node(self.window.hwnd, self.allocator, initial) catch {
+                self.setStatus("Unable to open node form");
+                return;
+            } orelse return;
+            defer draft.deinit(self.allocator);
+            Forms.validateNode(draft) catch {
+                self.setStatus("Invalid node form");
+                return;
+            };
+            self.client.sendCreateNodeDraft(path, draft);
+            return;
+        }
+
+        var labels = std.array_list.Managed([]const u8).init(self.allocator);
+        defer {
+            for (labels.items) |label| self.allocator.free(label);
+            labels.deinit();
+        }
+        for (templates.templates.items) |template| {
+            const label = std.fmt.allocPrint(self.allocator, "{s} — {s}", .{ template.name, template.body }) catch {
+                self.setStatus("Unable to prepare saved template list");
+                return;
+            };
+            labels.append(label) catch {
+                self.allocator.free(label);
+                self.setStatus("Unable to prepare saved template list");
+                return;
+            };
+        }
+
+        var current = initial;
+        var owns_current = false;
+        defer if (owns_current) current.deinit(self.allocator);
+        while (true) {
+            const result = NativeForms.nodeWithTemplates(self.window.hwnd, self.allocator, current, true) catch {
+                self.setStatus("Unable to open node form");
+                return;
+            };
+            switch (result) {
+                .cancelled => return,
+                .draft => |draft| {
+                    var submitted = draft;
+                    defer submitted.deinit(self.allocator);
+                    Forms.validateNode(submitted) catch {
+                        self.setStatus("Invalid node form");
+                        return;
+                    };
+                    self.client.sendCreateNodeDraft(path, submitted);
+                    return;
+                },
+                .templates => |draft| {
+                    if (owns_current) current.deinit(self.allocator);
+                    current = draft;
+                    owns_current = true;
+                    const selected = NativeForms.templatePicker(self.window.hwnd, self.allocator, labels.items) catch {
+                        self.setStatus("Unable to open saved template picker");
+                        return;
+                    };
+                    if (selected) |index| TemplateLibrary.applyOwned(&current, templates.templates.items[index], self.allocator) catch {
+                        self.setStatus("Unable to apply selected template");
+                        return;
+                    };
+                },
+            }
+        }
     }
 
     fn editSelectedNode(self: *App) void {
@@ -1913,6 +1976,7 @@ pub const App = struct {
                 .composite = composite,
                 .can_arm = std.mem.eql(u8, graph.nodes.items[index].pilot_state, "piloted"),
                 .unwired = unwired,
+                .follows_template = graph.nodes.items[index].follows_template,
             } },
             x,
             y,
@@ -2035,6 +2099,11 @@ pub const App = struct {
                     },
                     .wire_node => self.beginWireSelectedNode(index),
                     .mark_entry => self.markSelectedNodeAsEntry(index),
+                    .detach_template => {
+                        self.client.sendDetachTemplate(graph.project.path, graph.nodes.items[index].id);
+                        self.setStatus("Detached loop from its template");
+                    },
+                    .save_node_template => self.saveSelectedNodeAsTemplate(index),
                     else => {},
                 }
             },
@@ -2071,6 +2140,47 @@ pub const App = struct {
             .quick_chats => if (action == .new_quick_chat) self.createQuickChat(),
         }
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
+    }
+
+    fn saveSelectedNodeAsTemplate(self: *App, index: usize) void {
+        const graph = self.model.graph orelse return;
+        if (index >= graph.nodes.items.len) return;
+        var result = NativeDialogs.textWithDescription(
+            self.window.hwnd, self.allocator, "Save as Template",
+            "Name this reusable prompt template. It is stored in your per-user GraphCode library.",
+            &.{"Template name"}, &.{graph.nodes.items[index].title},
+        ) catch {
+            self.setStatus("Unable to open template save form");
+            return;
+        } orelse return;
+        defer result.deinit(self.allocator);
+        const node = graph.nodes.items[index];
+        const draft = Forms.NodeDraft{
+            .title = self.allocator.dupe(u8, node.title) catch return,
+            .loop_type = self.allocator.dupe(u8, node.loop_type) catch return,
+            .first_instruction = self.allocator.dupe(u8, if (node.trigger_prompt.len != 0) node.trigger_prompt else node.check_description) catch return,
+            .goal_summary = self.allocator.dupe(u8, node.goal_summary) catch return,
+            .trigger_prompt = self.allocator.dupe(u8, node.trigger_prompt) catch return,
+            .claude_permissions = "",
+            .copilot_permissions = "",
+        };
+        defer {
+            self.allocator.free(draft.title);
+            self.allocator.free(draft.loop_type);
+            self.allocator.free(draft.first_instruction);
+            self.allocator.free(draft.goal_summary);
+            self.allocator.free(draft.trigger_prompt);
+        }
+        var template = TemplateLibrary.fromDraft(self.allocator, result.values[0], draft) catch {
+            self.setStatus("A template needs a name and prompt");
+            return;
+        };
+        defer template.deinit(self.allocator);
+        TemplateLibrary.save(self.allocator, template) catch {
+            self.setStatus("Unable to save template");
+            return;
+        };
+        self.setStatus("Saved reusable template");
     }
 
     fn showCompositeGroup(self: *App, node: GraphModel.Node) void {
