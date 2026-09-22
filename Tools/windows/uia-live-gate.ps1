@@ -324,21 +324,40 @@ function Wait-ForDesktopElement(
   [string] $label,
   [IntPtr] $diagnosticWindow = [IntPtr]::Zero,
   [int] $TimeoutMilliseconds = 10000,
-  [int] $PollMilliseconds = 50
+  [int] $PollMilliseconds = 50,
+  [switch] $RecoverForeground
 ) {
   $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
   $element = $null
+  $foregroundRecoveries = 0
   while ([DateTime]::UtcNow -lt $deadline -and $null -eq $element) {
     $element = $desktop.FindFirst(
       [System.Windows.Automation.TreeScope]::Descendants,
       $condition
     )
     if ($null -eq $element) {
+      if ($RecoverForeground -and $diagnosticWindow -ne [IntPtr]::Zero -and
+          -not [GraphCodeUiaGateState]::IsForegroundWindow($diagnosticWindow)) {
+        $remainingMilliseconds = [Math]::Max(
+          1, [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        )
+        $recoveryTimeout = [Math]::Min(1000, $remainingMilliseconds)
+        $foregroundRecoveries++
+        Write-Host "UIA_WAIT_FOREGROUND_RECOVERY label=$label attempt=$foregroundRecoveries phase=lost $(Get-FocusDiagnostics $diagnosticWindow)"
+        $recovered = Ensure-ShellForeground `
+          -window $diagnosticWindow `
+          -label "$label modal-open recovery" `
+          -TimeoutMilliseconds $recoveryTimeout `
+          -PollMilliseconds $PollMilliseconds
+        if (-not $recovered) {
+          Write-Host "UIA_WAIT_FOREGROUND_RECOVERY label=$label attempt=$foregroundRecoveries phase=unrecovered $(Get-FocusDiagnostics $diagnosticWindow)"
+        }
+      }
       Start-Sleep -Milliseconds $PollMilliseconds
     }
   }
   if ($null -eq $element -and $diagnosticWindow -ne [IntPtr]::Zero) {
-    Write-Host "UIA_WAIT_DIAGNOSTICS label=$label $(Get-FocusDiagnostics $diagnosticWindow)"
+    Write-Host "UIA_WAIT_DIAGNOSTICS label=$label foregroundRecoveries=$foregroundRecoveries $(Get-FocusDiagnostics $diagnosticWindow)"
   }
   return $element
 }
@@ -883,7 +902,8 @@ try {
     -desktop $desktop `
     -condition $sidebarNodeFormCondition `
     -label "project-row New Loop node form" `
-    -diagnosticWindow $shellWindow
+    -diagnosticWindow $shellWindow `
+    -RecoverForeground
   Require ($null -ne $sidebarNodeForm) "project-row New Loop did not open the node form"
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$sidebarNodeForm.Current.NativeWindowHandle
@@ -1733,7 +1753,8 @@ try {
     -desktop $desktop `
     -condition $nodeFormCondition `
     -label "empty global New Loop node form" `
-    -diagnosticWindow $shellWindow
+    -diagnosticWindow $shellWindow `
+    -RecoverForeground
   Require ($null -ne $nodeForm) "empty global New Loop did not open the node form"
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$nodeForm.Current.NativeWindowHandle
@@ -1760,7 +1781,8 @@ try {
     -desktop $desktop `
     -condition $nodeFormCondition `
     -label "empty project New Loop node form" `
-    -diagnosticWindow $shellWindow
+    -diagnosticWindow $shellWindow `
+    -RecoverForeground
   Require ($null -ne $projectNodeForm) "empty project New Loop did not open the node form"
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$projectNodeForm.Current.NativeWindowHandle
