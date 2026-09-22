@@ -31,7 +31,8 @@ const WorktreeDialog = @import("WorktreeDialog.zig");
 const Accessibility = @import("Accessibility.zig");
 const Navigation = @import("Navigation.zig");
 const WorkspaceControls = @import("WorkspaceControls.zig");
-const c = @import("Win32.zig").c;
+const Win32 = @import("Win32.zig");
+const c = Win32.c;
 
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
 const instance_prefix = "Local\\graphcode-windows-";
@@ -394,7 +395,7 @@ pub const App = struct {
             _ = c.SetPropW(
                 self.window.hwnd,
                 daemon_supervisor_test_property.ptr,
-                @ptrFromInt(state),
+                Win32.opaquePointerFromInt(c.HANDLE, state),
             );
         }
         if (self.daemon.status().len != 0) self.setStatus(self.daemon.status());
@@ -4376,7 +4377,7 @@ fn onWindowMessage(
             const dpi = @as(u32, @intCast(wparam & 0xffff));
             app.dpi = Dpi.normalize(dpi);
             if (lparam != 0) {
-                const suggested: *const c.RECT = @ptrFromInt(@as(usize, @bitCast(lparam)));
+                const suggested = Win32.messagePointer(*const c.RECT, lparam);
                 _ = c.SetWindowPos(
                     hwnd,
                     null,

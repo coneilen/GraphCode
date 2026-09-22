@@ -1,5 +1,6 @@
 const std = @import("std");
-const c = @import("Win32.zig").c;
+const Win32 = @import("Win32.zig");
+const c = Win32.c;
 const Tokens = @import("DesignTokens.zig");
 const AppFont = @import("AppFont.zig");
 
@@ -688,7 +689,7 @@ fn registerRepositoryDialogClass() !void {
     klass.lpfnWndProc = @ptrCast(&repositoryDialogProc);
     klass.hInstance = c.GetModuleHandleW(null);
     klass.lpszClassName = repository_dialog_class.ptr;
-    klass.hCursor = c.LoadCursorW(null, @ptrFromInt(32512));
+    klass.hCursor = c.LoadCursorW(null, Win32.resourceIdentifier(32512));
     klass.hbrBackground = null;
     if (c.RegisterClassW(&klass) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
         return error.RepositoryDialogClassRegistrationFailed;
@@ -1135,7 +1136,7 @@ fn registerOperationDialogClass() !void {
     klass.lpfnWndProc = @ptrCast(&operationDialogProc);
     klass.hInstance = c.GetModuleHandleW(null);
     klass.lpszClassName = operation_dialog_class.ptr;
-    klass.hCursor = c.LoadCursorW(null, @ptrFromInt(32512));
+    klass.hCursor = c.LoadCursorW(null, Win32.resourceIdentifier(32512));
     klass.hbrBackground = null;
     if (c.RegisterClassW(&klass) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
         return error.OperationDialogClassRegistrationFailed;

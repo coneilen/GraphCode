@@ -33,8 +33,30 @@ $shellSource = Get-Content $shellScript -Raw
 $appSource = Get-Content (Join-Path $shellRoot "src\App.zig") -Raw
 $mainWindowSource = Get-Content (Join-Path $shellRoot "src\MainWindow.zig") -Raw
 $nativeFormsSource = Get-Content (Join-Path $shellRoot "src\NativeForms.zig") -Raw
+$nativeDialogsSource = Get-Content (Join-Path $shellRoot "src\WindowsNativeDialogs.zig") -Raw
+$productSettingsSource = Get-Content (Join-Path $shellRoot "src\WindowsProductSettings.zig") -Raw
+$traySource = Get-Content (Join-Path $shellRoot "src\Tray.zig") -Raw
+$win32Source = Get-Content (Join-Path $shellRoot "src\Win32.zig") -Raw
 $inputSource = Get-Content (Join-Path $shellRoot "src\InputRouter.zig") -Raw
 $stubSource = Get-Content (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") -Raw
+Assert-Contract ($win32Source -match
+  '(?s)pub fn opaquePointerFromInt.*?@setRuntimeSafety\(false\);.*?@ptrFromInt\(value\)' -and
+  $win32Source -match 'pub fn messagePointer' -and
+  $win32Source -match 'pub fn resourceIdentifier') `
+  "external Win32 pointer-shaped integers must cross a runtime-safety-disabled boundary"
+Assert-Contract ($appSource -notmatch '@ptrFromInt\(state\)' -and
+  $appSource -notmatch 'suggested:\s*\*const c\.RECT\s*=\s*@ptrFromInt' -and
+  $mainWindowSource -notmatch 'CREATESTRUCTW,\s*@ptrFromInt' -and
+  $traySource -notmatch '@ptrFromInt\(@as\(usize,\s*event\)\)' -and
+  $nativeDialogsSource -notmatch 'c\.HMENU\s*=\s*@ptrFromInt' -and
+  $productSettingsSource -notmatch '@ptrFromInt\(backend_id\)' -and
+  $productSettingsSource -notmatch 'else\s+@ptrFromInt\(id\)') `
+  "Win32 handles and message pointers must use the explicit unsafe conversion helpers"
+$windowSources = Get-ChildItem (Join-Path $shellRoot "src") -Filter "*.zig" -File |
+  ForEach-Object { Get-Content $_.FullName -Raw }
+Assert-Contract (($windowSources -join "`n") -notmatch
+  'Load(?:Cursor|Icon)W\([^\r\n]*@ptrFromInt') `
+  "Win32 integer resource identifiers must use the explicit unsafe conversion helper"
 Assert-Contract ($appSource -match
   '(?s)pub fn checkForUpdates.*?requestUpdateCheck\(true\)' -and
   $appSource -match 'if \(!envFlag\("GRAPHCODE_UIA_UPDATE_AVAILABLE"\)\) self\.requestUpdateCheck\(false\)' -and
@@ -154,6 +176,7 @@ foreach ($path in @(
     "package-metadata.json",
     "README.md",
     "src\main.zig",
+    "src\Win32.zig",
     "src\App.zig",
     "src\MainWindow.zig",
     "src\DaemonClient.zig",
@@ -275,6 +298,18 @@ Invoke-Native "Wire executable tests" {
 Invoke-Native "Forms and navigation executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Forms.zig } finally { Pop-Location }
+}
+Invoke-Native "Win32 pointer conversion executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\Win32.zig -target x86_64-windows-msvc -lc "-I$include"
+  } finally { Pop-Location }
 }
 Invoke-Native "Native dialog message-loop executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent

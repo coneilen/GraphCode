@@ -1,5 +1,6 @@
 const std = @import("std");
-const c = @import("Win32.zig").c;
+const Win32 = @import("Win32.zig");
+const c = Win32.c;
 
 pub const command_open: c.WPARAM = 0x5001;
 pub const command_exit: c.WPARAM = 0x5002;
@@ -38,7 +39,7 @@ pub const Tray = struct {
         data.uID = icon_id;
         data.uFlags = c.NIF_MESSAGE | c.NIF_TIP | c.NIF_ICON;
         data.uCallbackMessage = notify_message;
-        data.hIcon = c.LoadIconW(null, @ptrFromInt(32512));
+        data.hIcon = c.LoadIconW(null, Win32.resourceIdentifier(32512));
         const tip = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode");
         @memcpy(data.szTip[0..tip.len], tip);
         if (c.Shell_NotifyIconW(c.NIM_ADD, &data) == 0) {
@@ -95,7 +96,11 @@ pub const Tray = struct {
 
     pub fn observeTestCallback(self: *Tray, event: c.UINT, test_callback: bool) void {
         if (self.test_hook_enabled and test_callback) {
-            _ = c.SetPropW(self.hwnd, test_callback_ack_property.ptr, @ptrFromInt(@as(usize, event)));
+            _ = c.SetPropW(
+                self.hwnd,
+                test_callback_ack_property.ptr,
+                Win32.opaquePointerFromInt(c.HANDLE, @as(usize, event)),
+            );
         }
     }
 };
