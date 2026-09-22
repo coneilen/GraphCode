@@ -446,6 +446,43 @@ function Retain-FocusWithRetry(
   return [pscustomobject]@{ Focused = $null; Candidate = $candidate }
 }
 
+function Ensure-ShellForeground(
+  [IntPtr] $window,
+  [string] $label,
+  [int] $TimeoutMilliseconds = 5000,
+  [int] $PollMilliseconds = 50
+) {
+  # GitHub's hosted runner agent (or other host chrome) can steal the
+  # foreground window between UIA steps. Reacquire and verify true
+  # foreground ownership of the GraphCode shell immediately before any
+  # command/UIA path that depends on the shell being foreground, retrying
+  # within a bounded deadline instead of assuming a prior activation holds.
+  #
+  # Only fall back to ActivateWindow's invasive Alt-tap foreground-lock
+  # bypass (keybd_event + SetForegroundWindow) when the shell does not
+  # already hold true foreground ownership: that trick injects a global
+  # synthetic Alt key press/release, and issuing it when it is not needed
+  # (the shell is already foreground) races the very next native window
+  # this gate creates and can desynchronize its subsequent close handling.
+  if ([GraphCodeUiaGateState]::IsForegroundWindow($window)) {
+    return $true
+  }
+  $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+  $acquired = $false
+  do {
+    Hide-TestProviderZmxWindows
+    $activated = [GraphCodeUiaGateState]::ActivateWindow($window)
+    $acquired = $activated -and [GraphCodeUiaGateState]::IsForegroundWindow($window)
+    if (-not $acquired) {
+      Start-Sleep -Milliseconds $PollMilliseconds
+    }
+  } while (-not $acquired -and [DateTime]::UtcNow -lt $deadline)
+  if (-not $acquired) {
+    Write-Host "UIA_FOREGROUND_DIAGNOSTICS phase=$label $(Get-FocusDiagnostics $window)"
+  }
+  return $acquired
+}
+
 function Get-DirectChildren(
   [System.Windows.Automation.AutomationElement] $element,
   [System.Windows.Automation.TreeWalker] $walker
@@ -830,6 +867,8 @@ try {
     $_.Current.AutomationId -match '^project-new-loop-' -and $_.Current.Name -eq "New Loop"
   }) | Select-Object -First 1
   Require ($null -ne $projectNewLoop) "project row omitted New Loop"
+  Require (Ensure-ShellForeground $shellWindow "project-row New Loop") `
+    "GraphCode shell did not reacquire foreground before invoking project-row New Loop"
   $projectNewLoop.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   $sidebarNodeForm = $null
   $sidebarNodeFormCondition = New-Object System.Windows.Automation.AndCondition(
@@ -1670,6 +1709,8 @@ try {
     -label "Open Folder picker close" `
     -diagnosticWindow $shellWindow) "native folder picker did not close after cancellation"
 
+  Require (Ensure-ShellForeground $shellWindow "empty global New Loop") `
+    "GraphCode shell did not reacquire foreground before empty global New Loop command"
   Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, 4602)) `
     "empty global New Loop command was rejected"
   $nodeForm = $null
@@ -1710,6 +1751,8 @@ try {
            ($emptyProjectLoopButton.Current.Name -eq "New Loop") -and
            (-not $emptyProjectLoopButton.Current.IsOffscreen)) `
     "empty project canvas omitted its visible New Loop action"
+  Require (Ensure-ShellForeground $shellWindow "empty project New Loop") `
+    "GraphCode shell did not reacquire foreground before empty project New Loop command"
   Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, 4602)) `
     "empty project New Loop command was rejected"
   $projectNodeForm = $null
