@@ -33,6 +33,7 @@ const WorktreeDialog = @import("WorktreeDialog.zig");
 const Accessibility = @import("Accessibility.zig");
 const Navigation = @import("Navigation.zig");
 const WorkspaceControls = @import("WorkspaceControls.zig");
+const WorkspaceLifecycle = @import("WorkspaceLifecycle.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
 
@@ -173,6 +174,7 @@ const UiaDynamicTarget = union(enum) {
     workspace_toggle_panel,
     workspace_tab: usize,
     workspace_tab_close: usize,
+    workspace_switch: usize,
 };
 
 pub const App = struct {
@@ -212,6 +214,8 @@ pub const App = struct {
     quick_chats_requested: bool = false,
     selected_quick_chat: ?usize = null,
     instance_mutex: c.HANDLE = null,
+    workspace_list: ?WorkspaceLifecycle.List = null,
+    workspace_path: []u8 = &.{},
     sync_requested: bool = false,
     restore_requested: bool = false,
     open_project_pending: bool = false,
@@ -343,6 +347,8 @@ pub const App = struct {
         if (self.selected_edge_id.len != 0) self.allocator.free(self.selected_edge_id);
         if (self.edge_drag_source_id.len != 0) self.allocator.free(self.edge_drag_source_id);
         if (self.instance_mutex != null) _ = c.CloseHandle(self.instance_mutex);
+        if (self.workspace_list) |*list| list.deinit(self.allocator);
+        if (self.workspace_path.len != 0) self.allocator.free(self.workspace_path);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         if (self.accepted_subscription.len != 0) self.allocator.free(self.accepted_subscription);
         if (self.pending_project_path.len != 0) self.allocator.free(self.pending_project_path);
@@ -445,6 +451,7 @@ pub const App = struct {
             }
         }
         self.createEmptyStateControls();
+        self.refreshWorkspaceList();
         self.updateNativeChrome();
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_FIXTURE_ROWS")) |fixture| {
             defer self.allocator.free(fixture);
@@ -3350,6 +3357,19 @@ pub const App = struct {
                 recent_menu[index] = .{ .path = project.path, .name = project.name };
             }
         }
+        var workspace_items: []MainWindow.WorkspaceItem = &.{};
+        if (self.workspace_list) |list| {
+            workspace_items = self.allocator.alloc(MainWindow.WorkspaceItem, list.items.len) catch &.{};
+            if (workspace_items.len != 0) {
+                for (list.items, 0..) |workspace, index| {
+                    workspace_items[index] = .{
+                        .name = workspace.name,
+                        .is_current = WorkspaceLifecycle.isSamePath(workspace.path, self.workspace_path),
+                    };
+                }
+            }
+        }
+        defer if (workspace_items.len != 0) self.allocator.free(workspace_items);
         MainWindow.updateMenu(self.window.hwnd, .{
             .has_project = self.model.graph != null,
             .can_worktrees = if (self.model.graph) |graph| graph.project.isLocalFilesystem() else false,
@@ -3361,6 +3381,7 @@ pub const App = struct {
             .activity_visible = self.workspace_controls.activity_enabled,
             .update_checking = update_checking,
             .recent_folders = recent_menu,
+            .workspaces = workspace_items,
         });
         self.layoutEmptyStateControls();
     }
@@ -3736,6 +3757,28 @@ pub const App = struct {
                 .bottom = bounds.bottom,
             }) catch return;
         }
+        if (self.workspace_list) |list| {
+            for (list.items, 0..) |workspace, index| {
+                const identity = std.fmt.allocPrint(self.allocator, "workspace-switch:{s}", .{workspace.path}) catch return;
+                owned_identities.append(identity) catch {
+                    self.allocator.free(identity);
+                    return;
+                };
+                const row_top: i32 = 34 + @as(i32, @intCast(index * 30));
+                elements.append(.{
+                    .identity = identity,
+                    .name = workspace.name,
+                    .parent = 5,
+                    .selected = WorkspaceLifecycle.isSamePath(workspace.path, self.workspace_path),
+                    .eligible = true,
+                    .invokable = true,
+                    .left = 250,
+                    .top = row_top,
+                    .right = 500,
+                    .bottom = row_top + 28,
+                }) catch return;
+            }
+        }
         const policy = if (self.worktree_dialog) |dialog| dialog.policy else WorktreeStatus.Policy{};
         provider.syncElements(self.status(), elements.items, policy);
     }
@@ -3947,6 +3990,16 @@ pub const App = struct {
                 if (target != null) return false;
                 target = .{ .activity = index };
             }
+            if (self.workspace_list) |list| {
+                for (list.items, 0..) |workspace, index| {
+                    const identity = std.fmt.allocPrint(self.allocator, "workspace-switch:{s}", .{workspace.path}) catch return false;
+                    defer self.allocator.free(identity);
+                    if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                        if (target != null) return false;
+                        target = .{ .workspace_switch = index };
+                    }
+                }
+            }
         }
         const resolved = target orelse return false;
         switch (resolved) {
@@ -4031,6 +4084,11 @@ pub const App = struct {
             .workspace_toggle_panel => self.toggleWorkspaceDetailPanel(),
             .workspace_tab => |index| if (self.workspace) |workspace| workspace.selectTab(index) catch return false,
             .workspace_tab_close => |index| if (self.workspace) |workspace| workspace.closeTab(index) catch return false,
+            .workspace_switch => |index| {
+                const list = self.workspace_list orelse return false;
+                if (index >= list.items.len) return false;
+                self.launchWorkspace(list.items[index].path);
+            },
         }
         self.clampSidebarScroll();
         self.syncAccessibility();
@@ -4073,7 +4131,12 @@ pub const App = struct {
         const user = std.process.getEnvVarOwned(self.allocator, "USERNAME") catch
             try std.process.getEnvVarOwned(self.allocator, "USER");
         defer self.allocator.free(user);
-        const name = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ instance_prefix, user });
+        const path = try WorkspaceLifecycle.currentPath(self.allocator);
+        defer self.allocator.free(path);
+        const digest = std.crypto.hash.sha2.Sha256.hash(path, .{});
+        var digest_text: [64]u8 = undefined;
+        _ = std.fmt.bufPrint(&digest_text, "{s}", .{std.fmt.fmtSliceHexLower(&digest)}) catch unreachable;
+        const name = try std.fmt.allocPrint(self.allocator, "{s}{s}-{s}", .{ instance_prefix, user, digest_text[0..20] });
         defer self.allocator.free(name);
         const raw_wide = try std.unicode.utf8ToUtf16LeAlloc(self.allocator, name);
         defer self.allocator.free(raw_wide);
@@ -4088,6 +4151,200 @@ pub const App = struct {
             self.instance_mutex = null;
             return error.InstanceAlreadyRunning;
         }
+    }
+
+    fn refreshWorkspaceList(self: *App) void {
+        const current = WorkspaceLifecycle.currentPath(self.allocator) catch {
+            self.setStatus("Workspace location could not be resolved");
+            return;
+        };
+        if (self.workspace_path.len != 0) self.allocator.free(self.workspace_path);
+        self.workspace_path = current;
+        if (self.workspace_list) |*list| list.deinit(self.allocator);
+        self.workspace_list = WorkspaceLifecycle.list(self.allocator) catch {
+            self.setStatus("Workspace list could not be loaded");
+            null;
+        };
+    }
+
+    fn showWorkspaceText(self: *App, dialog_title: []const u8, labels: []const []const u8, initial: []const []const u8) ?NativeForms.Result {
+        return NativeForms.textWithDescription(
+            self.window.hwnd,
+            self.allocator,
+            dialog_title,
+            "Workspace names are normalized to lowercase letters, numbers, and hyphens.",
+            labels,
+            initial,
+        ) catch {
+            self.setStatus("Workspace dialog could not be opened");
+            return null;
+        };
+    }
+
+    fn createWorkspace(self: *App) void {
+        const result = self.showWorkspaceText("New Workspace", &.{"Name"}, &.{""}) orelse return;
+        defer {
+            var owned = result;
+            owned.deinit(self.allocator);
+        }
+        const home = std.process.getEnvVarOwned(self.allocator, "USERPROFILE") catch {
+            self.setStatus("User profile could not be resolved");
+            return;
+        };
+        defer self.allocator.free(home);
+        const name = WorkspaceLifecycle.validateName(self.allocator, result.values[0], home) catch |err| {
+            self.setStatus(switch (err) {
+                error.EmptyName => "Workspace name is required",
+                error.NameTooLong => "Workspace name is too long",
+                error.NameTaken => "That workspace already exists",
+                else => "Workspace name is invalid",
+            });
+            return;
+        };
+        defer self.allocator.free(name);
+        const path = WorkspaceLifecycle.workspacePath(self.allocator, name, home) catch {
+            self.setStatus("Workspace path could not be prepared");
+            return;
+        };
+        defer self.allocator.free(path);
+        std.fs.makeDirAbsolute(path) catch |err| {
+            self.setStatus(if (err == error.PathAlreadyExists) "That workspace already exists" else "Workspace could not be created");
+            return;
+        };
+        self.refreshWorkspaceList();
+        self.launchWorkspace(path);
+    }
+
+    fn launchWorkspace(self: *App, path: []const u8) void {
+        const old = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SUPPORT_DIR") catch null;
+        defer if (old) |value| self.allocator.free(value);
+        const key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_SUPPORT_DIR");
+        const value = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, path) catch {
+            self.setStatus("Workspace path could not be encoded");
+            return;
+        };
+        defer self.allocator.free(value);
+        if (c.SetEnvironmentVariableW(key.ptr, value.ptr) == 0) {
+            self.setStatus("Workspace launch environment could not be set");
+            return;
+        }
+        defer {
+            if (old) |previous| {
+                if (std.unicode.utf8ToUtf16LeAllocZ(self.allocator, previous)) |previous_wide| {
+                    defer self.allocator.free(previous_wide);
+                    _ = c.SetEnvironmentVariableW(key.ptr, previous_wide.ptr);
+                } else |_| {
+                    _ = c.SetEnvironmentVariableW(key.ptr, null);
+                }
+            } else {
+                _ = c.SetEnvironmentVariableW(key.ptr, null);
+            }
+        }
+        var executable: [32768]u16 = undefined;
+        const length = c.GetModuleFileNameW(null, &executable, executable.len);
+        if (length == 0 or length >= executable.len) {
+            self.setStatus("GraphCode executable path could not be resolved");
+            return;
+        }
+        executable[length] = 0;
+        var startup: c.STARTUPINFOW = std.mem.zeroes(c.STARTUPINFOW);
+        startup.cb = @sizeOf(c.STARTUPINFOW);
+        var process: c.PROCESS_INFORMATION = undefined;
+        if (c.CreateProcessW(executable[0..length :0].ptr, null, null, null, 0, 0, null, null, &startup, &process) == 0) {
+            self.setStatus("Workspace could not be opened");
+            return;
+        }
+        _ = c.CloseHandle(process.hThread);
+        _ = c.CloseHandle(process.hProcess);
+        self.setStatus("Workspace opened");
+    }
+
+    fn workspaceByName(self: *App, name: []const u8) ?WorkspaceLifecycle.Workspace {
+        const list = self.workspace_list orelse return null;
+        for (list.items) |workspace| {
+            if (std.ascii.eqlIgnoreCase(workspace.name, name)) return workspace;
+        }
+        return null;
+    }
+
+    fn renameWorkspace(self: *App) void {
+        const result = self.showWorkspaceText(
+            "Rename Workspace",
+            &.{ "Workspace", "New name" },
+            &.{ "", "" },
+        ) orelse return;
+        defer {
+            var owned = result;
+            owned.deinit(self.allocator);
+        }
+        const workspace = self.workspaceByName(result.values[0]) orelse {
+            self.setStatus("Workspace was not found");
+            return;
+        };
+        if (workspace.is_default or WorkspaceLifecycle.isSamePath(workspace.path, self.workspace_path)) {
+            self.setStatus("Switch to another workspace before renaming this one");
+            return;
+        }
+        const home = std.process.getEnvVarOwned(self.allocator, "USERPROFILE") catch return;
+        defer self.allocator.free(home);
+        const name = WorkspaceLifecycle.validateName(self.allocator, result.values[1], home) catch {
+            self.setStatus("Workspace name is invalid or already exists");
+            return;
+        };
+        defer self.allocator.free(name);
+        const destination = WorkspaceLifecycle.workspacePath(self.allocator, name, home) catch return;
+        defer self.allocator.free(destination);
+        std.fs.renameAbsolute(workspace.path, destination) catch {
+            self.setStatus("Workspace could not be renamed");
+            return;
+        };
+        self.refreshWorkspaceList();
+        self.setStatus("Workspace renamed");
+    }
+
+    fn deleteWorkspace(self: *App) void {
+        const result = self.showWorkspaceText("Delete Workspace", &.{"Workspace"}, &.{""}) orelse return;
+        defer {
+            var owned = result;
+            owned.deinit(self.allocator);
+        }
+        const workspace = self.workspaceByName(result.values[0]) orelse {
+            self.setStatus("Workspace was not found");
+            return;
+        };
+        if (workspace.is_default or WorkspaceLifecycle.isSamePath(workspace.path, self.workspace_path)) {
+            self.setStatus("The default or current workspace cannot be deleted");
+            return;
+        }
+        const dialog_title = std.unicode.utf8ToUtf16LeStringLiteral("Delete Workspace");
+        const message = std.unicode.utf8ToUtf16LeStringLiteral(
+            "This permanently deletes the workspace folder and all of its projects and loops. Continue?",
+        );
+        if (c.MessageBoxW(self.window.hwnd, message.ptr, dialog_title.ptr, c.MB_YESNO | c.MB_ICONWARNING | c.MB_DEFBUTTON2) != c.IDYES) {
+            self.setStatus("Workspace deletion cancelled");
+            return;
+        }
+        std.fs.deleteTreeAbsolute(workspace.path) catch {
+            self.setStatus("Workspace could not be deleted");
+            return;
+        };
+        self.refreshWorkspaceList();
+        self.setStatus("Workspace deleted");
+    }
+
+    fn cycleWorkspace(self: *App, direction: isize) void {
+        const list = self.workspace_list orelse return;
+        if (list.items.len < 2) return;
+        var index: usize = 0;
+        for (list.items, 0..) |workspace, i| {
+            if (WorkspaceLifecycle.isSamePath(workspace.path, self.workspace_path)) {
+                index = i;
+                break;
+            }
+        }
+        const count = @as(isize, @intCast(list.items.len));
+        const next = @mod(@as(isize, @intCast(index)) + direction + count, count);
+        self.launchWorkspace(list.items[@intCast(next)].path);
     }
 };
 
@@ -4288,6 +4545,11 @@ fn onWindowMessage(
                 if (recent_index < app.model.recent_projects.items.len) {
                     app.openProject(app.model.recent_projects.items[recent_index].path);
                 }
+            } else if (id >= MainWindow.workspace_command_base and id <= MainWindow.workspace_command_limit) {
+                const workspace_index = id - MainWindow.workspace_command_base;
+                if (app.workspace_list) |list| {
+                    if (workspace_index < list.items.len) app.launchWorkspace(list.items[workspace_index].path);
+                }
             } else if (MainWindow.commandFromId(id)) |command| {
                 switch (command) {
                     .open_folder => app.openFolder(),
@@ -4336,6 +4598,12 @@ fn onWindowMessage(
                     .onboarding => app.handleAction(.onboarding),
                     .check_updates => app.checkForUpdates(),
                     .about => app.showAbout(),
+                    .workspace_new => app.createWorkspace(),
+                    .workspace_manage => app.setStatus("Use Rename Workspace or Delete Workspace from the Workspace menu"),
+                    .workspace_rename => app.renameWorkspace(),
+                    .workspace_delete => app.deleteWorkspace(),
+                    .workspace_next => app.cycleWorkspace(1),
+                    .workspace_previous => app.cycleWorkspace(-1),
                 }
             }
             app.updateNativeChrome();

@@ -8,10 +8,18 @@ const c = if (builtin.os.tag == .windows and builtin.link_libc) @import("Win32.z
     pub const LPARAM = isize;
     pub const LRESULT = isize;
     pub const HRESULT = i32;
-    pub fn SetPropW(_: HWND, _: [*:0]const u16, _: HANDLE) c_int { return 0; }
-    pub fn RemovePropW(_: HWND, _: [*:0]const u16) HANDLE { return null; }
-    pub fn GetPropW(_: HWND, _: [*:0]const u16) HANDLE { return null; }
-    pub fn GetDesktopWindow() HWND { return null; }
+    pub fn SetPropW(_: HWND, _: [*:0]const u16, _: HANDLE) c_int {
+        return 0;
+    }
+    pub fn RemovePropW(_: HWND, _: [*:0]const u16) HANDLE {
+        return null;
+    }
+    pub fn GetPropW(_: HWND, _: [*:0]const u16) HANDLE {
+        return null;
+    }
+    pub fn GetDesktopWindow() HWND {
+        return null;
+    }
 };
 const provider_property = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.AccessibilityProvider");
 const NativeProvider = opaque {};
@@ -102,7 +110,9 @@ pub const Provider = struct {
     }
     pub fn deinit(self: *Provider) void {
         self.detach();
-        self.elements.deinit(); self.focus_order.deinit(); self.notifications.deinit();
+        self.elements.deinit();
+        self.focus_order.deinit();
+        self.notifications.deinit();
     }
     pub fn attach(self: *Provider, hwnd: c.HWND) bool {
         if (!builtin.link_libc) return false;
@@ -273,15 +283,44 @@ pub fn defaultContract(allocator: std.mem.Allocator) !Provider {
     _ = try provider.add(.{ .id = "actual-size", .name = "Actual size", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "zoom-in", .name = "Zoom in", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "fit-canvas", .name = "Fit canvas", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
-    const menu = try provider.add(.{ .id = "actions", .name = "Actions", .role = .menu, .parent = window, .focusable = true, .patterns = &.{ .expand_collapse } });
-    _ = try provider.add(.{ .id = "inspect-worktrees", .name = "Inspect worktrees", .role = .menu_item, .parent = menu, .patterns = &.{ .invoke } });
-    _ = try provider.add(.{ .id = "reclaim-worktrees", .name = "Reclaim selected worktrees", .role = .menu_item, .parent = menu, .patterns = &.{ .invoke } });
-    _ = try provider.add(.{ .id = "reveal-worktree", .name = "Reveal in Explorer", .role = .menu_item, .parent = menu, .patterns = &.{ .invoke } });
+    const menu = try provider.add(.{ .id = "actions", .name = "Actions", .role = .menu, .parent = window, .focusable = true, .patterns = &.{.expand_collapse} });
+    _ = try provider.add(.{ .id = "inspect-worktrees", .name = "Inspect worktrees", .role = .menu_item, .parent = menu, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "reclaim-worktrees", .name = "Reclaim selected worktrees", .role = .menu_item, .parent = menu, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "reveal-worktree", .name = "Reveal in Explorer", .role = .menu_item, .parent = menu, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "terminal-a", .name = "Terminal A", .role = .terminal, .parent = window, .focusable = true, .patterns = &.{ .text, .scroll } });
     _ = try provider.add(.{ .id = "terminal-b", .name = "Terminal B", .role = .terminal, .parent = window, .focusable = true, .patterns = &.{ .text, .scroll } });
     _ = try provider.add(.{ .id = "status", .name = "Status", .role = .status, .parent = window });
     _ = try provider.add(.{ .id = "errors", .name = "Errors", .role = .status, .parent = window });
-    _ = try provider.add(.{ .id = "move-project-unavailable", .name = "Move project unavailable: daemon support required", .role = .menu_item, .parent = menu, .patterns = &.{ .text } });
+    _ = try provider.add(.{ .id = "move-project-unavailable", .name = "Move project unavailable: daemon support required", .role = .menu_item, .parent = menu, .patterns = &.{.text} });
+    const workspaces = try provider.add(.{
+        .id = "workspaces",
+        .name = "Workspaces",
+        .role = .menu,
+        .parent = window,
+        .focusable = true,
+        .patterns = &.{ .selection, .expand_collapse },
+    });
+    _ = try provider.add(.{
+        .id = "workspace-new",
+        .name = "New Workspace",
+        .role = .menu_item,
+        .parent = workspaces,
+        .patterns = &.{.invoke},
+    });
+    _ = try provider.add(.{
+        .id = "workspace-rename",
+        .name = "Rename Workspace",
+        .role = .menu_item,
+        .parent = workspaces,
+        .patterns = &.{.invoke},
+    });
+    _ = try provider.add(.{
+        .id = "workspace-delete",
+        .name = "Delete Workspace",
+        .role = .menu_item,
+        .parent = workspaces,
+        .patterns = &.{.invoke},
+    });
     return provider;
 }
 
@@ -309,10 +348,20 @@ test "UIA contract exposes named roles patterns and deterministic focus order" {
     try std.testing.expect(provider.hasPattern(22, .text));
     try std.testing.expect(!provider.hasPattern(22, .invoke));
     try std.testing.expectEqual(Role.menu_item, provider.elements.items[22].role);
+    try std.testing.expectEqualStrings("move-project-unavailable", provider.elements.items[22].id);
     try std.testing.expectEqualStrings(
         "Move project unavailable: daemon support required",
         provider.elements.items[22].name,
     );
+    try std.testing.expectEqualStrings("workspaces", provider.elements.items[23].id);
+    try std.testing.expect(provider.hasPattern(23, .selection));
+    try std.testing.expect(provider.hasPattern(23, .expand_collapse));
+    try std.testing.expectEqualStrings("workspace-new", provider.elements.items[24].id);
+    try std.testing.expect(provider.hasPattern(24, .invoke));
+    try std.testing.expectEqualStrings("workspace-rename", provider.elements.items[25].id);
+    try std.testing.expect(provider.hasPattern(25, .invoke));
+    try std.testing.expectEqualStrings("workspace-delete", provider.elements.items[26].id);
+    try std.testing.expect(provider.hasPattern(26, .invoke));
     try std.testing.expectEqual(@as(?usize, 3), provider.nextFocus(2));
     try std.testing.expectEqual(@as(?usize, 4), provider.nextFocus(3));
 }
