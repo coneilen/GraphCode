@@ -114,6 +114,22 @@ const ids = struct {
     const new_quick_chat = 5150;
 };
 
+pub const move_project_menu_text = "Move Project... (unavailable: daemon support required)";
+
+pub const MoveProjectMenuItem = struct {
+    id: usize = ids.move_project,
+    text: []const u8 = move_project_menu_text,
+    enabled: bool,
+};
+
+/// Builds the real "Move Project..." popup item used by `show()` for the
+/// project context menu. Exposed so tests can exercise the exact same
+/// data the live Win32 menu is constructed from, rather than only a
+/// separate accessibility contract model.
+pub fn moveProjectMenuItem() MoveProjectMenuItem {
+    return .{ .enabled = Wire.supportsProjectRelocation() };
+}
+
 pub fn show(
     parent: c.HWND,
     target: Target,
@@ -140,12 +156,8 @@ pub fn show(
             separator(menu);
             append(menu, ids.close_project, "Close Project");
             if (!project.remote) {
-                appendEnabled(
-                    menu,
-                    ids.move_project,
-                    "Move Project... (unavailable: daemon support required)",
-                    Wire.supportsProjectRelocation(),
-                );
+                const move_item = moveProjectMenuItem();
+                appendEnabled(menu, move_item.id, move_item.text, move_item.enabled);
                 append(menu, ids.trash_project, "Move to Recycle Bin...");
             }
             append(menu, ids.remove_project, "Remove from GraphCode...");
@@ -324,4 +336,20 @@ test "project relocation is visibly unavailable rather than an Explorer alias" {
         Wire.project_relocation_unavailable_reason,
         "authoritative moveProject command",
     ) != null);
+}
+
+test "the real Move Project menu item is disabled with its explicit reason inline" {
+    // This exercises moveProjectMenuItem() directly: the same function
+    // show() calls to append the actual Win32 popup entry, not a
+    // separate accessibility-only model. It fails the moment the item's
+    // command id, label, or enabled state drift from what the live
+    // context menu renders.
+    const item = moveProjectMenuItem();
+    try std.testing.expectEqual(@as(usize, ids.move_project), item.id);
+    try std.testing.expectEqualStrings(
+        "Move Project... (unavailable: daemon support required)",
+        item.text,
+    );
+    try std.testing.expect(!item.enabled);
+    try std.testing.expectEqual(Action.move_project, actionForCommand(@intCast(item.id)));
 }
