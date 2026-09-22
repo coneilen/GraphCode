@@ -1,6 +1,7 @@
 const std = @import("std");
 const CanvasInput = @import("CanvasInput.zig");
-const c = @import("Win32.zig").c;
+const Win32 = @import("Win32.zig");
+const c = Win32.c;
 
 pub const Settings = struct {
     allocator: std.mem.Allocator,
@@ -385,7 +386,7 @@ fn registerSettingsClass() !void {
     klass.lpfnWndProc = @ptrCast(&settingsWindowProc);
     klass.hInstance = c.GetModuleHandleW(null);
     klass.lpszClassName = settings_class.ptr;
-    klass.hCursor = c.LoadCursorW(null, @ptrFromInt(32512));
+    klass.hCursor = c.LoadCursorW(null, Win32.resourceIdentifier(32512));
     klass.hbrBackground = null;
     if (c.RegisterClassW(&klass) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
         return error.SettingsClassRegistrationFailed;
@@ -508,7 +509,7 @@ fn createSettingsControls(hwnd: c.HWND) void {
         548,
         30,
         hwnd,
-        @ptrFromInt(backend_id),
+        Win32.opaquePointerFromInt(c.HMENU, backend_id),
         c.GetModuleHandleW(null),
         null,
     );
@@ -542,7 +543,7 @@ fn createSettingsControls(hwnd: c.HWND) void {
 fn createSettingsControl(hwnd: c.HWND, class_name: []const u8, text: []const u8, style: c.DWORD, x: i32, y: i32, width: i32, height: i32, id: usize) c.HWND {
     const wide_text = settingsWideZ(text) catch return null;
     defer settings_state.allocator.free(wide_text);
-    const menu: c.HMENU = if (id == 0) null else @ptrFromInt(id);
+    const menu: c.HMENU = if (id == 0) null else Win32.opaquePointerFromInt(c.HMENU, id);
     const wide_class = if (std.mem.eql(u8, class_name, "BUTTON"))
         std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr
     else

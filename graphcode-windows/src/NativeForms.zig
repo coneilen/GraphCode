@@ -2,7 +2,8 @@ const std = @import("std");
 const Forms = @import("Forms.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
 const Tokens = @import("DesignTokens.zig");
-const c = @import("Win32.zig").c;
+const Win32 = @import("Win32.zig");
+const c = Win32.c;
 
 const DialogState = struct {
     allocator: std.mem.Allocator,
@@ -588,7 +589,7 @@ fn registerClass() !void {
     window_class.lpfnWndProc = @ptrCast(&windowProc);
     window_class.hInstance = c.GetModuleHandleW(null);
     window_class.lpszClassName = class_name.ptr;
-    window_class.hCursor = c.LoadCursorW(null, @ptrFromInt(32512));
+    window_class.hCursor = c.LoadCursorW(null, Win32.resourceIdentifier(32512));
     window_class.hbrBackground = null;
     if (c.RegisterClassW(&window_class) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
         return error.ClassRegistrationFailed;
