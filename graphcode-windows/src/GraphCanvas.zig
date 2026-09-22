@@ -5,6 +5,8 @@ const Sidebar = @import("Sidebar.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
 const WorkspaceControls = @import("WorkspaceControls.zig");
 const c = @import("Win32.zig").c;
+const AppFont = @import("AppFont.zig");
+const GdiplusAA = @import("GdiplusAA.zig");
 pub const connection_failure_message = "GraphCode daemon unavailable. Navigation remains available while reconnection continues.";
 
 pub const CanvasState = struct {
@@ -490,7 +492,7 @@ fn drawOverview(
     }
     for (model.graphs.items, 0..) |graph, graph_index| {
         const lane = overviewLaneBounds(model, graph_index, bounds, state);
-        roundedCard(hdc, lane, 0x001D1D21, false);
+        roundedCard(hdc, lane, Tokens.workspace_rail, false);
         drawText(hdc, allocator, graph.project.name, lane.left + scaledValue(18, state.zoom), lane.top + scaledValue(16, state.zoom), scaledValue(14, state.zoom), 0x00E8E8E8);
         const open = rect(lane.right - scaledValue(132, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(76, state.zoom), lane.top + scaledValue(30, state.zoom));
         const worktrees = rect(lane.right - scaledValue(72, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(18, state.zoom), lane.top + scaledValue(30, state.zoom));
@@ -501,7 +503,7 @@ fn drawOverview(
         var index: usize = 0;
         while (index < graph.nodes.items.len) : (index += 1) {
             const card = overviewCardBounds(model, graph_index, index, bounds, state);
-            roundedCard(hdc, card, 0x00262626, false);
+            roundedCard(hdc, card, Tokens.loop_card_bottom, false);
             fill(hdc, rect(card.left, card.top, card.left + scaledValue(4, state.zoom), card.bottom), loopTypeColor(graph.nodes.items[index].loop_type));
             drawText(hdc, allocator, graph.nodes.items[index].title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(16, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF);
             drawText(hdc, allocator, graph.nodes.items[index].state, card.left + scaledValue(14, state.zoom), card.top + scaledValue(46, state.zoom), scaledValue(10, state.zoom), 0x00B8B8B8);
@@ -524,10 +526,10 @@ fn drawQuickChats(
     }
     const rows = (model.quick_chats.items.len + 2) / 3;
     const band = transformedRect(bounds, state, 24, 34, @max(760, bounds.right - bounds.left - 48), @as(i32, @intCast(rows * 104 + 32)));
-    roundedCard(hdc, band, 0x001D1D21, false);
+    roundedCard(hdc, band, Tokens.workspace_rail, false);
     for (model.quick_chats.items, 0..) |chat, index| {
         const card = quickChatCardBounds(index, bounds, state);
-        roundedCard(hdc, card, 0x00262626, false);
+        roundedCard(hdc, card, Tokens.loop_card_bottom, false);
         fill(hdc, rect(card.left, card.top, card.left + scaledValue(4, state.zoom), card.bottom), 0x007A7A7A);
         drawText(hdc, allocator, chat.title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(12, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF);
         drawText(hdc, allocator, if (std.mem.eql(u8, chat.backend, "claudeCode")) "chat" else chat.backend, card.left + scaledValue(14, state.zoom), card.top + scaledValue(37, state.zoom), scaledValue(10, state.zoom), 0x009A9A9A);
@@ -1005,17 +1007,26 @@ fn edgeLabel(buffer: []u8, edge: GraphModel.Edge) []const u8 {
 }
 
 fn drawBezier(hdc: c.HDC, from: Connector, to: Connector, color: u32, style: c_int) void {
+    const distance: i32 = if (to.x >= from.x) to.x - from.x else from.x - to.x;
+    const bend: i32 = @max(@as(i32, 24), @divTrunc(distance, 2));
+    const width: f32 = if (style == c.PS_SOLID) 2 else 1;
+    const p1 = c.POINT{ .x = from.x, .y = from.y };
+    const p2 = c.POINT{ .x = from.x + bend, .y = from.y };
+    const p3 = c.POINT{ .x = to.x - bend, .y = to.y };
+    const p4 = c.POINT{ .x = to.x, .y = to.y };
+    // Solid connectors are anti-aliased via GDI+; dashed/preview styles
+    // (style != PS_SOLID) keep plain GDI since GDI+'s dash patterns don't
+    // need to match pixel-for-pixel and the pen style enum differs.
+    if (style == c.PS_SOLID and
+        GdiplusAA.drawBezier(hdc, p1.x, p1.y, p2.x, p2.y, p3.x, p3.y, p4.x, p4.y, color, width))
+    {
+        return;
+    }
+
     const pen = c.CreatePen(style, if (style == c.PS_SOLID) 2 else 1, color);
     if (pen == null) return;
     const old = c.SelectObject(hdc, pen);
-    const distance: i32 = if (to.x >= from.x) to.x - from.x else from.x - to.x;
-    const bend: i32 = @max(@as(i32, 24), @divTrunc(distance, 2));
-    var points = [_]c.POINT{
-        .{ .x = from.x, .y = from.y },
-        .{ .x = from.x + bend, .y = from.y },
-        .{ .x = to.x - bend, .y = to.y },
-        .{ .x = to.x, .y = to.y },
-    };
+    var points = [_]c.POINT{ p1, p2, p3, p4 };
     _ = c.PolyBezier(hdc, &points, 4);
     _ = c.SelectObject(hdc, old);
     _ = c.DeleteObject(pen);
@@ -1061,7 +1072,11 @@ fn drawNode(
     const y = bounds.top;
     const attention = needsAttention(node, nodes, edges);
     const selected_card = selected == index;
-    roundedCard(hdc, bounds, if (selected_card) 0x00345D8C else 0x00262626, selected_card);
+    // Theme.loopCard's bottom stop (#232326), used for both states: selection is
+    // carried by the border/ring (Tokens.canvas_selection via roundedCard's
+    // `selected` flag), matching mac -- there is no "selected node fill" color in
+    // Theme.swift. Previously an ad-hoc 0x00345D8C blue with no Theme.swift source.
+    roundedCard(hdc, bounds, Tokens.loop_card_bottom, selected_card);
     const stripe = loopTypeColor(node.loop_type);
     fill(hdc, rect(x, y, x + scaled(Tokens.loop_card_stripe, state), y + bounds.bottom - y), stripe);
     const role = nodeRole(edges, node.id, declared_entries);
@@ -1591,20 +1606,25 @@ fn paintMetricSparkline(hdc: c.HDC, node: GraphModel.Node, bounds: c.RECT) void 
     const count: i32 = @intCast(samples.len);
     var previous_x = bounds.left + 8;
     var previous_y = bounds.bottom - 8 - @as(i32, @intFromFloat(((samples[0] - min) / range) * @as(f64, @floatFromInt(bounds.bottom - bounds.top - 16))));
-    const pen = c.CreatePen(c.PS_SOLID, 2, 0x007AB8FF);
-    if (pen == null) return;
-    const old = c.SelectObject(hdc, pen);
+    // Fallback GDI pen, created lazily only if a GDI+ segment draw fails.
+    var fallback_pen: c.HPEN = null;
     var index: usize = 1;
     while (index < samples.len) : (index += 1) {
         const x = bounds.left + 8 + @divTrunc(@as(i32, @intCast(index)) * @max(1, bounds.right - bounds.left - 16), @max(1, count - 1));
         const y = bounds.bottom - 8 - @as(i32, @intFromFloat(((samples[index] - min) / range) * @as(f64, @floatFromInt(bounds.bottom - bounds.top - 16))));
-        _ = c.MoveToEx(hdc, previous_x, previous_y, null);
-        _ = c.LineTo(hdc, x, y);
+        if (!GdiplusAA.drawLine(hdc, previous_x, previous_y, x, y, 0x007AB8FF, 2)) {
+            if (fallback_pen == null) fallback_pen = c.CreatePen(c.PS_SOLID, 2, 0x007AB8FF);
+            if (fallback_pen != null) {
+                const old = c.SelectObject(hdc, fallback_pen);
+                _ = c.MoveToEx(hdc, previous_x, previous_y, null);
+                _ = c.LineTo(hdc, x, y);
+                _ = c.SelectObject(hdc, old);
+            }
+        }
         previous_x = x;
         previous_y = y;
     }
-    _ = c.SelectObject(hdc, old);
-    _ = c.DeleteObject(pen);
+    if (fallback_pen != null) _ = c.DeleteObject(fallback_pen);
 }
 
 fn paintRelationRow(
@@ -1651,8 +1671,16 @@ fn fill(hdc: c.HDC, bounds: c.RECT, color: u32) void {
 }
 
 fn roundedCard(hdc: c.HDC, bounds: c.RECT, color: u32, selected: bool) void {
+    const border_width: f32 = if (selected) 2 else 1;
+    // Selected: Tokens.canvas_selection. Unselected: Tokens.loop_card_border, i.e.
+    // macOS's Theme.loopCardBorder (white 9% over the card fill) pre-blended flat.
+    const border_color: u32 = if (selected) Tokens.canvas_selection else Tokens.loop_card_border;
+    // Anti-aliased path first: matches macOS's smoothly-curved node cards
+    // and selection rings instead of GDI's jagged RoundRect corners.
+    if (GdiplusAA.drawRoundedRect(hdc, bounds, 12, color, border_color, border_width)) return;
+
     const brush = c.CreateSolidBrush(color);
-    const pen = c.CreatePen(c.PS_SOLID, if (selected) 2 else 1, if (selected) 0x007AB8FF else 0x00383838);
+    const pen = c.CreatePen(c.PS_SOLID, if (selected) 2 else 1, border_color);
     if (brush == null or pen == null) {
         if (brush != null) _ = c.DeleteObject(brush);
         if (pen != null) _ = c.DeleteObject(pen);
@@ -1679,10 +1707,12 @@ fn drawText(
 ) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text) catch return;
     defer allocator.free(wide);
+    const old_font = AppFont.select(hdc, size, false);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var bounds = rect(x, y, 1200, y + size + 8);
     _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+    _ = c.SelectObject(hdc, old_font);
 }
 
 fn drawTextRect(
@@ -1696,31 +1726,12 @@ fn drawTextRect(
 ) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text_value) catch return;
     defer allocator.free(wide);
-    const font = c.CreateFontW(
-        -size,
-        0,
-        0,
-        0,
-        c.FW_NORMAL,
-        0,
-        0,
-        0,
-        c.DEFAULT_CHARSET,
-        c.OUT_DEFAULT_PRECIS,
-        c.CLIP_DEFAULT_PRECIS,
-        c.CLEARTYPE_QUALITY,
-        c.DEFAULT_PITCH | c.FF_DONTCARE,
-        std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI").ptr,
-    );
-    const old_font = if (font != null) c.SelectObject(hdc, font) else null;
+    const old_font = AppFont.select(hdc, size, false);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var bounds = bounds_value;
     _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, format);
-    if (font != null) {
-        _ = c.SelectObject(hdc, old_font);
-        _ = c.DeleteObject(font);
-    }
+    _ = c.SelectObject(hdc, old_font);
 }
 
 test "edge connectors resolve reordered node IDs to card positions" {

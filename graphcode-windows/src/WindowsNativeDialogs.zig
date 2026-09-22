@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @import("Win32.zig").c;
+const AppFont = @import("AppFont.zig");
 
 pub const Result = struct {
     values: [16][]u8,
@@ -232,6 +233,7 @@ fn createDescription(hwnd: c.HWND, state: *State) void {
         c.GetModuleHandleW(null),
         null,
     );
+    AppFont.apply(state.description_window, AppFont.control_size, false);
 }
 
 fn fieldBaseY(state: *const State) usize {
@@ -243,8 +245,10 @@ fn createField(hwnd: c.HWND, state: *State, label: []const u8, index: usize) voi
     const wide_label = wideZ(state.allocator, label) catch return;
     defer state.allocator.free(wide_label);
     state.label_windows[index] = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, wide_label.ptr, c.WS_CHILD | c.WS_VISIBLE, 18, y, 500, 18, hwnd, null, c.GetModuleHandleW(null), null);
+    AppFont.apply(state.label_windows[index], AppFont.control_size, false);
     const edit_id: c.HMENU = @ptrFromInt(9904 + index * 8);
     const edit = c.CreateWindowExW(c.WS_EX_CLIENTEDGE, std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr, null, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_AUTOHSCROLL, 18, y + 18, 500, 24, hwnd, edit_id, c.GetModuleHandleW(null), null) orelse return;
+    AppFont.apply(edit, AppFont.control_size, false);
     state.edits[index] = edit;
     const wide_value = wideZ(state.allocator, state.values[index]) catch return;
     defer state.allocator.free(wide_value);
@@ -268,7 +272,8 @@ fn createButton(hwnd: c.HWND, label: []const u8, id: usize, x: i32, y: i32) void
     const wide = wideZ(std.heap.c_allocator, label) catch return;
     defer std.heap.c_allocator.free(wide);
     const button_id: c.HMENU = @ptrFromInt(id);
-    _ = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_DEFPUSHBUTTON, x, y, 80, 28, hwnd, button_id, c.GetModuleHandleW(null), null);
+    const button = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_DEFPUSHBUTTON, x, y, 80, 28, hwnd, button_id, c.GetModuleHandleW(null), null);
+    AppFont.apply(button, AppFont.control_size, false);
 }
 
 fn readValues(state: *State) void {

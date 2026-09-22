@@ -41,6 +41,10 @@ Assert-Contract ($appSource -match
   $appSource -match 'shouldPresentOffer\(self\.update_user_initiated\)') `
   "explicit and background update checks must preserve their presentation intent"
 Assert-Contract ($appSource -match
+  'const uia_gate_hook = envFlag\("GRAPHCODE_UIA_GATE"\);' -and
+  $appSource -match 'if \(!daemon_supervisor_test_hook and !uia_gate_hook\) GdiplusAA\.init\(\);') `
+  "GDI+ helper-window startup must remain outside daemon-handoff and UIA automation hooks"
+Assert-Contract ($appSource -match
   '(?s)app\.smoke_tick >= 16 and\s*app\.client\.connectionState\(\) == \.connected and\s*app\.currentProject\(\) != null and app\.model\.selected\(\) != null and\s*!app\.smoke_action_requested') `
   "smoke graph command must wait for connection and selection instead of a single tick"
 Assert-Contract ($appSource -match

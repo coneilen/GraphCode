@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @import("Win32.zig").c;
+const AppFont = @import("AppFont.zig");
 
 pub const Entry = struct {
     project_path: []const u8,
@@ -209,13 +210,14 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
     const dialog = active orelse return c.DefWindowProcW(hwnd, message, wparam, lparam);
     switch (message) {
         c.WM_CREATE => {
-            _ = c.CreateWindowExW(
+            const label = c.CreateWindowExW(
                 0,
                 std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr,
                 std.unicode.utf8ToUtf16LeStringLiteral("Search loops").ptr,
                 c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT,
                 16, 14, 590, 20, hwnd, null, c.GetModuleHandleW(null), null,
             );
+            AppFont.apply(label, AppFont.control_size, false);
             dialog.edit = c.CreateWindowExW(
                 c.WS_EX_CLIENTEDGE,
                 std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr,
@@ -231,6 +233,8 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                     c.LBS_NOTIFY | c.LBS_NOINTEGRALHEIGHT,
                 16, 76, 590, 276, hwnd, childId(results_id), c.GetModuleHandleW(null), null,
             );
+            AppFont.apply(dialog.edit, AppFont.control_size, false);
+            AppFont.apply(dialog.list, AppFont.control_size, false);
             refillList(dialog);
             return 0;
         },

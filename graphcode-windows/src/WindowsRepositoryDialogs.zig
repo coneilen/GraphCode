@@ -1,7 +1,53 @@
 const std = @import("std");
 const c = @import("Win32.zig").c;
+const Tokens = @import("DesignTokens.zig");
+const AppFont = @import("AppFont.zig");
 
 extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
+
+fn darkDialogEraseBackground(hwnd: c.HWND, wparam: c.WPARAM) c.LRESULT {
+    const hdc = deviceContextFrom(wparam);
+    var client: c.RECT = undefined;
+    _ = c.GetClientRect(hwnd, &client);
+    const brush = c.CreateSolidBrush(Tokens.dialog_panel);
+    if (brush != null) {
+        _ = c.FillRect(hdc, &client, brush);
+        _ = c.DeleteObject(brush);
+    }
+    return 1;
+}
+
+fn darkDialogCtlColorStatic(hwnd: c.HWND, wparam: c.WPARAM, error_label: c.HWND) c.LRESULT {
+    const hdc = deviceContextFrom(wparam);
+    _ = c.SetTextColor(hdc, if (hwnd == error_label) Tokens.dialog_error_text else Tokens.dialog_body_text);
+    _ = c.SetBkMode(hdc, c.TRANSPARENT);
+    return @intCast(@intFromPtr(c.GetStockObject(c.NULL_BRUSH)));
+}
+
+fn darkDialogCtlColorEdit(wparam: c.WPARAM) c.LRESULT {
+    const hdc = deviceContextFrom(wparam);
+    _ = c.SetTextColor(hdc, Tokens.dialog_title_text);
+    _ = c.SetBkColor(hdc, Tokens.dialog_field_background);
+    _ = c.SetBkMode(hdc, c.OPAQUE);
+    return @intCast(@intFromPtr(darkFieldBrush()));
+}
+
+var dark_field_brush: c.HBRUSH = null;
+
+fn darkFieldBrush() c.HBRUSH {
+    if (dark_field_brush == null) dark_field_brush = c.CreateSolidBrush(Tokens.dialog_field_background);
+    return dark_field_brush;
+}
+
+fn deviceContextFrom(wparam: c.WPARAM) c.HDC {
+    @setRuntimeSafety(false);
+    return @ptrFromInt(wparam);
+}
+
+fn controlHandleFrom(lparam: c.LPARAM) c.HWND {
+    @setRuntimeSafety(false);
+    return @ptrFromInt(@as(usize, @bitCast(lparam)));
+}
 
 pub const CloneFields = struct {
     url: []const u8 = "",
@@ -643,7 +689,7 @@ fn registerRepositoryDialogClass() !void {
     klass.hInstance = c.GetModuleHandleW(null);
     klass.lpszClassName = repository_dialog_class.ptr;
     klass.hCursor = c.LoadCursorW(null, @ptrFromInt(32512));
-    klass.hbrBackground = c.GetSysColorBrush(c.COLOR_WINDOW);
+    klass.hbrBackground = null;
     if (c.RegisterClassW(&klass) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
         return error.RepositoryDialogClassRegistrationFailed;
 }
@@ -655,6 +701,9 @@ fn repositoryDialogProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam:
             createRepositoryDialogControls(hwnd);
             return 0;
         },
+        c.WM_ERASEBKGND => return darkDialogEraseBackground(hwnd, wparam),
+        c.WM_CTLCOLORSTATIC => return darkDialogCtlColorStatic(controlHandleFrom(lparam), wparam, repository_dialog_state.error_label),
+        c.WM_CTLCOLOREDIT => return darkDialogCtlColorEdit(wparam),
         c.WM_COMMAND => {
             const command: u16 = @truncate(wparam);
             const notification: u16 = @truncate(wparam >> 16);
@@ -784,8 +833,7 @@ fn createControl(
         c.GetModuleHandleW(null),
         null,
     ) orelse return null;
-    if (c.GetStockObject(c.DEFAULT_GUI_FONT)) |font|
-        _ = c.SendMessageW(control, c.WM_SETFONT, @intFromPtr(font), 1);
+    AppFont.apply(control, AppFont.control_size, false);
     return control;
 }
 
@@ -1088,7 +1136,7 @@ fn registerOperationDialogClass() !void {
     klass.hInstance = c.GetModuleHandleW(null);
     klass.lpszClassName = operation_dialog_class.ptr;
     klass.hCursor = c.LoadCursorW(null, @ptrFromInt(32512));
-    klass.hbrBackground = c.GetSysColorBrush(c.COLOR_WINDOW);
+    klass.hbrBackground = null;
     if (c.RegisterClassW(&klass) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
         return error.OperationDialogClassRegistrationFailed;
 }
@@ -1096,6 +1144,8 @@ fn registerOperationDialogClass() !void {
 fn operationDialogProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
     if (!operation_dialog_active) return c.DefWindowProcW(hwnd, message, wparam, lparam);
     switch (message) {
+        c.WM_ERASEBKGND => return darkDialogEraseBackground(hwnd, wparam),
+        c.WM_CTLCOLORSTATIC => return darkDialogCtlColorStatic(controlHandleFrom(lparam), wparam, null),
         c.WM_TIMER => {
             if (wparam != operation_timer_id) return 0;
             if (operation_dialog_state.clone) |operation| {
@@ -1144,7 +1194,7 @@ fn createOperationControl(hwnd: c.HWND, class: []const u8, text: []const u8, x: 
         @as(c.DWORD, @intCast(c.WS_VISIBLE)) |
         (if (std.mem.eql(u8, class, "BUTTON")) @as(c.DWORD, @intCast(c.WS_TABSTOP)) else 0);
     const control = c.CreateWindowExW(0, wide_class.ptr, wide_text.ptr, style, x, y, width, height, hwnd, controlId(id), c.GetModuleHandleW(null), null) orelse return null;
-    _ = c.SendMessageW(control, c.WM_SETFONT, @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
+    AppFont.apply(control, AppFont.control_size, false);
     return control;
 }
 
