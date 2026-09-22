@@ -2018,17 +2018,28 @@ try {
   Require ($reorderCommand -match '"sidebarNodesReordered"') `
     "sidebar root reorder did not use the sidebar-order daemon command: $reorderCommand"
 
+  $moveProjectUnavailableReason = "Project relocation is unavailable: the daemon wire contract has no authoritative moveProject command."
+  # The live native project right-click context menu (GraphContextMenu.zig,
+  # a real Win32 TrackPopupMenu) always renders "Move Project... (unavailable:
+  # daemon support required)" grayed via MF_GRAYED -- see the direct,
+  # deterministic proof of that exact item's id/text/enabled state in
+  # GraphContextMenu.zig's "the real Move Project menu item is disabled with
+  # its explicit reason inline" test, which exercises the very function
+  # show() uses to build the popup. This harness has no existing capability
+  # to open/inspect a transient native Win32 popup menu live (no action in
+  # this gate does; TrackPopupMenu blocks the message loop while displayed),
+  # so instead we assert the two behaviors this gate CAN observe live: that
+  # invoking the stale/legacy command path never opens Explorer, and that it
+  # surfaces the exact unavailable-status reason.
   Remove-Item -LiteralPath $shellExecuteLogPath -Force -ErrorAction SilentlyContinue
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 17)) `
     "project Move fixture mutation was rejected"
-  for ($index = 0; $index -lt 40 -and -not (Test-Path -LiteralPath $shellExecuteLogPath); $index++) {
-    Start-Sleep -Milliseconds 50
-  }
-  Require (Test-Path -LiteralPath $shellExecuteLogPath) "project Move did not record its Explorer request"
-  $moveProjectLog = [IO.File]::ReadAllText($shellExecuteLogPath)
-  Require ($moveProjectLog -match 'file=explorer\.exe') "project Move did not route through Explorer"
-  Require ($moveProjectLog -match 'parameters=/select,"C:\\GraphCode\\fixture"') `
-    "project Move did not target the expected folder: $moveProjectLog"
+  Start-Sleep -Milliseconds 250
+  Require (-not (Test-Path -LiteralPath $shellExecuteLogPath)) `
+    "project Move stale command routing must not open Explorer once relocation is unavailable"
+  $moveProjectStatus = Find-FragmentById $root "status" $rawWalker
+  Require ($moveProjectStatus.Current.Name -eq $moveProjectUnavailableReason) `
+    "project Move stale command routing did not surface the explicit unavailable-status reason: $($moveProjectStatus.Current.Name)"
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 18)) `
     "activity fixture mutation was rejected"

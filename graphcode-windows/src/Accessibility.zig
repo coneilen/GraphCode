@@ -281,6 +281,7 @@ pub fn defaultContract(allocator: std.mem.Allocator) !Provider {
     _ = try provider.add(.{ .id = "terminal-b", .name = "Terminal B", .role = .terminal, .parent = window, .focusable = true, .patterns = &.{ .text, .scroll } });
     _ = try provider.add(.{ .id = "status", .name = "Status", .role = .status, .parent = window });
     _ = try provider.add(.{ .id = "errors", .name = "Errors", .role = .status, .parent = window });
+    _ = try provider.add(.{ .id = "move-project-unavailable", .name = "Move project unavailable: daemon support required", .role = .menu_item, .parent = menu, .patterns = &.{ .text } });
     return provider;
 }
 
@@ -305,7 +306,13 @@ test "UIA contract exposes named roles patterns and deterministic focus order" {
     defer provider.deinit();
     try std.testing.expectEqual(Role.navigation, provider.elements.items[1].role);
     try std.testing.expect(provider.hasPattern(2, .selection));
-    try std.testing.expect(provider.hasPattern(11, .text));
+    try std.testing.expect(provider.hasPattern(22, .text));
+    try std.testing.expect(!provider.hasPattern(22, .invoke));
+    try std.testing.expectEqual(Role.menu_item, provider.elements.items[22].role);
+    try std.testing.expectEqualStrings(
+        "Move project unavailable: daemon support required",
+        provider.elements.items[22].name,
+    );
     try std.testing.expectEqual(@as(?usize, 3), provider.nextFocus(2));
     try std.testing.expectEqual(@as(?usize, 4), provider.nextFocus(3));
 }
