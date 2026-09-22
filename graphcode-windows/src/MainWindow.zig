@@ -53,16 +53,29 @@ pub const Command = enum(u16) {
     reveal_worktree = 4504,
     edit_worktree_policy = 4505,
     save_worktree_policy = 4506,
+    workspace_new = 4800,
+    workspace_manage = 4801,
+    workspace_rename = 4802,
+    workspace_delete = 4803,
+    workspace_next = 4804,
+    workspace_previous = 4805,
 };
 
 pub const empty_open_folder_id: usize = 4601;
 pub const empty_new_loop_id: usize = 4602;
 pub const recent_folder_command_base: usize = 4700;
 pub const recent_folder_command_limit: usize = 4799;
+pub const workspace_command_base: usize = 4850;
+pub const workspace_command_limit: usize = 4899;
 
 pub const RecentFolderItem = struct {
     path: []const u8,
     name: []const u8,
+};
+
+pub const WorkspaceItem = struct {
+    name: []const u8,
+    is_current: bool,
 };
 
 pub const MenuState = struct {
@@ -76,6 +89,7 @@ pub const MenuState = struct {
     activity_visible: bool,
     update_checking: bool,
     recent_folders: []const RecentFolderItem = &.{},
+    workspaces: []const WorkspaceItem = &.{},
 };
 
 pub fn commandFromId(id: usize) ?Command {
@@ -182,6 +196,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     const terminal = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
     const view = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
     const help = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
+    const workspace = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
 
     append(add_folder, "Open Folder...\tCtrl+O", @intFromEnum(Command.open_folder));
     append(add_folder, "Clone Repository...\tCtrl+Shift+C", @intFromEnum(Command.clone_repository));
@@ -242,9 +257,18 @@ pub fn installMenu(hwnd: c.HWND) !void {
     separator(help);
     append(help, "About GraphCode", @intFromEnum(Command.about));
 
+    append(workspace, "New Workspace...", @intFromEnum(Command.workspace_new));
+    append(workspace, "Manage Workspaces...", @intFromEnum(Command.workspace_manage));
+    append(workspace, "Rename Workspace...", @intFromEnum(Command.workspace_rename));
+    append(workspace, "Delete Workspace...", @intFromEnum(Command.workspace_delete));
+    separator(workspace);
+    append(workspace, "Next Workspace\tCtrl+Alt+PageDown", @intFromEnum(Command.workspace_next));
+    append(workspace, "Previous Workspace\tCtrl+Alt+PageUp", @intFromEnum(Command.workspace_previous));
+
     appendPopup(menu, "File", file);
     appendPopup(menu, "Loop", loop);
     appendPopup(menu, "Terminal", terminal);
+    appendPopup(menu, "Workspace", workspace);
     appendPopup(menu, "View", view);
     appendPopup(menu, "Help", help);
     if (c.SetMenu(hwnd, menu) == 0) return error.MenuInstallFailed;
@@ -253,6 +277,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
 
 pub fn updateMenu(hwnd: c.HWND, state: MenuState) void {
     updateRecentFolderMenu(hwnd, state.recent_folders);
+    updateWorkspaceMenu(hwnd, state.workspaces);
     setEnabled(hwnd, .open_global_overview, true);
     setEnabled(hwnd, .worktrees, state.can_worktrees);
     setEnabled(hwnd, .reclaim_worktrees, state.can_worktrees);
@@ -279,10 +304,39 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState) void {
     setEnabled(hwnd, .product_settings, true);
     setEnabled(hwnd, .reconnect, true);
     setEnabled(hwnd, .check_updates, !state.update_checking);
+    setEnabled(hwnd, .workspace_manage, state.workspaces.len > 1);
+    setEnabled(hwnd, .workspace_next, state.workspaces.len > 1);
+    setEnabled(hwnd, .workspace_previous, state.workspaces.len > 1);
     setChecked(hwnd, .toggle_sidebar, state.sidebar_visible);
     setChecked(hwnd, .toggle_workspace, state.workspace_visible);
     setChecked(hwnd, .toggle_activity, state.activity_visible);
     _ = c.DrawMenuBar(hwnd);
+}
+
+fn updateWorkspaceMenu(hwnd: c.HWND, workspaces: []const WorkspaceItem) void {
+    const root = c.GetMenu(hwnd);
+    if (root == null) return;
+    const menu = c.GetSubMenu(root, 3);
+    if (menu == null) return;
+    while (c.GetMenuItemCount(menu) > 0) {
+        _ = c.DeleteMenu(menu, 0, c.MF_BYPOSITION);
+    }
+    append(menu, "New Workspace...", @intFromEnum(Command.workspace_new));
+    appendEnabled(menu, "Manage Workspaces...", @intFromEnum(Command.workspace_manage), workspaces.len > 1);
+    appendEnabled(menu, "Rename Workspace...", @intFromEnum(Command.workspace_rename), workspaces.len > 1);
+    appendEnabled(menu, "Delete Workspace...", @intFromEnum(Command.workspace_delete), workspaces.len > 1);
+    separator(menu);
+    appendEnabled(menu, "Next Workspace\tCtrl+Alt+PageDown", @intFromEnum(Command.workspace_next), workspaces.len > 1);
+    appendEnabled(menu, "Previous Workspace\tCtrl+Alt+PageUp", @intFromEnum(Command.workspace_previous), workspaces.len > 1);
+    separator(menu);
+    for (workspaces[0..@min(workspaces.len, workspace_command_limit - workspace_command_base + 1)], 0..) |item, index| {
+        const label = if (item.is_current)
+            std.fmt.allocPrint(std.heap.c_allocator, "✓ {s}", .{item.name}) catch continue
+        else
+            std.heap.c_allocator.dupe(u8, item.name) catch continue;
+        defer std.heap.c_allocator.free(label);
+        append(menu, label, workspace_command_base + index);
+    }
 }
 
 pub fn isRecentFolderCommand(id: usize) bool {
@@ -399,13 +453,17 @@ test "recent folder commands use a dedicated command range" {
     try std.testing.expect(!isRecentFolderCommand(recent_folder_command_limit + 1));
 }
 
+test "workspace commands use a dedicated command range" {
+    try std.testing.expect(workspace_command_base < workspace_command_limit);
+    try std.testing.expectEqual(Command.workspace_new, commandFromId(4800).?);
+}
+
 test "native menu labels are NUL terminated UTF-16" {
     const wide = try toWideZ(std.testing.allocator, "Clone Repository…");
     defer std.testing.allocator.free(wide);
     try std.testing.expectEqual(@as(u16, 0), wide[wide.len]);
     try std.testing.expect(wide.len > "Clone Repository".len);
 }
-
 
 fn windowFromHandle(hwnd: c.HWND) ?*Window {
     const raw = c.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA);
