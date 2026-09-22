@@ -1,5 +1,6 @@
 const std = @import("std");
-const c = @import("Win32.zig").c;
+const Win32 = @import("Win32.zig");
+const c = Win32.c;
 
 pub const MessageCallback = *const fn (
     context: ?*anyopaque,
@@ -403,7 +404,7 @@ fn registerClass(instance: c.HINSTANCE) !void {
     window_class.lpfnWndProc = @ptrCast(&windowProc);
     window_class.hInstance = instance;
     window_class.lpszClassName = class_name.ptr;
-    window_class.hCursor = c.LoadCursorW(null, @ptrFromInt(32512));
+    window_class.hCursor = c.LoadCursorW(null, Win32.resourceIdentifier(32512));
     if (c.RegisterClassW(&window_class) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS) {
         return error.WindowClassRegistrationFailed;
     }
@@ -417,7 +418,7 @@ fn windowProc(
 ) callconv(.winapi) c.LRESULT {
     var window = windowFromHandle(hwnd);
     if (message == c.WM_NCCREATE) {
-        const create = @as(*const c.CREATESTRUCTW, @ptrFromInt(@as(usize, @bitCast(lparam))));
+        const create = Win32.messagePointer(*const c.CREATESTRUCTW, lparam);
         window = @ptrCast(@alignCast(create.lpCreateParams));
         if (window) |value| {
             value.hwnd = hwnd;

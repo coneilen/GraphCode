@@ -1,5 +1,6 @@
 const std = @import("std");
-const c = @import("Win32.zig").c;
+const Win32 = @import("Win32.zig");
+const c = Win32.c;
 const AppFont = @import("AppFont.zig");
 
 pub const Action = enum {
@@ -80,7 +81,7 @@ fn registerClass() !void {
     klass.lpfnWndProc = @ptrCast(&windowProc);
     klass.hInstance = c.GetModuleHandleW(null);
     klass.lpszClassName = class_name.ptr;
-    klass.hCursor = c.LoadCursorW(null, @ptrFromInt(32512));
+    klass.hCursor = c.LoadCursorW(null, Win32.resourceIdentifier(32512));
     if (c.RegisterClassW(&klass) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
         return error.DialogClassRegistrationFailed;
 }
