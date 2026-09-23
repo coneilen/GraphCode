@@ -327,6 +327,7 @@ Invoke-Native "Accessibility contract executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Accessibility.zig } finally { Pop-Location }
 }
+
 Invoke-Native "Wire executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Wire.zig } finally { Pop-Location }
@@ -531,6 +532,207 @@ Invoke-Native "Graph canvas executable tests" {
   try {
     & $zig test src\GraphCanvas.zig -target x86_64-windows-msvc -lc "-I$include"
   } finally { Pop-Location }
+}
+
+Invoke-Native "Worktree status executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\WorktreeStatus.zig } finally { Pop-Location }
+}
+Invoke-Native "Draft attachments executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\DraftAttachments.zig } finally { Pop-Location }
+}
+Invoke-Native "Worktree dialog executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\WorktreeDialog.zig } finally { Pop-Location }
+}
+Invoke-Native "DPI scaling executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\Dpi.zig } finally { Pop-Location }
+}
+Invoke-Native "Template library executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\TemplateLibrary.zig } finally { Pop-Location }
+}
+Invoke-Native "Workspace lifecycle executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\WorkspaceLifecycle.zig } finally { Pop-Location }
+}
+Invoke-Native "Sidebar navigation executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\Navigation.zig } finally { Pop-Location }
+}
+Invoke-Native "Quick chats executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\QuickChats.zig } finally { Pop-Location }
+}
+Invoke-Native "Workspace controls executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\WorkspaceControls.zig } finally { Pop-Location }
+}
+Invoke-Native "Sidebar executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\Sidebar.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "Windows repository dialogs executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\WindowsRepositoryDialogs.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "GDI gradient executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\GdiGradient.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "App font cache executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\AppFont.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "GDI+ antialiasing executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\GdiplusAA.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "Update offer dialog executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\UpdateOfferDialog.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "Native dialog field contract executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\WindowsNativeDialogs.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "App shell executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\App.zig src\AccessibilityProvider.cpp `
+      -target x86_64-windows-msvc -lc -luser32 -lgdi32 -loleaut32 -luiautomationcore -lwinhttp "-I$include"
+  } finally { Pop-Location }
+}
+
+# Structural anti-drift guard (issue #424): every graphcode-windows\src\*.zig file
+# that declares at least one `test "..."` block must be executed by one of the
+# `zig test` invocations above. Add the new file's name here as part of wiring it
+# in; forgetting either step (the invocation or this list) fails this guard
+# instead of letting the tests silently never run. This check runs last, after
+# every other invocation above, so a real regression in an individual file's
+# tests is reported before this contract-only failure short-circuits the run.
+#
+# GraphContextMenu.zig and MainWindow.zig were wired by in-flight issue #418
+# (PR #422, merged as 06e092e) after this guard was first added here; #422
+# added the zig test invocations and the source-list entries above but never
+# touched this list, since it did not exist on main when #422 was authored.
+# Listed here after rebasing onto main so the guard reflects reality post-merge.
+$wiredTestFiles = @(
+  "Wire.zig",
+  "Codespaces.zig",
+  "WindowsCodespaceDialog.zig",
+  "Forms.zig",
+  "Win32.zig",
+  "NativeForms.zig",
+  "UpdateOfferPresentation.zig",
+  "GraphContextMenu.zig",
+  "MainWindow.zig",
+  "JumpPalette.zig",
+  "WindowsOnboarding.zig",
+  "WindowsProductSettings.zig",
+  "WindowsUpdates.zig",
+  "FrameBuffer.zig",
+  "DaemonClient.zig",
+  "DaemonSupervisor.zig",
+  "WorkspaceLayout.zig",
+  "InputRouter.zig",
+  "TerminalSurface.zig",
+  "GraphModel.zig",
+  "CanvasInput.zig",
+  "GraphCanvas.zig",
+  "WorktreeStatus.zig",
+  "DraftAttachments.zig",
+  "WorktreeDialog.zig",
+  "Dpi.zig",
+  "TemplateLibrary.zig",
+  "WorkspaceLifecycle.zig",
+  "Navigation.zig",
+  "QuickChats.zig",
+  "WorkspaceControls.zig",
+  "Sidebar.zig",
+  "WindowsRepositoryDialogs.zig",
+  "GdiGradient.zig",
+  "AppFont.zig",
+  "GdiplusAA.zig",
+  "UpdateOfferDialog.zig",
+  "WindowsNativeDialogs.zig",
+  "Accessibility.zig",
+  "App.zig"
+)
+$missingTestFiles = @(
+  Get-ChildItem -LiteralPath (Join-Path $shellRoot "src") -Filter "*.zig" -File |
+    Where-Object {
+      ((Get-Content -LiteralPath $_.FullName -Raw) -match '(?m)^test "') -and
+        ($wiredTestFiles -notcontains $_.Name)
+    } |
+    ForEach-Object { $_.Name }
+)
+if ($missingTestFiles.Count -ne 0) {
+  throw "Windows shell contract: the following src\*.zig files contain test blocks but are not wired into any zig test invocation in WindowsShell.Tests.ps1 (see issue #424): $($missingTestFiles -join ', ')"
 }
 
 Write-Output "Windows shell scaffold contract: PASS"
