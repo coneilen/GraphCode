@@ -3461,6 +3461,7 @@ pub const App = struct {
             },
             .cycle_attention => {
                 self.selectNextAttention();
+                self.syncAccessibility();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .inspect_worktrees => self.inspectWorktrees(),
@@ -3862,6 +3863,7 @@ pub const App = struct {
             .right = canvas_bounds.right,
             .bottom = canvas_bounds.bottom,
         };
+        provider.syncCanvasBounds(canvas_rect);
         var sidebar_rows = Sidebar.appendRows(
             self.allocator,
             &self.model,
@@ -5534,6 +5536,7 @@ fn onWindowMessage(
                             app.canvas.beginPan(x, y);
                             _ = c.SetCapture(hwnd);
                         }
+                        app.syncAccessibility();
                         _ = c.InvalidateRect(hwnd, null, 0);
                     },
                     .quick_chats => {
