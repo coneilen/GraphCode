@@ -62,6 +62,10 @@ Assert-Contract ($appSource -match
   $appSource -match 'if \(!envFlag\("GRAPHCODE_UIA_UPDATE_AVAILABLE"\)\) self\.requestUpdateCheck\(false\)' -and
   $appSource -match 'shouldPresentOffer\(self\.update_user_initiated\)') `
   "explicit and background update checks must preserve their presentation intent"
+Assert-Contract ($nativeFormsSource -match 'if \(active_state\) return error\.FormAlreadyOpen;' -and
+  $nativeFormsSource -match 'pub fn isModalActive\(\) bool' -and
+  $appSource -match 'UpdateOfferPresentation\.decide\(completed_offer, self\.update_offer_pending, NativeForms\.isModalActive\(\)\)') `
+  "native forms must reject reentrancy and completed update offers must wait for the active modal"
 Assert-Contract ($appSource -match
   'const uia_gate_hook = envFlag\("GRAPHCODE_UIA_GATE"\);' -and
   $appSource -match 'if \(!daemon_supervisor_test_hook and !uia_gate_hook\) GdiplusAA\.init\(\);') `
@@ -191,6 +195,7 @@ foreach ($path in @(
     "src\InputRouter.zig",
     "src\Forms.zig",
     "src\NativeForms.zig",
+    "src\UpdateOfferPresentation.zig",
     "src\WindowsOnboarding.zig",
     "src\WindowsProductSettings.zig",
     "src\Accessibility.zig",
@@ -369,6 +374,10 @@ Invoke-Native "Native dialog message-loop executable tests" {
   try {
     & $zig test src\NativeForms.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
   } finally { Pop-Location }
+}
+Invoke-Native "Update offer modal deferral executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\UpdateOfferPresentation.zig } finally { Pop-Location }
 }
 Invoke-Native "Jump palette executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent

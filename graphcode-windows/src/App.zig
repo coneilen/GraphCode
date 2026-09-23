@@ -30,6 +30,7 @@ const Codespaces = @import("Codespaces.zig");
 const Onboarding = @import("WindowsOnboarding.zig");
 const WindowsUpdates = @import("WindowsUpdates.zig");
 const UpdateOfferDialog = @import("UpdateOfferDialog.zig");
+const UpdateOfferPresentation = @import("UpdateOfferPresentation.zig");
 const WorktreeDialog = @import("WorktreeDialog.zig");
 const Accessibility = @import("Accessibility.zig");
 const Navigation = @import("Navigation.zig");
@@ -269,6 +270,7 @@ pub const App = struct {
     update_cancel: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     update_generation: u64 = 0,
     update_pending: bool = false,
+    update_offer_pending: bool = false,
     update_user_initiated: bool = false,
     update_version: []u8 = &.{},
     update_release_url: []u8 = &.{},
@@ -1524,6 +1526,7 @@ pub const App = struct {
         self.update_generation += 1;
         self.update_user_initiated = user_initiated;
         self.update_pending = true;
+        self.update_offer_pending = false;
         if (self.update_thread != null) {
             self.update_cancel.store(true, .release);
             self.update_lock.unlock();
@@ -1590,24 +1593,32 @@ pub const App = struct {
         self.update_lock.lock();
         const done = self.update_done;
         self.update_lock.unlock();
-        if (!done) return;
-        if (self.update_thread) |thread| {
-            thread.join();
-            self.update_thread = null;
-            self.update_lock.lock();
-            const pending = self.update_pending;
-            self.update_pending = false;
-            const label = self.update_state.label();
-            const present_offer = self.update_state.shouldPresentOffer(self.update_user_initiated);
-            const version = self.update_version;
-            const release_url = self.update_release_url;
-            self.update_lock.unlock();
-            if (pending) {
-                self.launchUpdateCheck();
-            } else {
-                self.setStatus(label);
-                if (present_offer) self.showAvailableUpdate(version, release_url);
+        var completed_offer = false;
+        if (done) {
+            if (self.update_thread) |thread| {
+                thread.join();
+                self.update_thread = null;
+                self.update_lock.lock();
+                const pending = self.update_pending;
+                self.update_pending = false;
+                const label = self.update_state.label();
+                const present_offer = self.update_state.shouldPresentOffer(self.update_user_initiated);
+                self.update_lock.unlock();
+                if (pending) {
+                    self.launchUpdateCheck();
+                } else {
+                    self.setStatus(label);
+                    completed_offer = present_offer;
+                }
             }
+        }
+        switch (UpdateOfferPresentation.decide(completed_offer, self.update_offer_pending, NativeForms.isModalActive())) {
+            .none => {},
+            .defer_until_modal_closes => self.update_offer_pending = true,
+            .present => {
+                self.update_offer_pending = false;
+                self.showAvailableUpdate(self.update_version, self.update_release_url);
+            },
         }
     }
 
