@@ -1137,6 +1137,33 @@ pub const App = struct {
         return GraphModel.findEdgeIndexByID(graph.edges.items, self.selected_edge_id);
     }
 
+    /// A single selectable branch/worktree for the node-creation form's
+    /// prospective picker. Reuses NativeForms.WorktreeChoice (rather than a
+    /// duplicate type) so App can hand its projection straight to
+    /// NativeForms.node/nodeWithTemplates without a conversion.
+    pub const WorktreeChoice = NativeForms.WorktreeChoice;
+
+    /// Projects `self.worktree_inspection` into the caller-owned list of
+    /// existing worktree/branch choices a node-creation picker can offer.
+    /// Returns an empty slice — never a fabricated entry — when there is no
+    /// inspection to draw from (for example when creating a node for
+    /// `graphcode://global`, or before any worktree inspection has run for the
+    /// current project); callers must treat an empty slice as "no existing
+    /// worktrees" rather than an error.
+    fn worktreeChoicesForNodeForm(self: *const App, allocator: std.mem.Allocator) ![]WorktreeChoice {
+        const inspection = self.worktree_inspection orelse return &.{};
+        var choices = try allocator.alloc(WorktreeChoice, inspection.entries.items.len);
+        errdefer allocator.free(choices);
+        for (inspection.entries.items, 0..) |entry, index| {
+            choices[index] = .{
+                .path = entry.path,
+                .branch = entry.branch,
+                .is_default = entry.branch.len != 0 and std.mem.eql(u8, entry.branch, inspection.default_branch),
+            };
+        }
+        return choices;
+    }
+
     fn createNode(self: *App) void {
         const current_path = self.currentProject() orelse if (self.surface == .overview)
             "graphcode://global"
@@ -1160,13 +1187,22 @@ pub const App = struct {
             .briefing_enabled = settings.briefing,
             .activity_enabled = settings.activity,
         };
+        // Allocated once and shared by both the plain and templated forms below
+        // so a project with no worktree inspection yet (or none at all, e.g.
+        // graphcode://global) degrades to the same explicit empty picker either
+        // form would otherwise have to special-case on its own.
+        const choices = self.worktreeChoicesForNodeForm(self.allocator) catch {
+            self.setStatus("Unable to prepare worktree choices");
+            return;
+        };
+        defer self.allocator.free(choices);
         var templates = TemplateLibrary.load(self.allocator, path) catch {
             self.setStatus("Unable to load saved templates");
             return;
         };
         defer templates.deinit();
         if (templates.templates.items.len == 0) {
-            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, initial) catch |err| {
+            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, initial) catch |err| {
                 self.setStatus(nodeFormErrorStatus(err));
                 return;
             } orelse return;
@@ -1196,7 +1232,7 @@ pub const App = struct {
         var owns_current = false;
         defer if (owns_current) current.deinit(self.allocator);
         while (true) {
-            const result = NativeForms.nodeWithTemplates(self.window.hwnd, self.allocator, path, &draft_id_buffer, current, true) catch |err| {
+            const result = NativeForms.nodeWithTemplates(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, current, true) catch |err| {
                 self.setStatus(nodeFormErrorStatus(err));
                 return;
             };
@@ -2139,6 +2175,131 @@ pub const App = struct {
             &onContextAction,
         );
         _ = c.KillTimer(hwnd, MainWindow.menu_watchdog_timer_id);
+    }
+
+    /// Gate-only hook that presents a real native modal form with deterministic
+    /// fixture data, bypassing the preconditions and `GRAPHCODE_UIA_SHOW_DIALOGS`
+    /// suppression that guard the equivalent real user flows. `form_kind`
+    /// selects which form: 1 = edge creation, 2 = worktree policy/project
+    /// settings, 3 = worktree sweep. Real user-facing behavior is unaffected
+    /// because this path only runs under `GRAPHCODE_UIA_GATE`.
+    ///
+    /// A watchdog timer mirrors the one `showUiaContextMenu` sets around
+    /// `TrackPopupMenu`: these forms run their own blocking message loop
+    /// (`NativeForms.show`), so if the harness never dismisses one, the
+    /// watchdog force-closes it (posting the same `WM_CLOSE` a Cancel/close-box
+    /// click would send) rather than wedging the shell thread for the life of
+    /// the process. It only closes a form that outlived the interval; it never
+    /// fabricates or shortcuts a passing assertion, so the gate still fails
+    /// honestly if the expected form never appeared at all.
+    fn presentUiaForm(self: *App, form_kind: c.WPARAM) void {
+        if (!envFlag("GRAPHCODE_UIA_GATE")) return;
+        if (form_kind < 1 or form_kind > 3) return;
+        _ = c.SetTimer(
+            self.window.hwnd,
+            MainWindow.menu_watchdog_timer_id,
+            MainWindow.menu_watchdog_interval_ms,
+            null,
+        );
+        switch (form_kind) {
+            1 => self.presentUiaEdgeForm(),
+            2 => self.presentUiaWorktreePolicyForm(),
+            3 => self.presentUiaWorktreeSweepForm(),
+            else => unreachable,
+        }
+        _ = c.KillTimer(self.window.hwnd, MainWindow.menu_watchdog_timer_id);
+    }
+
+    /// Force-dismisses a `NativeForms` window left open past the watchdog
+    /// interval by posting `WM_CLOSE`, the same message its Cancel/close-box
+    /// path sends; `NativeForms.zig`'s own `WM_CLOSE` handler treats that as a
+    /// cancellation, so this cannot turn a missing form into a fabricated
+    /// success. `"GraphCodeNativeForm"` is `NativeForms.zig`'s private window
+    /// class name, mirrored here rather than exported since only the class
+    /// identity (not any internal state) is needed to find the window.
+    ///
+    /// Scoped to the *current thread's* windows via `EnumThreadWindows` rather
+    /// than the system-wide `FindWindowW`: the live gate runs multiple shell
+    /// instances at once (workspace-lifecycle switch/create, fixture shells),
+    /// and a system-wide search could post `WM_CLOSE` to a form belonging to a
+    /// different process, cancelling work another part of the gate is mid-way
+    /// through asserting against. `presentUiaForm` runs on this window's
+    /// message-loop thread and `NativeForms.show` blocks that same thread, so
+    /// the form is always created on the thread that armed the watchdog.
+    fn dismissWedgedUiaForm() void {
+        _ = c.EnumThreadWindows(c.GetCurrentThreadId(), dismissWedgedUiaFormCallback, 0);
+    }
+
+    fn dismissWedgedUiaFormCallback(hwnd: c.HWND, lparam: c.LPARAM) callconv(.winapi) c.BOOL {
+        _ = lparam;
+        var class_buffer: [64]u16 = undefined;
+        const len: usize = @intCast(c.GetClassNameW(hwnd, &class_buffer, class_buffer.len));
+        const form_class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeNativeForm");
+        if (len == form_class_name.len and std.mem.eql(u16, class_buffer[0..len], form_class_name)) {
+            _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0);
+        }
+        return 1;
+    }
+
+    fn ensureUiaFixtureProject(self: *App, min_nodes: usize) void {
+        const needs_project = self.model.graph == null;
+        const needs_nodes = if (self.model.graph) |graph| graph.nodes.items.len < min_nodes else true;
+        if (!needs_project and !needs_nodes) return;
+        const frame =
+            \\{"version":2,"kind":"event","sequence":63,"event":{"graphChanged":{"project":{"path":"C:\\GraphCode\\fixture","name":"Fixture project"},"nodes":[{"id":"uia-form-source","title":"Planner","state":"idle"},{"id":"uia-form-target","title":"Builder","state":"idle"}],"edges":[]}}}
+        ;
+        _ = self.model.updateFromFrame(frame) catch return;
+        self.surface = .project;
+    }
+
+    fn presentUiaEdgeForm(self: *App) void {
+        self.ensureUiaFixtureProject(2);
+        self.createEdge();
+    }
+
+    fn presentUiaWorktreePolicyForm(self: *App) void {
+        self.ensureUiaFixtureProject(0);
+        const project_path = self.currentProject() orelse return;
+        const initial = if (self.worktree_dialog) |dialog|
+            dialog.policy
+        else
+            WorktreeStatus.loadPolicy(self.allocator, project_path);
+        const policy = NativeForms.worktreePolicy(self.window.hwnd, self.allocator, project_path, initial) catch {
+            self.setStatus("Unable to open worktree policy editor");
+            return;
+        } orelse {
+            self.setStatus("Worktree policy edit cancelled");
+            return;
+        };
+        if (self.worktree_dialog) |*dialog| dialog.setPolicy(policy);
+        self.setStatus("Project settings updated");
+    }
+
+    fn presentUiaWorktreeSweepForm(self: *App) void {
+        self.ensureUiaFixtureProject(0);
+        const graph = self.model.graph orelse return;
+        if (self.worktree_inspection == null) {
+            var entries = std.array_list.Managed(WorktreeStatus.Entry).init(self.allocator);
+            entries.append(.{
+                .path = self.allocator.dupe(u8, "C:\\GraphCode\\fixture-worktrees\\reclaimable") catch return,
+                .branch = self.allocator.dupe(u8, "uia-fixture-reclaimable") catch return,
+                .size_bytes = 1024,
+                .pushed = true,
+                .landed = true,
+            }) catch return;
+            entries.append(.{
+                .path = self.allocator.dupe(u8, "C:\\GraphCode\\fixture-worktrees\\dirty") catch return,
+                .branch = self.allocator.dupe(u8, "uia-fixture-dirty") catch return,
+                .size_bytes = 2048,
+                .dirty = true,
+            }) catch return;
+            self.worktree_inspection = .{
+                .entries = entries,
+                .default_branch = self.allocator.dupe(u8, "main") catch return,
+                .project_path = self.allocator.dupe(u8, graph.project.path) catch return,
+            };
+        }
+        self.presentWorktreeSweep();
     }
 
     fn handleContextAction(self: *App, action: GraphContextMenu.Action, target: GraphContextMenu.Target) void {
@@ -4957,6 +5118,7 @@ fn onWindowMessage(
         c.WM_TIMER => if (wparam == MainWindow.menu_watchdog_timer_id) {
             _ = c.KillTimer(hwnd, MainWindow.menu_watchdog_timer_id);
             _ = c.EndMenu();
+            App.dismissWedgedUiaForm();
             result.* = 0;
             return true;
         } else if (wparam == MainWindow.timer_id) {
@@ -5099,6 +5261,11 @@ fn onWindowMessage(
         },
         MainWindow.wm_uia_context_menu => {
             app.showUiaContextMenu(wparam);
+            result.* = 0;
+            return true;
+        },
+        MainWindow.wm_uia_present_form => {
+            app.presentUiaForm(wparam);
             result.* = 0;
             return true;
         },
@@ -5933,6 +6100,62 @@ test "node form validation errors keep the validation status" {
         "Unable to open node form",
         App.nodeFormErrorStatus(error.FormCreationFailed),
     );
+}
+
+test "worktree choices for node form degrade honestly when there is no inspection" {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = undefined,
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+
+    // No worktree inspection has run (e.g. creating a node for graphcode://global):
+    // the picker must see an explicit empty list, never a fabricated entry.
+    const choices = try app.worktreeChoicesForNodeForm(allocator);
+    defer allocator.free(choices);
+    try std.testing.expectEqual(@as(usize, 0), choices.len);
+}
+
+test "worktree choices for node form project real entries and the default branch" {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = undefined,
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+
+    var entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator);
+    try entries.append(.{ .path = try allocator.dupe(u8, "C:\\repo\\wt-main"), .branch = try allocator.dupe(u8, "main") });
+    try entries.append(.{ .path = try allocator.dupe(u8, "C:\\repo\\wt-feature"), .branch = try allocator.dupe(u8, "feature/x") });
+    app.worktree_inspection = .{
+        .entries = entries,
+        .default_branch = try allocator.dupe(u8, "main"),
+        .project_path = try allocator.dupe(u8, "C:\\repo"),
+    };
+    defer WorktreeStatus.deinitInspection(allocator, &app.worktree_inspection.?);
+
+    const choices = try app.worktreeChoicesForNodeForm(allocator);
+    defer allocator.free(choices);
+    try std.testing.expectEqual(@as(usize, 2), choices.len);
+    try std.testing.expectEqualStrings("main", choices[0].branch);
+    try std.testing.expect(choices[0].is_default);
+    try std.testing.expectEqualStrings("feature/x", choices[1].branch);
+    try std.testing.expect(!choices[1].is_default);
 }
 
 fn runSmokeWorkspaceActions(self: *App) void {
