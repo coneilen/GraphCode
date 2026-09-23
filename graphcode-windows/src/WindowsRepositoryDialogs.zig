@@ -1049,7 +1049,18 @@ const OperationDialogState = struct {
 var operation_dialog_active = false;
 var operation_dialog_state: OperationDialogState = undefined;
 
+fn acquireOperationDialog() !void {
+    if (operation_dialog_active) return error.OperationDialogAlreadyOpen;
+    operation_dialog_active = true;
+}
+
+fn releaseOperationDialog() void {
+    operation_dialog_active = false;
+}
+
 pub fn showCloneProgress(parent: c.HWND, allocator: std.mem.Allocator, operation: *CloneOperation) !CloneStatus {
+    try acquireOperationDialog();
+    defer releaseOperationDialog();
     operation_dialog_state = .{ .allocator = allocator, .parent = parent, .clone = operation };
     const status = try showOperationDialog("Cloning repository", "Starting clone…");
     return switch (status) {
@@ -1060,6 +1071,8 @@ pub fn showCloneProgress(parent: c.HWND, allocator: std.mem.Allocator, operation
 }
 
 pub fn showRemoteValidation(parent: c.HWND, allocator: std.mem.Allocator, fields: RemoteFields) !bool {
+    try acquireOperationDialog();
+    defer releaseOperationDialog();
     var operation = try RemoteValidationOperation.start(allocator, fields);
     defer operation.deinit();
     operation_dialog_state = .{ .allocator = allocator, .parent = parent, .remote = operation };
@@ -1070,7 +1083,6 @@ const OperationResult = enum { finished, cancelled, failed };
 
 fn showOperationDialog(title: []const u8, initial: []const u8) !OperationResult {
     try registerOperationDialogClass();
-    operation_dialog_active = true;
     operation_dialog_state.closed = false;
     operation_dialog_state.cancelled = false;
     const wide_title = try wideZ(operation_dialog_state.allocator, title);
@@ -1088,10 +1100,7 @@ fn showOperationDialog(title: []const u8, initial: []const u8) !OperationResult 
         null,
         c.GetModuleHandleW(null),
         null,
-    ) orelse {
-        operation_dialog_active = false;
-        return error.OperationDialogCreationFailed;
-    };
+    ) orelse return error.OperationDialogCreationFailed;
     operation_dialog_state.label = createOperationControl(hwnd, "STATIC", initial, 24, 28, 500, 46, 0);
     operation_dialog_state.cancel = createOperationControl(hwnd, "BUTTON", "Cancel", 430, 96, 88, 30, operation_cancel_id);
     _ = c.SetTimer(hwnd, operation_timer_id, 100, null);
@@ -1112,7 +1121,6 @@ fn showOperationDialog(title: []const u8, initial: []const u8) !OperationResult 
     _ = c.DestroyWindow(hwnd);
     _ = c.EnableWindow(operation_dialog_state.parent, 1);
     _ = c.SetActiveWindow(operation_dialog_state.parent);
-    operation_dialog_active = false;
     if (operation_dialog_state.cancelled) return .cancelled;
     if (operation_dialog_state.clone) |operation| {
         return switch (operation.poll() orelse .failed) {
@@ -1222,6 +1230,21 @@ fn drainPipe(process: *CloneProcess, file: *std.fs.File, is_stderr: bool, done: 
 fn drainPipeDiscard(file: *std.fs.File) void {
     var buffer: [4096]u8 = undefined;
     while ((file.read(&buffer) catch 0) != 0) {}
+}
+
+test "operation dialogs reject reentrant acquisition and allow sequential dialogs" {
+    operation_dialog_active = false;
+    defer operation_dialog_active = false;
+
+    try acquireOperationDialog();
+    try std.testing.expect(operation_dialog_active);
+    try std.testing.expectError(error.OperationDialogAlreadyOpen, acquireOperationDialog());
+
+    releaseOperationDialog();
+    try std.testing.expect(!operation_dialog_active);
+    try acquireOperationDialog();
+    try std.testing.expect(operation_dialog_active);
+    releaseOperationDialog();
 }
 
 test "clone dialog derives safe destination folder names" {
