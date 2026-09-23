@@ -86,6 +86,19 @@ var active_state_storage: DialogState = undefined;
 
 const ModalCommand = enum { submit, cancel, close, destroy };
 
+pub fn isModalActive() bool {
+    return active_state;
+}
+
+fn acquireModal() !void {
+    if (active_state) return error.FormAlreadyOpen;
+    active_state = true;
+}
+
+fn releaseModal() void {
+    active_state = false;
+}
+
 /// Loop-type teaching-tile accents, converted from the exact RGB values macOS
 /// uses for the same four types (LoopTypeAppearance.swift's `accent`), so the
 /// Windows tiles read as the same visual language rather than a new palette.
@@ -673,13 +686,14 @@ pub fn worktreeSweep(
 
 fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !bool {
     _ = labels;
+    try acquireModal();
+    defer releaseModal();
     registerClass() catch return error.FormClassRegistrationFailed;
     const wide_title = try utf8ToWideZ(state.allocator, title);
     defer state.allocator.free(wide_title);
     active_state_storage = state.*;
     active_state_storage.closed = false;
     active_state_storage.result = false;
-    active_state = true;
     const screen_height = c.GetSystemMetrics(c.SM_CYSCREEN);
     const dialog_height: i32 = if (state.kind == .worktree_policy) 430 else @max(320, @min(700, screen_height - 96));
     const hwnd = c.CreateWindowExW(
@@ -696,7 +710,6 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
         c.GetModuleHandleW(null),
         @ptrCast(state),
     ) orelse {
-        active_state = false;
         return error.FormCreationFailed;
     };
     _ = c.EnableWindow(state.parent, 0);
@@ -722,7 +735,6 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
     _ = c.EnableWindow(state.parent, 1);
     _ = c.SetActiveWindow(state.parent);
     state.* = active_state_storage;
-    active_state = false;
     if (quit_code) |value| c.PostQuitMessage(@intCast(value));
     return state.result;
 }
@@ -2102,6 +2114,21 @@ test "modal submit and cancel transitions always terminate the loop" {
     applyModalCommand(&state, .destroy);
     try std.testing.expect(state.closed);
     try std.testing.expect(state.result);
+}
+
+test "native forms reject reentrant modal acquisition and allow sequential dialogs" {
+    active_state = false;
+    defer active_state = false;
+
+    try acquireModal();
+    try std.testing.expect(isModalActive());
+    try std.testing.expectError(error.FormAlreadyOpen, acquireModal());
+
+    releaseModal();
+    try std.testing.expect(!isModalActive());
+    try acquireModal();
+    try std.testing.expect(isModalActive());
+    releaseModal();
 }
 
 test "jump modal result uses production query validation" {
