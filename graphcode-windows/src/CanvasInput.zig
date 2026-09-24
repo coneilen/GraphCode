@@ -64,10 +64,18 @@ pub const GestureDecision = enum {
     begin_zoom,
     /// A later GID_ZOOM message inside the canvas: applies the pinch update.
     continue_zoom,
-    /// The GID_ZOOM message carrying GF_END inside the canvas: applies the
-    /// final update (if any distance is still reported) and then ends the
-    /// gesture, clearing pinch state for the next one.
+    /// The GID_ZOOM message carrying GF_END (but not GF_BEGIN) inside the
+    /// canvas: applies the final update against the already-captured
+    /// baseline, then ends the gesture, clearing pinch state for the next
+    /// one.
     end_zoom,
+    /// A GID_ZOOM message carrying *both* GF_BEGIN and GF_END inside the
+    /// canvas (a gesture short enough to be delivered as a single message).
+    /// Per the documented contract the first GID_ZOOM message never causes
+    /// zooming by itself, so this must establish a fresh baseline and then
+    /// immediately clear it -- never apply a continuation against whatever
+    /// baseline a *previous*, unrelated gesture happened to leave behind.
+    begin_and_end_zoom,
 };
 
 /// Pure classification of a single WM_GESTURE message. `dw_id` and `flags`
@@ -79,8 +87,11 @@ pub const GestureDecision = enum {
 pub fn classifyGesture(dw_id: u32, flags: u32, in_canvas: bool) GestureDecision {
     if (dw_id != GID_ZOOM) return .forward_unhandled;
     if (!in_canvas) return .forward_out_of_region;
-    if (flags & GF_END != 0) return .end_zoom;
-    if (flags & GF_BEGIN != 0) return .begin_zoom;
+    const is_begin = flags & GF_BEGIN != 0;
+    const is_end = flags & GF_END != 0;
+    if (is_begin and is_end) return .begin_and_end_zoom;
+    if (is_end) return .end_zoom;
+    if (is_begin) return .begin_zoom;
     return .continue_zoom;
 }
 
@@ -113,9 +124,10 @@ fn fakeScreenToClient(hwnd: c.HWND, point: *c.POINT) c.BOOL {
 test "classifyGesture forwards non-zoom gesture IDs unconditionally" {
     try std.testing.expectEqual(GestureDecision.forward_unhandled, classifyGesture(GID_BEGIN, GF_BEGIN, true));
     try std.testing.expectEqual(GestureDecision.forward_unhandled, classifyGesture(GID_END, GF_END, true));
-    // GID_PAN (4): GESTURECONFIG blocks it, but if the OS still delivers one
-    // (e.g. on a platform where the block is advisory) it must be forwarded,
-    // not silently swallowed.
+    // GID_PAN (4): this app's GESTURECONFIG only opts in to GID_ZOOM and
+    // leaves every other gesture class at its existing default (neither
+    // enabled nor blocked), so any GID_PAN message the OS still delivers
+    // must be forwarded, not silently swallowed.
     try std.testing.expectEqual(GestureDecision.forward_unhandled, classifyGesture(4, GF_BEGIN, true));
 }
 
@@ -130,8 +142,15 @@ test "classifyGesture distinguishes begin, continue, and end within the canvas" 
     try std.testing.expectEqual(GestureDecision.end_zoom, classifyGesture(GID_ZOOM, GF_END, true));
 }
 
-test "classifyGesture treats a combined begin+end single-message gesture as end" {
-    // Documented as possible for a very brief gesture; ending must win so the
-    // pinch baseline is still cleared rather than left dangling.
-    try std.testing.expectEqual(GestureDecision.end_zoom, classifyGesture(GID_ZOOM, GF_BEGIN | GF_END, true));
+test "classifyGesture gives a combined begin+end single-message gesture its own outcome" {
+    // Documented as possible for a very brief gesture. This must NOT map to
+    // plain end_zoom: end_zoom's contract is "continue against the already-
+    // captured baseline, then clear it", but a message that begins and ends
+    // in one shot has no prior baseline of its own to continue -- treating
+    // it as end_zoom would let it apply a *different*, stale gesture's
+    // leftover baseline. It gets a distinct outcome so the caller establishes
+    // a fresh baseline first and applies no zoom delta, exactly matching a
+    // real begin-then-end sequence.
+    try std.testing.expectEqual(GestureDecision.begin_and_end_zoom, classifyGesture(GID_ZOOM, GF_BEGIN | GF_END, true));
 }
+

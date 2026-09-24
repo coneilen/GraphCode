@@ -43,6 +43,16 @@ pub const CanvasState = struct {
     /// message, so repeated updates cannot compound the zoom factor.
     pinch_base_distance: ?u32 = null,
     pinch_base_zoom: f32 = 1,
+    /// A caller-supplied identity captured at `beginPinchZoom` (e.g. a hash
+    /// of the active surface and selected project, mirroring the existing
+    /// `nodeKey` hashing pattern rather than holding onto a borrowed string).
+    /// A pinch gesture can legitimately span many messages, so the app can
+    /// change destination (surface switch, project switch) *without* ever
+    /// delivering GID_END for the in-progress gesture; `continuePinchZoom`
+    /// treats a mismatched context as the gesture no longer being valid for
+    /// whatever is now on screen, rather than silently continuing to scale
+    /// it.
+    pinch_context: u64 = 0,
 
     pub fn beginPan(self: *CanvasState, x: i32, y: i32) void {
         self.dragging = true;
@@ -255,8 +265,12 @@ pub const CanvasState = struct {
     /// OS-reported GESTUREINFO.ullArguments low dword, an unsigned integer by
     /// construction (so this can never receive a NaN/Inf input); zero is the
     /// platform's way of saying "no meaningful distance yet," so we leave the
-    /// base unset rather than dividing by it later.
-    pub fn beginPinchZoom(self: *CanvasState, distance: u32) void {
+    /// base unset rather than dividing by it later. `context` identifies what
+    /// this gesture is being applied to (see the `pinch_context` field doc);
+    /// it is always (re)recorded here so a later `continuePinchZoom` can
+    /// detect the gesture has outlived the thing it started on.
+    pub fn beginPinchZoom(self: *CanvasState, distance: u32, context: u64) void {
+        self.pinch_context = context;
         if (distance == 0) {
             self.pinch_base_distance = null;
             return;
@@ -274,7 +288,21 @@ pub const CanvasState = struct {
     /// chaining `currentDistance / previousDistance` factors, means
     /// intermediate clamping (from `zoomBy`) is self-correcting instead of
     /// accumulating error.
-    pub fn continuePinchZoom(self: *CanvasState, x: i32, y: i32, distance: u32) void {
+    ///
+    /// `context` must match the value passed to the `beginPinchZoom` that
+    /// started this gesture. A single physical gesture can span many
+    /// messages without ever delivering GID_END (e.g. the user switches the
+    /// active project or the surface changes to the terminal mid-pinch);
+    /// when the context no longer matches, this resets the baseline instead
+    /// of applying a zoom update, so a gesture that began on one graph can
+    /// never scale a different one it happened to still be "in progress"
+    /// over. The caller (App.zig) is expected to follow a reset with a fresh
+    /// `beginPinchZoom` on the next message if the point is still in-canvas.
+    pub fn continuePinchZoom(self: *CanvasState, x: i32, y: i32, distance: u32, context: u64) void {
+        if (context != self.pinch_context) {
+            self.pinch_base_distance = null;
+            return;
+        }
         const base_distance = self.pinch_base_distance orelse return;
         if (distance == 0 or self.zoom == 0) return;
         const target_zoom = self.pinch_base_zoom *
@@ -1818,11 +1846,11 @@ test "canvas wheel zoom scales high-resolution trackpad deltas" {
 
 test "pinch zoom scales relative to the gesture's captured base distance" {
     var state = CanvasState{};
-    state.beginPinchZoom(100);
+    state.beginPinchZoom(100, 1);
     try std.testing.expectEqual(@as(?u32, 100), state.pinch_base_distance);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), state.zoom, 0.0001);
 
-    state.continuePinchZoom(400, 300, 200);
+    state.continuePinchZoom(400, 300, 200, 1);
     try std.testing.expectApproxEqAbs(@as(f32, 1.8), state.zoom, 0.001);
 }
 
@@ -1831,70 +1859,90 @@ test "pinch zoom does not compound across repeated updates" {
     // rather than chaining relative-to-previous factors, so two updates that
     // both report a 2x distance land on the same zoom, not zoom^2.
     var single = CanvasState{};
-    single.beginPinchZoom(100);
-    single.continuePinchZoom(400, 300, 150);
+    single.beginPinchZoom(100, 1);
+    single.continuePinchZoom(400, 300, 150, 1);
 
     var repeated = CanvasState{};
-    repeated.beginPinchZoom(100);
-    repeated.continuePinchZoom(400, 300, 150);
-    repeated.continuePinchZoom(400, 300, 150);
-    repeated.continuePinchZoom(400, 300, 150);
+    repeated.beginPinchZoom(100, 1);
+    repeated.continuePinchZoom(400, 300, 150, 1);
+    repeated.continuePinchZoom(400, 300, 150, 1);
+    repeated.continuePinchZoom(400, 300, 150, 1);
 
     try std.testing.expectApproxEqAbs(single.zoom, repeated.zoom, 0.0001);
 }
 
 test "pinch zoom respects the existing zoomBy clamp range" {
     var state = CanvasState{};
-    state.beginPinchZoom(100);
-    state.continuePinchZoom(400, 300, 10_000);
+    state.beginPinchZoom(100, 1);
+    state.continuePinchZoom(400, 300, 10_000, 1);
     try std.testing.expectApproxEqAbs(@as(f32, 1.8), state.zoom, 0.0001);
 
     var shrink = CanvasState{};
-    shrink.beginPinchZoom(100);
-    shrink.continuePinchZoom(400, 300, 1);
+    shrink.beginPinchZoom(100, 1);
+    shrink.continuePinchZoom(400, 300, 1, 1);
     try std.testing.expectApproxEqAbs(@as(f32, 0.55), shrink.zoom, 0.0001);
 }
 
 test "pinch zoom with zero distance never sets a baseline or divides by zero" {
     var state = CanvasState{};
-    state.beginPinchZoom(0);
+    state.beginPinchZoom(0, 1);
     try std.testing.expectEqual(@as(?u32, null), state.pinch_base_distance);
 
     // Also guards a base captured normally but then fed a zero continuation.
-    state.beginPinchZoom(100);
-    state.continuePinchZoom(400, 300, 0);
+    state.beginPinchZoom(100, 1);
+    state.continuePinchZoom(400, 300, 0, 1);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), state.zoom, 0.0001);
 }
 
 test "pinch zoom is a no-op before a base distance has been captured" {
     var state = CanvasState{};
-    state.continuePinchZoom(400, 300, 200);
+    state.continuePinchZoom(400, 300, 200, 1);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), state.zoom, 0.0001);
 }
 
 test "ending a pinch gesture clears the baseline for the next gesture" {
     var state = CanvasState{};
-    state.beginPinchZoom(100);
-    state.continuePinchZoom(400, 300, 150);
+    state.beginPinchZoom(100, 1);
+    state.continuePinchZoom(400, 300, 150, 1);
     state.endPinchZoom();
     try std.testing.expectEqual(@as(?u32, null), state.pinch_base_distance);
 
     // A stray continuation after end must not resume the stale gesture.
     const zoom_after_end = state.zoom;
-    state.continuePinchZoom(400, 300, 400);
+    state.continuePinchZoom(400, 300, 400, 1);
     try std.testing.expectApproxEqAbs(zoom_after_end, state.zoom, 0.0001);
 
     // A fresh begin starts an independent gesture from the current zoom.
-    state.beginPinchZoom(100);
+    state.beginPinchZoom(100, 1);
     try std.testing.expectApproxEqAbs(zoom_after_end, state.pinch_base_zoom, 0.0001);
 }
 
 test "pinch zoom with a very large OS-reported distance stays finite and clamped" {
     var state = CanvasState{};
-    state.beginPinchZoom(1);
-    state.continuePinchZoom(400, 300, std.math.maxInt(u32));
+    state.beginPinchZoom(1, 1);
+    state.continuePinchZoom(400, 300, std.math.maxInt(u32), 1);
     try std.testing.expect(std.math.isFinite(state.zoom));
     try std.testing.expectApproxEqAbs(@as(f32, 1.8), state.zoom, 0.0001);
+}
+
+test "pinch continuation with a mismatched context resets instead of zooming" {
+    // A gesture begun against one destination (surface/project) must not be
+    // able to keep scaling once the app has moved on to a different one --
+    // even though the OS never delivered a GID_END for it (e.g. the user
+    // switched projects, or the surface flipped to the terminal, mid-pinch).
+    var state = CanvasState{};
+    state.beginPinchZoom(100, 111);
+    try std.testing.expectEqual(@as(u64, 111), state.pinch_context);
+
+    state.continuePinchZoom(400, 300, 200, 222);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), state.zoom, 0.0001);
+    try std.testing.expectEqual(@as(?u32, null), state.pinch_base_distance);
+
+    // A fresh begin for the new destination establishes its own baseline
+    // rather than being blocked by the stale context.
+    state.beginPinchZoom(100, 222);
+    state.continuePinchZoom(400, 300, 200, 222);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.8), state.zoom, 0.001);
 }
 
 test "loop card stripe follows loop type rather than lifecycle state" {

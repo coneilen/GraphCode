@@ -110,21 +110,19 @@ pub const GestureConfigResult = struct {
     last_error: c.DWORD,
 };
 
-/// Registers this window for native pinch-zoom (`GID_ZOOM`) gestures and
-/// explicitly blocks the other WM_GESTURE classes GraphCode does not yet
-/// implement (pan/rotate/two-finger-tap/press-and-tap), so the canvas cannot
-/// silently start handling gestures it has no logic for. `SetGestureConfig`
-/// documents that a single call cannot mix a `dwID = 0` "all gestures" entry
-/// with specific-`dwID` entries, so every entry here targets one specific
-/// `dwID` instead (matching the pattern in Microsoft's own multi-gesture
-/// configuration examples).
+/// Registers this window's opt-in to native pinch-zoom (`GID_ZOOM`)
+/// gestures only. Every other WM_GESTURE class is left at its existing
+/// default (neither explicitly enabled nor blocked here) -- App.zig's
+/// `WM_GESTURE` handler already forwards any non-`GID_ZOOM` message
+/// unhandled via `CanvasInput.classifyGesture`, so there is no unimplemented
+/// gesture class this app could silently start reacting to; configuring an
+/// explicit block for gestures this app has no opinion on would only widen
+/// the surface unnecessarily. `SetGestureConfig` documents that a single
+/// call cannot mix a `dwID = 0` "all gestures" entry with specific-`dwID`
+/// entries, so this uses one specific-`dwID` entry rather than `dwID = 0`.
 pub fn registerCanvasGestureConfig(hwnd: c.HWND) GestureConfigResult {
     var configs = [_]c.GESTURECONFIG{
         .{ .dwID = c.GID_ZOOM, .dwWant = c.GC_ZOOM, .dwBlock = 0 },
-        .{ .dwID = c.GID_PAN, .dwWant = 0, .dwBlock = c.GC_PAN },
-        .{ .dwID = c.GID_ROTATE, .dwWant = 0, .dwBlock = c.GC_ROTATE },
-        .{ .dwID = c.GID_TWOFINGERTAP, .dwWant = 0, .dwBlock = c.GC_TWOFINGERTAP },
-        .{ .dwID = c.GID_PRESSANDTAP, .dwWant = 0, .dwBlock = c.GC_PRESSANDTAP },
     };
     if (c.SetGestureConfig(hwnd, 0, configs.len, &configs, @sizeOf(c.GESTURECONFIG)) != 0) {
         return .{ .ok = true, .last_error = 0 };
@@ -623,6 +621,21 @@ test "registerCanvasGestureConfig succeeds with the real gesture array and captu
     const failed = c.SetGestureConfig(hwnd, 0, bad_config.len, &bad_config, 0);
     try std.testing.expectEqual(@as(c.BOOL, 0), failed);
     try std.testing.expect(c.GetLastError() != 0);
+}
+
+// The negative control above bypasses `registerCanvasGestureConfig` entirely
+// (it calls the raw Win32 API with a malformed argument), so it only proves
+// the OS API itself can fail -- it says nothing about whether this codebase's
+// own helper actually surfaces that failure correctly. A `registerCanvasGestureConfig`
+// that ignored `SetGestureConfig`'s return value and always reported success
+// would still pass the test above. This exercises the production helper's
+// own call with a genuinely invalid (never-created) HWND, so only a helper
+// that truly captures and returns the real failure/GetLastError can pass it.
+test "registerCanvasGestureConfig itself reports failure for a genuinely invalid HWND" {
+    const bogus_hwnd = Win32.opaquePointerFromInt(c.HWND, 0xdeadbeef);
+    const result = registerCanvasGestureConfig(bogus_hwnd);
+    try std.testing.expect(!result.ok);
+    try std.testing.expect(result.last_error != 0);
 }
 
 test "recent folder commands use a dedicated command range" {
