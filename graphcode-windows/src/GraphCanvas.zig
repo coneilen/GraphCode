@@ -296,8 +296,9 @@ pub const CanvasState = struct {
     /// when the context no longer matches, this resets the baseline instead
     /// of applying a zoom update, so a gesture that began on one graph can
     /// never scale a different one it happened to still be "in progress"
-    /// over. The caller (App.zig) is expected to follow a reset with a fresh
-    /// `beginPinchZoom` on the next message if the point is still in-canvas.
+    /// over. After a reset, this call remains a no-op (see the base-distance
+    /// guard above) until a genuinely NEW `beginPinchZoom` establishes a
+    /// fresh baseline -- it does not resume on its own.
     pub fn continuePinchZoom(self: *CanvasState, x: i32, y: i32, distance: u32, context: u64) void {
         if (context != self.pinch_context) {
             self.pinch_base_distance = null;

@@ -100,6 +100,19 @@ fn gestureInCanvas(surface: GraphCanvas.Surface, mapped: ?c.POINT, bounds: Input
     return wheelRegion(point.x, point.y, bounds, controls) == .canvas;
 }
 
+/// Formats the gesture-registration failure diagnostic. Pulled out as a pure
+/// function (rather than inlined at the one `std.log`/`setStatus` call site)
+/// so the exact production message text is directly unit-testable without
+/// needing to run `App.run()`'s full startup sequence or capture `std.log`
+/// output.
+fn formatGestureRegistrationFailure(buf: []u8, last_error: c.DWORD) []const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "Touch pinch-zoom unavailable (gesture config error {d})",
+        .{last_error},
+    ) catch "Touch pinch-zoom unavailable";
+}
+
 fn isResolvedLoopState(state: []const u8) bool {
     return std.mem.eql(u8, state, "succeeded") or
         std.mem.eql(u8, state, "failed") or
@@ -434,20 +447,18 @@ pub const App = struct {
             // several later calls in this same startup sequence (daemon
             // status, accessibility attach, product-settings/canvas-layout/
             // sidebar-store load failures) call setStatus themselves and can
-            // overwrite this message before the window is ever shown. The
-            // durable record of this outcome is `window.gesture_config_registered`
-            // / `window.gesture_config_last_error` themselves: they are set
-            // once here and never cleared or overwritten by any later
-            // setStatus call, so any caller needing the real outcome (tests,
-            // future diagnostics UI, support tooling) can read them directly
-            // off the window rather than relying on this status line still
-            // being visible.
+            // overwrite this message before the window is ever shown. Two
+            // things make this observable regardless: `std.log.warn` below
+            // writes the same message (with the captured Win32 error code)
+            // to stderr, so support/CI logs retain it even if the on-screen
+            // status line gets clobbered; and `window.gesture_config_registered`
+            // / `window.gesture_config_last_error` are the durable, never-
+            // overwritten record of the outcome for any caller (tests,
+            // future diagnostics UI, support tooling) that reads the window
+            // directly instead of the transient status text.
             var buf: [96]u8 = undefined;
-            const message = std.fmt.bufPrint(
-                &buf,
-                "Touch pinch-zoom unavailable (gesture config error {d})",
-                .{self.window.gesture_config_last_error},
-            ) catch "Touch pinch-zoom unavailable";
+            const message = formatGestureRegistrationFailure(&buf, self.window.gesture_config_last_error);
+            std.log.warn("{s}", .{message});
             self.setStatus(message);
         }
         // Seed the real startup DPI now that a window handle exists, rather than
@@ -6199,11 +6210,11 @@ fn onWindowMessage(
                 },
                 .continue_zoom => {
                     if (mapped) |point| app.canvas.continuePinchZoom(point.x, point.y, distance, pinch_context);
-                    // Close the handle before any re-entrant call
-                    // (syncAccessibility/InvalidateRect can pump messages);
-                    // holding it open across those risks a double-close or
-                    // a use of a handle another WM_GESTURE re-entry already
-                    // closed.
+                    // Release the owned handle before syncAccessibility()/
+                    // InvalidateRect, which can pump messages -- this
+                    // window's WM_GESTURE handling should never still be
+                    // holding a handle open while other message handling
+                    // runs.
                     _ = c.CloseGestureInfoHandle(gesture_handle);
                     app.syncAccessibility();
                     _ = c.InvalidateRect(hwnd, null, 0);
@@ -6612,7 +6623,8 @@ test "gesture registration outcome survives later startup setStatus calls" {
     app.window.gesture_config_registered = false;
     app.window.gesture_config_last_error = 1223;
 
-    app.setStatus("Touch pinch-zoom unavailable (gesture config error 1223)");
+    var buf: [96]u8 = undefined;
+    app.setStatus(formatGestureRegistrationFailure(&buf, app.window.gesture_config_last_error));
     // Simulate the later startup calls that are known to overwrite status.
     app.setStatus("Connecting to daemon...");
     app.setStatus("Accessibility provider unavailable");
@@ -6623,6 +6635,22 @@ test "gesture registration outcome survives later startup setStatus calls" {
     // ...but the durable record must be completely unaffected.
     try std.testing.expect(!app.window.gesture_config_registered);
     try std.testing.expectEqual(@as(c.DWORD, 1223), app.window.gesture_config_last_error);
+}
+
+test "gesture registration failure formats the exact production diagnostic text" {
+    // This is the same formatter run() actually calls for both the
+    // std.log.warn line and the transient setStatus() line, so this proves
+    // the real observable failure output, not a hand-duplicated string.
+    var buf: [96]u8 = undefined;
+    const message = formatGestureRegistrationFailure(&buf, 1223);
+    try std.testing.expectEqualStrings("Touch pinch-zoom unavailable (gesture config error 1223)", message);
+
+    // A buffer too small to hold the formatted error code falls back to the
+    // fixed, always-fitting message rather than silently truncating or
+    // erroring.
+    var tiny_buf: [4]u8 = undefined;
+    const fallback = formatGestureRegistrationFailure(&tiny_buf, 1223);
+    try std.testing.expectEqualStrings("Touch pinch-zoom unavailable", fallback);
 }
 
 test "header UIA identities hash to distinct payloads" {
