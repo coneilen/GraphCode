@@ -135,6 +135,18 @@ public static class GraphCodeUiaGateState {
   private static extern uint GetMenuState(IntPtr menu, uint item, uint flags);
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMenuStringW")]
   private static extern int GetMenuString(IntPtr menu, uint item, StringBuilder text, int max, uint flags);
+  // The File/Loop/Terminal/Workspace/View/Help bar is a real SetMenu menu bar,
+  // not a TrackPopupMenu popup, so (unlike the popup context menu below) its
+  // live enabled state is readable directly through the Win32 menu API against
+  // GetMenu(shell) -- no MN_GETHMENU / popup-window workaround required.
+  // MF_BYCOMMAND (0) searches the whole menu tree for the command identifier.
+  public static uint MenuCommandState(IntPtr menuBar, uint command) {
+    if (menuBar == IntPtr.Zero) return 0xFFFFFFFF;
+    return GetMenuState(menuBar, command, 0x0000);
+  }
+  public static IntPtr GetMenuBar(IntPtr window) {
+    return GetMenu(window);
+  }
   public static IntPtr FindPopupMenuWindow(uint processId) {
     IntPtr result = IntPtr.Zero;
     EnumWindows(delegate(IntPtr window, IntPtr parameter) {
@@ -2421,6 +2433,98 @@ try {
   )) "About dialog rejected its close command"
   Start-Sleep -Milliseconds 250
 
+  # Update command (Help menu): reachable and disabled while a check is in
+  # flight. The File/Loop/Terminal/Workspace/View/Help bar is a real SetMenu
+  # menu bar (unlike the popup context menu below), so its live enabled state
+  # is read directly through GetMenu/GetMenuState rather than the
+  # MN_GETHMENU/TrackPopupMenu workaround. In-app update *installation* is
+  # deliberately out of scope here (Blocked elsewhere in the ledger); this only
+  # covers reachability and the checking/settled enablement transition.
+  $checkUpdatesCommandId = 4503 # MainWindow.Command.check_updates
+  $menuBarHandle = [GraphCodeUiaGateState]::GetMenuBar($shellWindow)
+  Require ($menuBarHandle -ne [IntPtr]::Zero) "GraphCode shell exposed no native menu bar"
+  $checkUpdatesInitialState = 0xFFFFFFFF
+  for ($index = 0; $index -lt 100; $index++) {
+    $checkUpdatesInitialState = [GraphCodeUiaGateState]::MenuCommandState($menuBarHandle, $checkUpdatesCommandId)
+    if (($checkUpdatesInitialState -band 0x1) -eq 0) { break }
+    Start-Sleep -Milliseconds 100
+  }
+  Require ($checkUpdatesInitialState -ne 0xFFFFFFFF) `
+    "Check for Updates command was not found on the Help menu"
+  Require (($checkUpdatesInitialState -band 0x1) -eq 0) `
+    "Check for Updates was still disabled once the startup check settled"
+  Require ([GraphCodeUiaGateState]::SendCommand($shellWindow, $checkUpdatesCommandId)) `
+    "Check for Updates command was rejected"
+  $checkUpdatesCheckingState = [GraphCodeUiaGateState]::MenuCommandState($menuBarHandle, $checkUpdatesCommandId)
+  Require (($checkUpdatesCheckingState -band 0x1) -ne 0) `
+    "Check for Updates stayed enabled immediately after being invoked, instead of disabling while checking"
+  Require ($status.Current.Name -eq "Checking for updates...") `
+    "Check for Updates did not report the checking status; saw '$($status.Current.Name)'"
+  $checkUpdatesSettled = $false
+  for ($index = 0; $index -lt 150 -and -not $checkUpdatesSettled; $index++) {
+    Start-Sleep -Milliseconds 100
+    $checkUpdatesSettled = (([GraphCodeUiaGateState]::MenuCommandState($menuBarHandle, $checkUpdatesCommandId) -band 0x1) -eq 0)
+  }
+  Require $checkUpdatesSettled `
+    "Check for Updates never re-enabled once its background check completed"
+  $checkUpdatesFinalStatus = $status.Current.Name
+  Require ($checkUpdatesFinalStatus -ne "Checking for updates...") `
+    "Check for Updates status text never left the checking state"
+  Require ($checkUpdatesFinalStatus -match "(?i)update") `
+    "Check for Updates completion status omitted any update-check outcome; saw '$checkUpdatesFinalStatus'"
+  $settledUpdateDialogCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty,
+      "GraphCode Update Available"
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Window
+    ))
+  )
+  if ($checkUpdatesFinalStatus -match "(?i)update available") {
+    # finishUpdateCheck re-enables the menu command immediately before
+    # synchronously presenting the available-update modal. The enabled bit
+    # therefore means the background request settled, not that its resulting
+    # modal interaction is finished. Handle that real result before continuing
+    # so later shell assertions never race a correctly disabled modal owner.
+    $settledUpdateDialog = Wait-ForDesktopElement `
+      -desktop $desktop `
+      -condition $settledUpdateDialogCondition `
+      -label "manual update-check offer" `
+      -diagnosticWindow $shellWindow
+    Require ($null -ne $settledUpdateDialog) `
+      "Check for Updates reported an available update but did not present its offer"
+    Require ([GraphCodeUiaGateState]::SendCommand(
+      [IntPtr]$settledUpdateDialog.Current.NativeWindowHandle, 9703
+    )) "Check for Updates offer could not be dismissed via Later"
+    Require (Wait-ForDesktopElementGone `
+      -desktop $desktop `
+      -condition $settledUpdateDialogCondition `
+      -label "manual update-check offer close" `
+      -diagnosticWindow $shellWindow) `
+      "Check for Updates offer did not close after Later"
+  } else {
+    $unexpectedUpdateDialog = Wait-ForDesktopElement `
+      -desktop $desktop `
+      -condition $settledUpdateDialogCondition `
+      -label "unexpected manual update-check offer" `
+      -diagnosticWindow $shellWindow `
+      -TimeoutMilliseconds 1000
+    Require ($null -eq $unexpectedUpdateDialog) `
+      "Check for Updates presented an offer despite reporting '$checkUpdatesFinalStatus'"
+  }
+  $checkUpdatesOwnerEnabled = $false
+  for ($index = 0; $index -lt 100 -and -not $checkUpdatesOwnerEnabled; $index++) {
+    $checkUpdatesOwnerEnabled = [GraphCodeUiaGateState]::WindowIsEnabled($shellWindow)
+    if (-not $checkUpdatesOwnerEnabled) { Start-Sleep -Milliseconds 50 }
+  }
+  Require $checkUpdatesOwnerEnabled `
+    "Check for Updates left the shell owner WS_DISABLED after its result was handled $(Get-FocusDiagnostics $shellWindow)"
+
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 20)) `
     "sidebar parity fixture reset was rejected"
   Start-Sleep -Milliseconds 200
@@ -3074,6 +3178,10 @@ try {
     productSettingsReturnSaved = ($savedSettings.defaultBackend -eq "copilotCLI")
     productSettingsEscapeCancelled = $true
     aboutDialogPassed = $true
+    checkUpdatesReachable = $true
+    checkUpdatesDisabledWhileChecking = $true
+    checkUpdatesSettledAfterCheck = $checkUpdatesSettled
+    checkUpdatesFinalStatus = $checkUpdatesFinalStatus
     statusText = $statusTextAfter
     statusChanged = ($statusTextAfter -ne $initialStatus)
     statusNoChangeLiveEvents = $statusNoChangeLiveEvents
