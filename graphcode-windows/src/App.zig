@@ -413,6 +413,19 @@ pub const App = struct {
         // for both explicit automation hooks.
         if (!daemon_supervisor_test_hook and !uia_gate_hook) GdiplusAA.init();
         try self.window.create(self, &onWindowMessage, title.ptr);
+        if (!self.window.gesture_config_registered) {
+            // Non-fatal: the canvas simply falls back to wheel-only zoom (no
+            // pinch input) rather than the app failing to start. Surfaced
+            // through the existing status/announcement path rather than a
+            // new logging mechanism, since none exists in this codebase.
+            var buf: [96]u8 = undefined;
+            const message = std.fmt.bufPrint(
+                &buf,
+                "Touch pinch-zoom unavailable (gesture config error {d})",
+                .{self.window.gesture_config_last_error},
+            ) catch "Touch pinch-zoom unavailable";
+            self.setStatus(message);
+        }
         // Seed the real startup DPI now that a window handle exists, rather than
         // waiting on the first WM_DPICHANGED. Without this a per-monitor-aware
         // process that launches directly on a scaled (>100%) monitor would still
@@ -6091,6 +6104,71 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
+        c.WM_GESTURE => {
+            // GESTUREINFO.ptsLocation is always screen-relative (per the
+            // documented WM_GESTURE contract), so it must go through the
+            // same ScreenToClient + region classification WM_MOUSEWHEEL uses
+            // above before it can be compared against canvas bounds.
+            const gesture_handle = Win32.messagePointer(c.HGESTUREINFO, lparam);
+            var info: c.GESTUREINFO = std.mem.zeroes(c.GESTUREINFO);
+            info.cbSize = @sizeOf(c.GESTUREINFO);
+            if (c.GetGestureInfo(gesture_handle, &info) == 0) {
+                // Could not even read the gesture; nothing to handle, and
+                // per the handle-ownership contract an unhandled message
+                // must be forwarded (not closed) so DefWindowProc still sees
+                // it for any legacy fallback behavior.
+                app.canvas.endPinchZoom();
+                return false;
+            }
+            const screen_point = c.POINT{ .x = info.ptsLocation.x, .y = info.ptsLocation.y };
+            const mapped = CanvasInput.screenToClient(hwnd, screen_point);
+            var gesture_client: c.RECT = undefined;
+            _ = c.GetClientRect(hwnd, &gesture_client);
+            const gesture_routing = inputBounds(gesture_client.right, gesture_client.bottom, app.workspace_controls);
+            const in_canvas = if (mapped) |point|
+                wheelRegion(point.x, point.y, gesture_routing, app.workspace_controls) == .canvas
+            else
+                false;
+            const distance: u32 = @truncate(info.ullArguments);
+            switch (CanvasInput.classifyGesture(info.dwID, info.dwFlags, in_canvas)) {
+                // GID_BEGIN/GID_END (the generic gesture-sequence brackets) and
+                // any zoom message located outside the canvas: this window
+                // does not handle it, so per the documented handle-ownership
+                // contract it must be forwarded to DefWindowProc rather than
+                // closed here -- ownership of the handle transfers with the
+                // message. Returning false relies on MainWindow.windowProc's
+                // existing single DefWindowProcW forward; this case must
+                // never call DefWindowProcW itself, or the handle would be
+                // forwarded twice.
+                .forward_unhandled, .forward_out_of_region => {
+                    app.canvas.endPinchZoom();
+                    return false;
+                },
+                .begin_zoom => {
+                    app.canvas.beginPinchZoom(distance);
+                    _ = c.CloseGestureInfoHandle(gesture_handle);
+                    result.* = 0;
+                    return true;
+                },
+                .continue_zoom => {
+                    if (mapped) |point| app.canvas.continuePinchZoom(point.x, point.y, distance);
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                    _ = c.CloseGestureInfoHandle(gesture_handle);
+                    result.* = 0;
+                    return true;
+                },
+                .end_zoom => {
+                    if (mapped) |point| app.canvas.continuePinchZoom(point.x, point.y, distance);
+                    app.canvas.endPinchZoom();
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                    _ = c.CloseGestureInfoHandle(gesture_handle);
+                    result.* = 0;
+                    return true;
+                },
+            }
+        },
         c.WM_SETFOCUS => {
             if (app.workspace) |workspace| {
                 if (app.surface == .workspace or app.workspace_controls.panel_visible) {
@@ -6111,6 +6189,14 @@ fn onWindowMessage(
             // restoration race and keep stealing focus away from the rest of the app's chrome.
             const activated = (wparam & 0xffff) != c.WA_INACTIVE;
             result.* = c.DefWindowProcW(hwnd, message, wparam, lparam);
+            if (!activated) {
+                // Deactivation (e.g. Alt+Tab away, or another window taking
+                // focus) can happen mid-pinch without ever delivering a
+                // GID_END for it; clear the baseline so a later reactivation
+                // cannot resume a stale gesture with a now-meaningless base
+                // distance.
+                app.canvas.endPinchZoom();
+            }
             if (activated) {
                 if (app.workspace) |workspace| {
                     if (app.surface == .workspace or app.workspace_controls.panel_visible) {
