@@ -399,9 +399,6 @@ import Foundation
       let data = try PropertyListSerialization.data(
         fromPropertyList: currentLaunchAgentPlist(), format: .xml, options: 0)
       try data.write(to: url, options: .atomic)
-      // macOS 27's launchd refuses to load a plist carrying the quarantine xattr, and a
-      // quarantined app can stamp one onto every file it writes.
-      clearQuarantine(url)
     }
 
     static var domainTarget: String { "gui/\(getuid())" }
@@ -431,6 +428,10 @@ import Foundation
 
     private static func reloadDaemon(serviceTarget: String, agentURL: URL) {
       launchctl(["bootout", serviceTarget])
+      // macOS 27's launchd refuses a plist carrying the quarantine xattr, and a quarantined
+      // app can stamp one onto every file it writes — including an agent written by an
+      // earlier release.
+      clearQuarantine(agentURL)
       if launchctlStatus(["bootstrap", domainTarget, agentURL.path]) != 0 {
         launchctl(["unload", agentURL.path])
         launchctl(["load", agentURL.path])
