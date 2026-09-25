@@ -399,6 +399,9 @@ import Foundation
       let data = try PropertyListSerialization.data(
         fromPropertyList: currentLaunchAgentPlist(), format: .xml, options: 0)
       try data.write(to: url, options: .atomic)
+      // macOS 27's launchd refuses to load a plist carrying the quarantine xattr, and a
+      // quarantined app can stamp one onto every file it writes.
+      clearQuarantine(url)
     }
 
     static var domainTarget: String { "gui/\(getuid())" }
