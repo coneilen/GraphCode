@@ -60,8 +60,8 @@ struct BroadcastMessageFormView: View {
 
   private var summary: String {
     let loops = loopCount == 1 ? "1 loop" : "\(loopCount) loops"
-    return "Typed into the sessions of all \(loops) across your open projects, as if sent "
-      + "with graphcode node send. A loop that can't take it now finds it in its memory "
-      + "at its next wake. ⌘↩ sends."
+    return "Sent to all \(loops) across your open projects, as if with graphcode node send: "
+      + "typed into each session that can take it, and saved to the others' memory for "
+      + "their next wake. ⌘↩ sends."
   }
 }

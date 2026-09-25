@@ -18,7 +18,8 @@ struct BroadcastMessageTests {
 
   /// A finished loop whose session is still up takes `node send` (#346), and the
   /// broadcast used to skip it — and every other state it read as not live — without
-  /// typing, staging, or counting it.
+  /// typing, staging, or counting it. Paused, blocked and mid-check loops are staged, as
+  /// `node send` stages them, and finished ones are counted rather than named.
   @Test
   func everyLoopButTheSenderIsAddressed() async {
     let delivered = LockIsolated<[String: String]>([:])
@@ -44,20 +45,20 @@ struct BroadcastMessageTests {
 
     await store.handle(.broadcastMessage(text: "  main is frozen  ", from: sender.id))
 
-    #expect(
-      Set(delivered.value.keys)
-        == ["Running", "Idle", "Waiting", "Done", "Failed", "Stalled", "Stopped", "Blocked"])
+    #expect(Set(delivered.value.keys) == ["Running", "Idle", "Waiting", "Done", "Failed"])
     #expect(delivered.value["Done"] == "[graphcode] Sender: main is frozen")
     #expect(
       memos.value[checking.id] == ["while you were away: [graphcode] Sender: main is frozen"])
+    #expect(memos.value.count == 4)
     #expect(memos.value[sender.id] == nil)
     #expect(errors.value.count == 1)
-    #expect(errors.value.first?.contains("8 of 9") == true)
-    #expect(errors.value.first?.contains("Checking") == true)
+    #expect(errors.value.first?.contains("5 of 9") == true)
+    #expect(errors.value.first?.contains("Blocked, Checking, 2 finished loops") == true)
   }
 
-  /// `node send`'s recovery, per target: an unattended loop whose session died is
-  /// relaunched and typed into again; a finished one is staged, never relaunched.
+  /// `node send`'s recovery, per target: a live unattended loop whose session died is
+  /// relaunched and typed into again; a finished one is staged, and a blocked one is
+  /// never relaunched ahead of its upstream.
   @Test
   func aDeadUnattendedSessionIsRelaunchedAndRetried() async {
     let attempts = LockIsolated<[String: Int]>([:])
@@ -66,8 +67,9 @@ struct BroadcastMessageTests {
     let errors = LockIsolated<[String]>([])
     let crashed = loop("Crashed", .running)
     let done = loop("Done", .succeeded)
+    let blocked = loop("Blocked", .blocked)
     let store = GraphStore(
-      graph: LoopGraph(project: Self.project, nodes: [crashed, done]),
+      graph: LoopGraph(project: Self.project, nodes: [crashed, done, blocked]),
       onEnsureSession: { node, _ in ensured.withValue { $0.append(node.title) } },
       onDeliverMessage: { node, _, _ in
         let attempt = attempts.withValue { counts -> Int in
@@ -85,7 +87,9 @@ struct BroadcastMessageTests {
     #expect(attempts.value == ["Crashed": 2, "Done": 1])
     #expect(memos.value[crashed.id] == nil)
     #expect(memos.value[done.id] == ["while you were away: [graphcode] rebase"])
-    #expect(errors.value.first?.contains("1 of 2") == true)
+    #expect(memos.value[blocked.id] == ["while you were away: [graphcode] rebase"])
+    #expect(errors.value.first?.contains("1 of 3") == true)
+    #expect(errors.value.first?.contains("Blocked, 1 finished loop;") == true)
   }
 
   @Test
