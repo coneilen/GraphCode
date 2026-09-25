@@ -3373,8 +3373,14 @@ public actor GraphStore {
   /// level. Workers are sent to with this graph's path, the one piloting launched their
   /// sessions with. The sends run concurrently for the reason `restart`'s kills do: each
   /// one is paced in chunks, and a dozen in sequence would hold this actor for as long as
-  /// they add up to. A send that fails is staged to that loop's memory, as
-  /// `deliverAdHocMessage` does.
+  /// they add up to.
+  ///
+  /// Every loop is addressed, not only the ones the graph last read as live: the cached
+  /// state is not the session, and a finished loop whose session is still up was left
+  /// out without a word while `node send` reached it. So each target gets the same
+  /// treatment `deliverAdHocMessage` gives one — typed in when its session takes it, an
+  /// unattended loop's dead session relaunched and retried once, and the rest staged to
+  /// memory and named in one summary. A loop mid-check is staged rather than typed into.
   private func broadcastMessage(_ text: String, from senderID: UUID?) async {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
@@ -3382,18 +3388,24 @@ public actor GraphStore {
       return
     }
     let targets = graph.broadcastTargets.filter { $0.id != senderID }
-    guard !targets.isEmpty, let onDeliverMessage else { return }
+    guard !targets.isEmpty else { return }
     recordMailroomCommunication(from: senderID, to: "all", text: trimmed, topic: "direct")
     let sender = senderID.flatMap { id in graph.nodesAtAnyDepth.first { $0.id == id }?.title }
     let message = "[graphcode] \(sender.map { "\($0): " } ?? "")\(trimmed)"
-    let path = graph.project.path
-    let delivered = await withTaskGroup(of: (UUID, Bool).self) { group in
-      for target in targets {
-        group.addTask { (target.id, await onDeliverMessage(target, message, path)) }
+    let typeable = targets.filter { target in
+      switch MessageBus.deliverability(to: target) {
+      case .targetBusyWithACheck, .backendCannotAcceptInput, .emptyMessage: return false
+      case nil, .targetNotLive, .transportFailed: return true
       }
-      var results: [UUID: Bool] = [:]
-      for await (id, landed) in group { results[id] = landed }
-      return results
+    }
+    var delivered = await typeConcurrently(message, into: typeable)
+    let revivable = typeable.filter {
+      delivered[$0.id] != true && $0.runsUnattended && !$0.isResolved
+    }
+    if !revivable.isEmpty {
+      revivable.forEach(ensureSession)
+      try? await Task.sleep(for: Self.respawnedSessionSettle)
+      delivered.merge(await typeConcurrently(message, into: revivable)) { $0 || $1 }
     }
     let missed = targets.filter { delivered[$0.id] != true }
     guard !missed.isEmpty else { return }
@@ -3402,6 +3414,21 @@ public actor GraphStore {
       "broadcast reached \(targets.count - missed.count) of \(targets.count) loops — staged to "
         + "the memory of \(missed.map(\.title).joined(separator: ", ")); they will read it "
         + "when they next wake")
+  }
+
+  private func typeConcurrently(_ message: String, into targets: [LoopNode]) async
+    -> [UUID: Bool]
+  {
+    guard let onDeliverMessage, !targets.isEmpty else { return [:] }
+    let path = graph.project.path
+    return await withTaskGroup(of: (UUID, Bool).self) { group in
+      for target in targets {
+        group.addTask { (target.id, await onDeliverMessage(target, message, path)) }
+      }
+      var results: [UUID: Bool] = [:]
+      for await (id, landed) in group { results[id] = landed }
+      return results
+    }
   }
 
   /// Long enough for a relaunched session to exist and start its agent's boot, short
