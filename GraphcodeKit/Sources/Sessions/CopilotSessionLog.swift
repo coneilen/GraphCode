@@ -324,7 +324,7 @@ public enum CopilotSessionLog {
   ) async -> SummaryReading? {
     let stamp = await TranscriptFreshness.shared.remoteStamp(forNode: node.id)
     let reply = await RemoteTranscriptProbe.run(
-      remoteSummaryInvocation(forNode: node, at: location, since: stamp))
+      remoteSummaryInvocation(forNode: node, at: location, since: stamp), at: location)
     guard case .lines(let newStamp, let lines) = reply else { return nil }
     await TranscriptFreshness.shared.recordRemoteStamp(newStamp, forNode: node.id)
     var builder = builder(forLines: lines)
@@ -478,7 +478,7 @@ public enum CopilotSessionLog {
     of node: LoopNode, at location: RemoteProjectLocation
   ) async -> PresenceReading {
     let (succeeded, output) = await ZmxSessionLauncher.collectRemoteOutput(
-      remotePresenceInvocation(forNode: node, at: location))
+      remotePresenceInvocation(forNode: node, at: location), location: location)
     return parseRemotePresence(succeeded: succeeded, output: output)
   }
 
