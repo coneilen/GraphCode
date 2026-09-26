@@ -2068,7 +2068,7 @@ public enum ZmxSessionLauncher {
     of node: LoopNode, label: String, at location: RemoteProjectLocation
   ) async -> RemoteSessionStatus {
     let (succeeded, output) = await collectRemoteOutput(
-      remoteStatusInvocation(forNode: node, label: label, at: location))
+      remoteStatusInvocation(forNode: node, label: label, at: location), location: location)
     return parseRemoteStatus(succeeded: succeeded, output: output)
   }
 
@@ -2165,15 +2165,27 @@ public enum ZmxSessionLauncher {
   /// codespace that is starting gh polls the Codespaces API for up to five minutes before
   /// ssh runs — holding the poll tick, which visits every project in turn, for as long,
   /// and spending calls against the per-user rate limit the whole time (issue #480).
+  ///
+  /// With a codespace `location`, the read also waits its turn in `breaker`: a codespace
+  /// that is down is not dialed off-schedule, and the outcome feeds the shared clock. A
+  /// read its caller cancelled says nothing about the codespace and is not counted.
   static func collectRemoteOutput(
-    _ invocation: [String], timeout: Duration = remoteReadTimeout
+    _ invocation: [String],
+    timeout: Duration = remoteReadTimeout,
+    location: RemoteProjectLocation? = nil,
+    breaker: CodespaceDialBreaker = .shared
   ) async -> (succeeded: Bool, output: String) {
+    if let location, await !breaker.permits(location) { return (false, "") }
     RemoteProjectLocation.prepareControlSocketDirectory()
     guard !Task.isCancelled,
       let session = try? PTYProcessSession(
         executable: invocation[0], arguments: Array(invocation.dropFirst()))
     else { return (false, "") }
-    return await waitForRemoteProcess(session, timeout: timeout)
+    let result = await waitForRemoteProcess(session, timeout: timeout)
+    if let location, !Task.isCancelled {
+      await breaker.record(location, reached: result.succeeded)
+    }
+    return result
   }
 
   private static func waitForRemoteProcess(
@@ -2220,6 +2232,8 @@ public enum ZmxSessionLauncher {
   }
 
   private static func startRemote(_ node: LoopNode, at location: RemoteProjectLocation) async {
+    // A codespace that is down is redialed on the shared schedule, not on every sweep.
+    guard await CodespaceDialBreaker.shared.permits(location) else { return }
     // A dial already in flight for this node is doing this job; a second one racing it
     // is how two `zmx run`s land on one session (`RemoteEnsureGate`).
     guard let lease = await RemoteEnsureGate.shared.begin(node.id) else { return }
@@ -2277,7 +2291,9 @@ public enum ZmxSessionLauncher {
     if let ensure = remoteEnsureInvocation(
       forNode: node, at: location, bridgeState: bridgeState
     ) {
-      _ = await runRemoteRetrying(ensure)
+      if await runRemoteRetrying(ensure) {
+        await CodespaceDialBreaker.shared.record(location, reached: true)
+      }
     }
     await RemoteEnsureGate.shared.end(node.id, token: lease)
   }

@@ -58,10 +58,11 @@ enum RemoteTranscriptProbe {
   }
 
   static func run(
-    _ invocation: [String], timeout: Duration = ZmxSessionLauncher.remoteReadTimeout
+    _ invocation: [String], at location: RemoteProjectLocation? = nil,
+    timeout: Duration = ZmxSessionLauncher.remoteReadTimeout
   ) async -> Reply {
     let (succeeded, output) = await ZmxSessionLauncher.collectRemoteOutput(
-      invocation, timeout: timeout)
+      invocation, timeout: timeout, location: location)
     return parse(succeeded: succeeded, output: output)
   }
 

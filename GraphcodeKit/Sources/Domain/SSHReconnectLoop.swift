@@ -17,22 +17,13 @@ import Foundation
 /// Ctrl-C during the wait is the escape hatch — the `trap` makes it deterministic, and
 /// while ssh is live the tty is raw so Ctrl-C goes to the remote side instead.
 ///
-/// `retriesExitOne` is the Codespace accommodation: `gh` runs ssh but does not
-/// propagate its exit code — every nonzero exit (ssh's 255 *and* the remote scripts'
-/// deliberate `exit 255`s) surfaces as gh's own 1, with only 0 preserved. A gh dial
-/// therefore retries on 1 as well. That also redials a session that genuinely ended
-/// nonzero, which converges: the redial reattaches a live session, and a gone one
-/// takes the reconnect script's session-ended branch to a clean exit 0.
+/// A Codespace surface uses `codespaceScript` instead, which retries on a schedule rather
+/// than forever.
 public enum SSHReconnectLoop {
   public static let maxDelaySeconds = 15
 
-  public static func script(
-    connect: String, reconnect: String, retriesExitOne: Bool = false
-  ) -> String {
-    let passExit =
-      retriesExitOne
-      ? "; gc_rc=$?; { [ \"$gc_rc\" -ne 255 ] && [ \"$gc_rc\" -ne 1 ]; } && exit \"$gc_rc\""
-      : "; gc_rc=$?; [ \"$gc_rc\" -ne 255 ] && exit \"$gc_rc\""
+  public static func script(connect: String, reconnect: String) -> String {
+    let passExit = "; gc_rc=$?; [ \"$gc_rc\" -ne 255 ] && exit \"$gc_rc\""
     return "trap 'exit 130' INT; "
       + connect + passExit + "; "
       + "gc_delay=1; while :; do "
@@ -41,5 +32,52 @@ public enum SSHReconnectLoop {
       + "sleep \"$gc_delay\"; gc_delay=$((gc_delay * 2)); "
       + "[ \"$gc_delay\" -gt \(maxDelaySeconds) ] && gc_delay=\(maxDelaySeconds); "
       + reconnect + passExit + "; done"
+  }
+
+  /// A Codespace surface's loop: the same dials and exit handling, retried on
+  /// `CodespaceDialSchedule` instead of forever, because every gh run spends the human's
+  /// Codespaces rate limit (issue #480). Past `schedule.pauseAfter` it waits for Enter,
+  /// which also touches `pauseMarker` so `graphcoded`'s `CodespaceDialBreaker` resumes
+  /// the codespace's reads and ensures with it.
+  ///
+  /// The outage clock restarts only after a dial that lasted `upAfter`, longer than the
+  /// five minutes gh can spend waiting for a codespace to start before failing — a
+  /// shorter dial may never have reached the codespace at all.
+  ///
+  /// Exit 1 retries as well as 255: `gh` runs ssh but does not propagate its exit code —
+  /// every nonzero exit (ssh's 255 *and* the remote scripts' deliberate `exit 255`s)
+  /// surfaces as gh's own 1, with only 0 preserved. That also redials a session that
+  /// genuinely ended nonzero, which converges: the redial reattaches a live session, and
+  /// a gone one takes the reconnect script's session-ended branch to a clean exit 0.
+  public static func codespaceScript(
+    connect: String, reconnect: String, pauseMarker: String,
+    schedule: CodespaceDialSchedule = .standard, upAfter: Int = 330
+  ) -> String {
+    let marker = RemoteProjectLocation.shellQuoted(pauseMarker)
+    let directory = RemoteProjectLocation.shellQuoted(
+      URL(fileURLWithPath: pauseMarker).deletingLastPathComponent().path)
+    let passExit =
+      "; gc_rc=$?; { [ \"$gc_rc\" -ne 255 ] && [ \"$gc_rc\" -ne 1 ]; } && exit \"$gc_rc\""
+    let clock =
+      "; { [ -z \"$gc_down\" ] || [ $(($(date +%s) - gc_t)) -ge \(upAfter) ]; } "
+      + "&& { gc_down=$(date +%s); gc_delay=1; }"
+    return "trap 'exit 130' INT; gc_down=; gc_delay=1; gc_t=$(date +%s); "
+      + connect + passExit + clock + "; "
+      + "while :; do gc_out=$(($(date +%s) - gc_down)); "
+      + "if [ \"$gc_out\" -ge \(schedule.pauseAfter) ]; then "
+      + #"printf '\033[1;33m── Codespace still unreachable (exit %s). Paused to save your "#
+      + #"Codespaces API quota. Press Enter to reconnect, Ctrl-C to close. ──\033[0m\r\n' "#
+      + "\"$gc_rc\"; read gc_line || exit 0; "
+      + "mkdir -p \(directory) && : > \(marker); gc_down=$(date +%s); gc_delay=1; "
+      + "else "
+      + "if [ \"$gc_out\" -ge \(schedule.freeRetryWindow) ] "
+      + "&& [ \"$gc_out\" -lt \(schedule.holdUntil) ]; then "
+      + "gc_wait=$((\(schedule.holdUntil) - gc_out)); else gc_wait=$gc_delay; "
+      + "gc_delay=$((gc_delay * 2)); "
+      + "[ \"$gc_delay\" -gt \(maxDelaySeconds) ] && gc_delay=\(maxDelaySeconds); fi; "
+      + #"printf '\033[1;33m── Connection failed (exit %s). Retrying in %ss. "#
+      + #"Press Ctrl-C to stop. ──\033[0m\r\n' "$gc_rc" "$gc_wait"; "#
+      + "sleep \"$gc_wait\"; fi; "
+      + "gc_t=$(date +%s); " + reconnect + passExit + clock + "; done"
   }
 }
