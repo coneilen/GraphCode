@@ -477,13 +477,8 @@ public enum CopilotSessionLog {
   static func remotePresence(
     of node: LoopNode, at location: RemoteProjectLocation
   ) async -> PresenceReading {
-    RemoteProjectLocation.prepareControlSocketDirectory()
-    let invocation = remotePresenceInvocation(forNode: node, at: location)
-    guard
-      let session = try? PTYProcessSession(
-        executable: invocation[0], arguments: Array(invocation.dropFirst()))
-    else { return .unknown }
-    let (succeeded, output) = await session.waitCollectingOutput()
+    let (succeeded, output) = await ZmxSessionLauncher.collectRemoteOutput(
+      remotePresenceInvocation(forNode: node, at: location))
     return parseRemotePresence(succeeded: succeeded, output: output)
   }
 
