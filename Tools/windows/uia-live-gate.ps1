@@ -1186,6 +1186,98 @@ function Assert-UiaSandboxPath([string] $sandbox, [string] $path) {
   return $candidate
 }
 
+function Protect-UiaStartupDiagnosticText([string] $value) {
+  $safe = [regex]::Replace($value,
+    '(?im)^.*\b(?:GH_[A-Z0-9_]*|GITHUB_[A-Z0-9_]*|GIT_CONFIG_[A-Z0-9_]*|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|authorization|password|secret|token|credential|api[_-]?key|bearer)\b.*$',
+    '[redacted sensitive line]')
+  $safe = [regex]::Replace($safe, '(?i)([a-z][a-z0-9+.-]*://)[^/\s]*@', '$1[redacted]@')
+  $safe = [regex]::Replace($safe, '(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)', '[redacted]')
+  $safe = [regex]::Replace($safe, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '?')
+  return $safe.Substring(0, [Math]::Min($safe.Length, 1024))
+}
+
+function Get-UiaStartupDiagnosticValue([scriptblock] $readValue) {
+  try {
+    $value = & $readValue
+    if ($null -eq $value) { return [pscustomobject]@{ state = "unavailable" } }
+    return [pscustomobject]@{ state = "available"; value = $value }
+  } catch {
+    return [pscustomobject]@{
+      state = "unavailable"
+      errorType = $_.Exception.GetBaseException().GetType().Name
+    }
+  }
+}
+
+function Get-UiaStartupImageHash([string] $path, [scriptblock] $openRead) {
+  $stream = $null
+  $hash = $null
+  $result = [ordered]@{ state = "unavailable"; limitBytes = 128MB }
+  try {
+    $stream = & $openRead $path
+    $length = $stream.Length
+    $result.lengthBytes = $length
+    if ($length -gt 128MB) {
+      $result.state = "limit"
+    } else {
+      $hash = [Security.Cryptography.SHA256]::Create()
+      $buffer = [byte[]]::new(32768)
+      $read = 0L
+      while ($read -lt $length) {
+        $count = [int][Math]::Min($buffer.Length, $length - $read)
+        $received = $stream.Read($buffer, 0, $count)
+        if ($received -le 0 -or $received -gt $count) { throw [IO.IOException]::new("Incomplete image hash read") }
+        $null = $hash.TransformBlock($buffer, 0, $received, $buffer, 0)
+        $read += $received
+      }
+      $result.readBytes = $read
+      if ($stream.Length -ne $length) {
+        $result.state = "changed"
+      } else {
+        $null = $hash.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        $result.state = "available"
+        $result.value = ([BitConverter]::ToString($hash.Hash)).Replace("-", "")
+      }
+    }
+  } catch {
+    $result.state = "unavailable"
+    $result.errorType = $_.Exception.GetBaseException().GetType().Name
+  } finally {
+    if ($null -ne $hash) { $hash.Dispose() }
+    if ($null -ne $stream) {
+      try { $stream.Dispose() } catch {
+        $result.disposeErrorType = $_.Exception.GetBaseException().GetType().Name
+      }
+    }
+  }
+  return [pscustomobject]$result
+}
+
+function Write-UiaStartupFailureDiagnostic(
+  [object] $heldProcess,
+  [int] $exitCode,
+  [string] $executable,
+  [string] $workingDirectory,
+  [scriptblock] $openImage = {
+    param($filePath)
+    [IO.File]::Open($filePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  }
+) {
+  $record = [ordered]@{
+    processId = Get-UiaStartupDiagnosticValue { $heldProcess.Id }
+    processStartUtc = Get-UiaStartupDiagnosticValue { $heldProcess.StartTime.ToUniversalTime().ToString("o") }
+    exitSigned = $exitCode
+    exitHex = "0x{0:X8}" -f ([BitConverter]::ToUInt32([BitConverter]::GetBytes($exitCode), 0))
+    executablePath = Protect-UiaStartupDiagnosticText $executable
+    executableSha256 = Get-UiaStartupImageHash $executable $openImage
+    workingDirectory = Protect-UiaStartupDiagnosticText $workingDirectory
+    stderr = @{ state = "ownership_unavailable"; content = "not_read"; readBytes = 0; relativeTarget = "logs\shell-stderr.log" }
+    stdout = @{ state = "not_captured" }
+    applicationLog = @{ state = "ownership_unavailable"; content = "not_read"; readBytes = 0; relativeTarget = "support\graphcode-windows.log" }
+  }
+  Write-Host ("UIA_STARTUP_FAILURE=" + ($record | ConvertTo-Json -Depth 5 -Compress))
+}
+
 function Assert-UiaProviderPathBudget(
   [string] $sandbox,
   [string] $localAppData,
@@ -1333,7 +1425,16 @@ try {
   for ($i = 0; $i -lt 160; $i++) {
     Start-Sleep -Milliseconds 250
     $process.Refresh()
-    if ($process.HasExited) { throw "shell exited with code $($process.ExitCode)" }
+    if ($process.HasExited) {
+      $startupExitCode = $process.ExitCode
+      try {
+        Write-UiaStartupFailureDiagnostic $process $startupExitCode $Shell `
+          (Get-Location).ProviderPath
+      } catch {
+        try { Write-Host "UIA_STARTUP_DIAGNOSTIC_ERROR=secondary diagnostic collection or output failed" } catch {}
+      }
+      throw "shell exited with code $startupExitCode"
+    }
     if ($process.MainWindowHandle -ne 0) {
       $candidate = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
       if ($candidate.Current.AutomationId -eq "graphcode-root") {
