@@ -2067,13 +2067,8 @@ public enum ZmxSessionLauncher {
   static func remoteStatus(
     of node: LoopNode, label: String, at location: RemoteProjectLocation
   ) async -> RemoteSessionStatus {
-    RemoteProjectLocation.prepareControlSocketDirectory()
-    let invocation = remoteStatusInvocation(forNode: node, label: label, at: location)
-    guard
-      let session = try? PTYProcessSession(
-        executable: invocation[0], arguments: Array(invocation.dropFirst()))
-    else { return .unreachable }
-    let (succeeded, output) = await session.waitCollectingOutput()
+    let (succeeded, output) = await collectRemoteOutput(
+      remoteStatusInvocation(forNode: node, label: label, at: location))
     return parseRemoteStatus(succeeded: succeeded, output: output)
   }
 
@@ -2148,7 +2143,7 @@ public enum ZmxSessionLauncher {
       if let standardInput {
         session.sendInput(String(decoding: standardInput, as: UTF8.self) + "\n")
       }
-      if await waitForRemoteProcess(session, timeout: timeout) {
+      if await waitForRemoteProcess(session, timeout: timeout).succeeded {
         return true
       }
       if attempt < attempts, !Task.isCancelled {
@@ -2158,14 +2153,37 @@ public enum ZmxSessionLauncher {
     return false
   }
 
+  /// The ceiling on a one-shot remote read, below `GraphStore`'s 45s presence deadline so
+  /// the dial is reaped by its own limit before the store stops waiting for it.
+  static let remoteReadTimeout: Duration = .seconds(30)
+
+  /// Runs a remote read whose answer is on stdout, killing the dial when it outlives
+  /// `timeout` or its caller is cancelled.
+  ///
+  /// Only the presence read runs under `GraphStore`'s deadline; activity and summary
+  /// reads had no limit at all. A Codespace dial is `gh codespace ssh`, and against a
+  /// codespace that is starting gh polls the Codespaces API for up to five minutes before
+  /// ssh runs — holding the poll tick, which visits every project in turn, for as long,
+  /// and spending calls against the per-user rate limit the whole time (issue #480).
+  static func collectRemoteOutput(
+    _ invocation: [String], timeout: Duration = remoteReadTimeout
+  ) async -> (succeeded: Bool, output: String) {
+    RemoteProjectLocation.prepareControlSocketDirectory()
+    guard !Task.isCancelled,
+      let session = try? PTYProcessSession(
+        executable: invocation[0], arguments: Array(invocation.dropFirst()))
+    else { return (false, "") }
+    return await waitForRemoteProcess(session, timeout: timeout)
+  }
+
   private static func waitForRemoteProcess(
     _ session: PTYProcessSession, timeout: Duration?
-  ) async -> Bool {
-    let waiter = Task { await session.waitUntilFinished() }
+  ) async -> (succeeded: Bool, output: String) {
+    let waiter = Task { await session.waitCollectingOutput() }
     return await withTaskCancellationHandler(
       operation: {
         guard let timeout else { return await waiter.value }
-        let result = await withTaskGroup(of: Bool?.self) { group in
+        let result = await withTaskGroup(of: (succeeded: Bool, output: String)?.self) { group in
           group.addTask { await waiter.value }
           group.addTask {
             try? await Task.sleep(for: timeout)
@@ -2181,7 +2199,7 @@ public enum ZmxSessionLauncher {
         }
         guard let result else {
           _ = await waiter.value
-          return false
+          return (false, "")
         }
         return result
       },
