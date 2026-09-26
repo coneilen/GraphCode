@@ -228,6 +228,127 @@ function Invoke-Native([string] $description, [scriptblock] $command) {
   }
 }
 
+function Invoke-ZigResolverProbe([string] $candidate, [string] $operation) {
+  $output = [Collections.Generic.List[object]]::new()
+  $errors = [Collections.Generic.List[string]]::new()
+  $exitCode = $null
+  $failure = $null
+  try {
+    & $candidate $operation 2>&1 | ForEach-Object {
+      if ($_ -is [Management.Automation.ErrorRecord]) {
+        $errors.Add($_.ToString())
+      } else {
+        $output.Add($_)
+      }
+    }
+    $exitCode = $LASTEXITCODE
+  } catch {
+    $failure = $_
+    if ($_.Exception.PSObject.Properties["ExitCode"] -and $_.Exception.ExitCode -is [int]) {
+      $exitCode = $_.Exception.ExitCode
+    }
+  }
+  [pscustomobject]@{
+    Output = $(if ($output.Count -eq 1) { $output[0] } elseif ($output.Count -gt 1) { $output.ToArray() } else { $null })
+    ErrorText = $errors -join "`n"
+    ExitCode = $exitCode
+    Failure = $failure
+  }
+}
+
+function Write-ZigResolverDiagnostic(
+  [string] $candidate, [string] $source, [string] $expectedVersion,
+  [Nullable[bool]] $exists, [string] $reason, $versionProbe, $envProbe
+) {
+  try {
+    $diagnostic = [ordered]@{
+      candidate = $(if ($candidate.Length -le 512 -and $candidate -match '^(?:[A-Za-z]:\\|\\\\)' -and
+          $candidate -notmatch '://|[\r\n\x00@]|(?i:gh[pousr]_|github_pat_|bearer |token=|password=|authorization)') { $candidate } else { "[omitted]" })
+      source = $source
+      expectedVersion = $expectedVersion
+      exists = $exists
+      reason = $reason
+      version = $null
+      env = $null
+    }
+    foreach ($entry in @(@{ Name = "version"; Probe = $versionProbe }, @{ Name = "env"; Probe = $envProbe })) {
+      if ($null -eq $entry.Probe) { continue }
+      $probe = $entry.Probe
+      $exception = if ($null -ne $probe.Failure) { $probe.Failure.Exception } else { $null }
+      $nativeErrorCode = $null
+      for ($depth = 0; $null -ne $exception -and $depth -lt 4; $depth++) {
+        if ($exception.PSObject.Properties["NativeErrorCode"] -and $exception.NativeErrorCode -is [int]) {
+          $nativeErrorCode = $exception.NativeErrorCode
+          break
+        }
+        $exception = $exception.InnerException
+      }
+      $summary = [ordered]@{
+        exitCode = $probe.ExitCode
+        exitCodeHex = $(if ($null -ne $probe.ExitCode) { "0x{0:X8}" -f ([int64]$probe.ExitCode -band 0xffffffffL) } else { $null })
+        outputEncoding = "UTF8-of-captured-PowerShell-lines"
+        exceptionType = $(if ($null -ne $probe.Failure) { $probe.Failure.Exception.GetType().FullName } else { $null })
+        nativeErrorCode = $nativeErrorCode
+        observedVersion = $null
+      }
+      $stdout = @($probe.Output) -join "`n"
+      foreach ($stream in @(@{ Name = "stdout"; Text = $stdout }, @{ Name = "stderr"; Text = $probe.ErrorText })) {
+        $bytes = [Text.Encoding]::UTF8.GetBytes([string]$stream.Text)
+        $summary[$stream.Name] = @{
+          bytes = $bytes.Length
+          sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+        }
+      }
+      $summary.stderr.reason = "unclassified"
+      foreach ($known in @("unable to find zig installation directory", "unable to find lib directory", "Access is denied")) {
+        if ($probe.ErrorText -match [regex]::Escape($known)) {
+          $summary.stderr.reason = $known
+          break
+        }
+      }
+      if ($entry.Name -eq "version" -and [Text.Encoding]::UTF8.GetByteCount($stdout) -le 64 -and
+          $stdout -cmatch '^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:[-+][0-9A-Za-z.-]{1,40})?\z') {
+        $summary.observedVersion = $stdout
+      }
+      if ($entry.Name -eq "env") {
+        $summary.parse = "not-inspected"
+        $summary.libDirectoryCheck = "not-run"
+        $summary.libDirectoryPresent = $null
+        # These are metadata only: the existing resolver accepts any successful env exit.
+        if ([Text.Encoding]::UTF8.GetByteCount($stdout) -le 16384) {
+          try {
+            $parsed = $stdout | ConvertFrom-Json -ErrorAction Stop
+            $summary.parse = if ($null -eq $parsed) { "empty" } else { "parsed" }
+            if ($parsed.version -is [string] -and [Text.Encoding]::UTF8.GetByteCount($parsed.version) -le 64 -and
+                $parsed.version -cmatch '^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}\z') {
+              $summary.observedVersion = $parsed.version
+            }
+            if ($parsed.lib_dir -is [string] -and $parsed.lib_dir.Length -le 512 -and
+                $parsed.lib_dir -match '^[A-Za-z]:\\' -and $parsed.lib_dir -notmatch '[\r\n\x00]') {
+              try {
+                $summary.libDirectoryPresent = Test-Path -LiteralPath $parsed.lib_dir -PathType Container -ErrorAction Stop
+                $summary.libDirectoryCheck = "queried"
+              } catch {
+                $summary.libDirectoryCheck = "query-failed"
+              }
+            }
+          } catch {
+            $summary.parse = "metadata-unavailable"
+          }
+        }
+      }
+      $diagnostic[$entry.Name] = $summary
+    }
+    Write-Host ("ZIG_RESOLVER_DIAGNOSTIC " + ($diagnostic | ConvertTo-Json -Compress -Depth 5))
+  } catch {
+    try {
+      Write-Warning -WarningAction Continue "Zig resolver diagnostic could not be emitted; selection requirements are unchanged."
+    } catch {
+      # Neither output channel is reliable; diagnostics must not replace resolver results.
+    }
+  }
+}
+
 function Resolve-ZigVersion([string] $version, [string] $environmentName) {
   $candidates = @()
   $configured = [Environment]::GetEnvironmentVariable($environmentName)
@@ -244,17 +365,31 @@ function Resolve-ZigVersion([string] $version, [string] $environmentName) {
     Select-Object -ExpandProperty FullName
 
   foreach ($candidate in $candidates | Select-Object -Unique) {
-    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+    $source = if ($candidate -eq $configured) { "configured" } elseif ($command -and $candidate -in $command.Source) { "PATH" } else { "worktree-search" }
+    $exists = Test-Path -LiteralPath $candidate -PathType Leaf
+    if (-not $exists) {
+      Write-ZigResolverDiagnostic $candidate $source $version $exists "candidate-missing" $null $null
       continue
     }
-    $resolved = & $candidate version 2>$null
-    if ($LASTEXITCODE -ne 0 -or $resolved -ne $version) {
+    $versionProbe = Invoke-ZigResolverProbe $candidate "version"
+    if ($null -ne $versionProbe.Failure) {
+      Write-ZigResolverDiagnostic $candidate $source $version $exists "version-exception" $versionProbe $null
+      throw "Zig version probe failed; candidate selection stopped."
+    }
+    if ($versionProbe.ExitCode -ne 0 -or $versionProbe.Output -ne $version) {
+      $reason = if ($versionProbe.ExitCode -ne 0) { "version-exit" } else { "version-mismatch" }
+      Write-ZigResolverDiagnostic $candidate $source $version $exists $reason $versionProbe $null
       continue
     }
-    & $candidate env *> $null
-    if ($LASTEXITCODE -eq 0) {
+    $envProbe = Invoke-ZigResolverProbe $candidate "env"
+    if ($null -ne $envProbe.Failure) {
+      Write-ZigResolverDiagnostic $candidate $source $version $exists "env-exception" $versionProbe $envProbe
+      throw "Zig env probe failed; candidate selection stopped."
+    }
+    if ($envProbe.ExitCode -eq 0) {
       return (Resolve-Path -LiteralPath $candidate).Path
     }
+    Write-ZigResolverDiagnostic $candidate $source $version $exists "env-exit" $versionProbe $envProbe
   }
   throw "Zig $version is required for the pinned Windows provider; set $environmentName."
 }
@@ -632,11 +767,6 @@ function Invoke-Task([string] $name) {
       $swiftRuntime = Resolve-SwiftRuntimeDirectory $swift
       Get-ChildItem -LiteralPath $swiftRuntime -Filter *.dll |
         Copy-Item -Destination $daemonRuntime -Force
-      & (Join-Path $repoRoot "Tools\windows\Tests\WindowsShell.Tests.ps1") `
-        -ZigExecutable $zig0152
-      if ($LASTEXITCODE -ne 0) {
-        throw "Windows shell scaffold contract failed with exit code $LASTEXITCODE"
-      }
       $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
       $winghosttyRoot = [Environment]::GetEnvironmentVariable(
         "GRAPHCODE_WINGHOSTTY_ROOT"
@@ -651,6 +781,32 @@ function Invoke-Task([string] $name) {
       if (-not (Test-Path -LiteralPath $winghosttyRoot -PathType Container) -or
         -not (Test-Path -LiteralPath $zmxRoot -PathType Container)) {
         throw "Windows shell provider worktrees unavailable; real smoke is mandatory."
+      }
+      $pins = Get-Content (Join-Path $repoRoot "graphcode-windows\provider-pins.json") -Raw |
+        ConvertFrom-Json
+      if (-not (Test-Path -LiteralPath (Join-Path $winghosttyRoot ".git"))) {
+        throw "Winghostty provider root is not a Git worktree: $winghosttyRoot"
+      }
+      $providerStatus = @(git -C $winghosttyRoot status --porcelain --untracked-files=all)
+      if ($LASTEXITCODE -ne 0 -or $providerStatus.Count -ne 0) {
+        throw "Winghostty provider status failed or the worktree is dirty"
+      }
+      $actualWinghosttyPin = git -C $winghosttyRoot rev-parse HEAD
+      if ($LASTEXITCODE -ne 0 -or $actualWinghosttyPin -ne $pins.winghostty.sha) {
+        throw "Winghostty provider does not match the pinned commit"
+      }
+      Invoke-Native "Pinned Winghostty host build for App contracts" {
+        Push-Location $winghosttyRoot
+        try { & $zig0152 build -Demit-win32-host=true } finally { Pop-Location }
+      }
+      $winghosttyLib = Join-Path $winghosttyRoot "zig-out\lib\winghostty-win32-host.lib"
+      if (-not (Test-Path -LiteralPath $winghosttyLib -PathType Leaf)) {
+        throw "Pinned Winghostty host build did not produce the App test library"
+      }
+      & (Join-Path $repoRoot "Tools\windows\Tests\WindowsShell.Tests.ps1") `
+        -ZigExecutable $zig0152
+      if ($LASTEXITCODE -ne 0) {
+        throw "Windows shell scaffold contract failed with exit code $LASTEXITCODE"
       }
       $zig0160 = Resolve-ZigVersion "0.16.0" "GRAPHCODE_ZIG0160"
       Invoke-Native "Pinned GraphCode Windows shell build and smoke" {
