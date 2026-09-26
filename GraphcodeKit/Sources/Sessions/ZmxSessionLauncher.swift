@@ -2184,6 +2184,11 @@ public enum ZmxSessionLauncher {
     let result = await waitForRemoteProcess(session, timeout: timeout)
     if let location, !Task.isCancelled {
       await breaker.record(location, reached: result.succeeded)
+      if result.succeeded {
+        Task { await CodespaceSSHUser.shared.learnIfNeeded(location) }
+      } else {
+        CodespaceSSHUser.forget(location)
+      }
     }
     return result
   }
@@ -2293,6 +2298,7 @@ public enum ZmxSessionLauncher {
     ) {
       if await runRemoteRetrying(ensure) {
         await CodespaceDialBreaker.shared.record(location, reached: true)
+        await CodespaceSSHUser.shared.learnIfNeeded(location)
       }
     }
     await RemoteEnsureGate.shared.end(node.id, token: lease)
