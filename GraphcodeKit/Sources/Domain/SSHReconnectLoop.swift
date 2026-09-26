@@ -53,9 +53,8 @@ public enum SSHReconnectLoop {
     connect: String, reconnect: String, pauseMarker: String,
     schedule: CodespaceDialSchedule = .standard, upAfter: Int = 330
   ) -> String {
-    let marker = RemoteProjectLocation.shellQuoted(pauseMarker)
-    let directory = RemoteProjectLocation.shellQuoted(
-      URL(fileURLWithPath: pauseMarker).deletingLastPathComponent().path)
+    let marker = quoted(pauseMarker)
+    let directory = quoted(URL(fileURLWithPath: pauseMarker).deletingLastPathComponent().path)
     let passExit =
       "; gc_rc=$?; { [ \"$gc_rc\" -ne 255 ] && [ \"$gc_rc\" -ne 1 ]; } && exit \"$gc_rc\""
     let clock =
@@ -79,5 +78,11 @@ public enum SSHReconnectLoop {
       + #"Press Ctrl-C to stop. ──\033[0m\r\n' "$gc_rc" "$gc_wait"; "#
       + "sleep \"$gc_wait\"; fi; "
       + "gc_t=$(date +%s); " + reconnect + passExit + clock + "; done"
+  }
+
+  /// `RemoteProjectLocation.shellQuoted`, repeated because this file also builds in the
+  /// portable package, which leaves that type out.
+  private static func quoted(_ text: String) -> String {
+    "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
   }
 }
