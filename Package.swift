@@ -48,6 +48,7 @@ import PackageDescription
       "Sessions/CodexSessionLog.swift",
       "Sessions/CodexThreadResolver.swift",
       "Sessions/CodespaceDialBreaker.swift",
+      "Sessions/CodespaceSSHUser.swift",
       "Sessions/CondemnedSessions.swift",
       "Sessions/CopilotSessionLog.swift",
       "Sessions/CopilotTrust.swift",

@@ -25,7 +25,7 @@ public actor CodespaceDialBreaker {
   }
 
   public static var defaultMarkerDirectory: URL {
-    SupportDirectory.url.appendingPathComponent("codespace-dials", isDirectory: true)
+    RemoteProjectLocation.codespaceStateDirectory
   }
 
   public static func reconnectMarker(
