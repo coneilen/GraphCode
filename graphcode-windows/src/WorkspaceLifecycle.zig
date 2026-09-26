@@ -36,7 +36,7 @@ pub fn copyWorkspace(allocator: std.mem.Allocator, workspace: Workspace) !Worksp
     };
 }
 
-/// Manager order is independent of the existing menu/cycling order.
+/// Manager and running-cycle order is independent of the existing menu order.
 pub fn managerListFromHome(allocator: std.mem.Allocator, home: []const u8, current: []const u8) !List {
     var found = try listFromHome(allocator, home);
     defer found.deinit(allocator);

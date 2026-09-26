@@ -145,6 +145,18 @@ const WorkspaceProcess = struct {
     }
 };
 
+const WorkspaceCycleApi = struct {
+    const instanceKey = workspaceInstanceKey;
+    const windows = WorkspaceProcess.windows;
+    const restore = MainWindow.restoreCycleInstance;
+
+    fn list(allocator: std.mem.Allocator, current: []const u8) !WorkspaceLifecycle.List {
+        const home = try std.process.getEnvVarOwned(allocator, "USERPROFILE");
+        defer allocator.free(home);
+        return WorkspaceLifecycle.managerListFromHome(allocator, home, current);
+    }
+};
+
 fn workspaceEnvironment(allocator: std.mem.Allocator, path: []const u8) ![]u16 {
     var environment = try std.process.getEnvMap(allocator);
     defer environment.deinit();
@@ -712,7 +724,7 @@ pub const App = struct {
         // for both explicit automation hooks.
         if (!daemon_supervisor_test_hook and !uia_gate_hook) GdiplusAA.init();
         try self.window.create(self, &onWindowMessage, title.ptr);
-        self.window.key_callback = &onHeaderKey;
+        self.window.key_callback = &onShellKey;
         try self.revalidateWorkspaceIdentity();
         if (!self.window.gesture_config_registered) {
             // Non-fatal: the canvas simply falls back to wheel-only zoom (no
@@ -4451,6 +4463,15 @@ pub const App = struct {
         self.syncHeaderFocus();
     }
 
+    fn onShellKey(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool {
+        const self: *App = @ptrCast(@alignCast(context orelse return false));
+        if (MainWindow.workspaceCycleDirection(key, ctrl, shift, alt)) |direction| {
+            self.cycleWorkspace(direction);
+            return true;
+        }
+        return onHeaderKey(context, key, ctrl, shift, alt);
+    }
+
     fn onHeaderKey(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool {
         const self: *App = @ptrCast(@alignCast(context orelse return false));
         const focused = self.headerOwnsFocus();
@@ -5567,26 +5588,88 @@ pub const App = struct {
     }
 
     fn cycleWorkspace(self: *App, direction: isize) void {
-        if (!self.refreshWorkspaceList()) return;
-        const list = self.workspace_list orelse return;
-        if (list.items.len < 2) return;
-        const next = workspaceCycleTarget(list.items, self.workspace_identity, direction) orelse {
-            self.setStatus("The current workspace is not in the workspace list");
+        if (NativeForms.isModalActive()) {
+            self.setStatus("Close the current dialog before cycling workspaces");
+            return;
+        }
+        if (!self.ensureWorkspaceIdentity()) return;
+        const result = cycleWorkspaceWith(WorkspaceCycleApi, self.allocator, self.workspace_path, self.workspace_identity, direction) catch |err| {
+            self.setStatus(workspaceCycleFailure(err));
             return;
         };
-        self.launchWorkspace(list.items[next].path);
+        self.setStatus(switch (result) {
+            .no_other => "No other identified workspace is open",
+            .current => "This workspace is already open",
+            .restored => "Workspace activated",
+        });
     }
 };
+
+const WorkspaceCycleResult = enum { no_other, current, restored };
+
+fn cycleWorkspaceWith(comptime Api: type, allocator: std.mem.Allocator, current_path: []const u8, current_identity: []const u8, direction: isize) !WorkspaceCycleResult {
+    const identity = try WorkspaceLifecycle.pathIdentity(allocator, current_path);
+    defer allocator.free(identity);
+    if (!std.mem.eql(u8, identity, current_identity)) return error.WorkspaceIdentityChanged;
+    var list = try Api.list(allocator, current_path);
+    defer list.deinit(allocator);
+    for (list.items) |workspace| {
+        if (std.mem.eql(u8, workspace.identity, current_identity)) break;
+    } else return error.CurrentWorkspaceMissing;
+
+    const running = try allocator.alloc(WorkspaceLifecycle.Workspace, list.items.len);
+    defer allocator.free(running);
+    var count: usize = 0;
+    for (list.items) |workspace| {
+        // The caller revalidates this instance's reservation and published identity.
+        if (!std.mem.eql(u8, workspace.identity, current_identity)) {
+            const key = try Api.instanceKey(allocator, workspace.path);
+            defer allocator.free(key);
+            const windows = try Api.windows(key);
+            if (windows.unidentified) return error.UnidentifiedWorkspaceWindow;
+            if (windows.target == null) continue;
+        }
+        running[count] = workspace;
+        count += 1;
+    }
+    const next = workspaceCycleTarget(running[0..count], current_identity, direction) orelse return .no_other;
+    const target = running[next];
+    if (std.mem.eql(u8, target.identity, current_identity)) return .current;
+    const key = try Api.instanceKey(allocator, target.path);
+    defer allocator.free(key);
+    const windows = try Api.windows(key);
+    if (windows.unidentified) return error.UnidentifiedWorkspaceWindow;
+    if (windows.target == null) return error.WorkspaceWindowNotFound;
+    // Restore resolves the identity again; disappearance must never cold-open it.
+    try Api.restore(key);
+    return .restored;
+}
+
+fn workspaceCycleFailure(err: anyerror) []const u8 {
+    return switch (err) {
+        error.CurrentWorkspaceMissing => "The current workspace is not in the workspace list",
+        error.WorkspaceIdentityChanged => workspace_restart_message,
+        error.WorkspaceWindowNotFound => "The next workspace is no longer open",
+        error.UnidentifiedWorkspaceWindow => "Close older or unidentified GraphCode windows before cycling workspaces",
+        else => "Workspace cycling failed; the list or window identity could not be verified, or activation failed",
+    };
+}
 
 fn workspaceCycleTarget(items: []const WorkspaceLifecycle.Workspace, current_identity: []const u8, direction: isize) ?usize {
     if (items.len < 2) return null;
     for (items, 0..) |workspace, index| {
         if (std.mem.eql(u8, workspace.identity, current_identity)) {
-            const count: isize = @intCast(items.len);
-            return @intCast(@mod(@as(isize, @intCast(index)) + @mod(direction, count), count));
+            const offset: usize = @intCast(@mod(direction, @as(isize, @intCast(items.len))));
+            const remaining = items.len - index;
+            return if (offset >= remaining) offset - remaining else index + offset;
         }
     }
     return null;
+}
+
+fn fallbackKeyAction(key: usize, ctrl: bool, shift: bool, alt: bool) InputRouter.Action {
+    if (alt and (key == c.VK_PRIOR or key == c.VK_NEXT)) return .none;
+    return InputRouter.keyAction(key, ctrl, shift);
 }
 
 fn onDaemonFrame(
@@ -6170,11 +6253,13 @@ fn onWindowMessage(
             }
             return true;
         },
-        c.WM_KEYDOWN => {
+        c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
             const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
             const shift = (@as(i32, c.GetKeyState(c.VK_SHIFT)) & 0x8000) != 0;
             const alt = (@as(i32, c.GetKeyState(c.VK_MENU)) & 0x8000) != 0;
-            if (MainWindow.keyOwnerEligible(hwnd, hwnd) and App.onHeaderKey(app, wparam, ctrl, shift, alt)) {
+            if (message == c.WM_SYSKEYDOWN and MainWindow.workspaceCycleDirection(wparam, ctrl, shift, alt) == null)
+                return false;
+            if (MainWindow.keyOwnerEligible(hwnd, hwnd) and App.onShellKey(app, wparam, ctrl, shift, alt)) {
                 result.* = 0;
                 return true;
             }
@@ -6183,7 +6268,7 @@ fn onWindowMessage(
                 result.* = 0;
                 return true;
             }
-            app.handleAction(InputRouter.keyAction(wparam, ctrl, shift));
+            app.handleAction(fallbackKeyAction(wparam, ctrl, shift, alt));
             app.updateNativeChrome(.state_change);
             result.* = 0;
             return true;
@@ -7592,6 +7677,311 @@ test "workspace rename preserves saved bytes and never replaces a colliding work
     try std.testing.expectEqual(@as(usize, 0), WorkspaceMutationFixture.confirmations + WorkspaceMutationFixture.deletions);
 }
 
+test "workspace running cycle never launches a closed workspace" {
+    const Probe = struct {
+        var launches: usize = 0;
+        fn list(allocator: std.mem.Allocator, _: []const u8) !WorkspaceLifecycle.List {
+            return WorkspaceLifecycle.managerList(allocator, &.{
+                .{ .name = "alpha", .path = "C:\\fixture\\.graphcode-alpha", .identity = "c:/fixture/.graphcode-alpha", .is_default = false },
+                .{ .name = "beta", .path = "C:\\fixture\\.graphcode-beta", .identity = "c:/fixture/.graphcode-beta", .is_default = false },
+            }, "C:\\fixture", "C:\\fixture\\.graphcode-alpha");
+        }
+        fn instanceKey(allocator: std.mem.Allocator, path: []const u8) ![:0]u16 {
+            return std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
+        }
+        fn windows(_: [:0]const u16) !struct { target: ?usize = null, unidentified: bool = false } {
+            return .{};
+        }
+        fn restore(_: [:0]const u16) !void {
+            return error.UnexpectedRestore;
+        }
+        fn launch(_: std.mem.Allocator, _: []const u8) !void {
+            launches += 1;
+        }
+    };
+    Probe.launches = 0;
+    _ = try cycleWorkspaceWith(Probe, std.testing.allocator, "C:\\fixture\\.graphcode-alpha", "c:/fixture/.graphcode-alpha", 1);
+    try std.testing.expectEqual(@as(usize, 0), Probe.launches);
+}
+
+test "workspace cycle keyboard fallback never turns Alt paging into terminal tabs" {
+    try std.testing.expectEqual(InputRouter.Action.none, fallbackKeyAction(c.VK_NEXT, true, false, true));
+    try std.testing.expectEqual(InputRouter.Action.none, fallbackKeyAction(c.VK_PRIOR, true, false, true));
+    for ([_]bool{ false, true }) |ctrl| {
+        for ([_]bool{ false, true }) |shift| {
+            for ([_]usize{ c.VK_PRIOR, c.VK_NEXT }) |key| {
+                try std.testing.expectEqual(InputRouter.Action.none, fallbackKeyAction(key, ctrl, shift, true));
+                try std.testing.expectEqual(InputRouter.keyAction(key, ctrl, shift), fallbackKeyAction(key, ctrl, shift, false));
+            }
+        }
+    }
+    try std.testing.expectEqual(InputRouter.Action.select_next_tab, fallbackKeyAction(c.VK_NEXT, true, false, false));
+    try std.testing.expectEqual(InputRouter.Action.select_previous_tab, fallbackKeyAction(c.VK_PRIOR, true, false, false));
+    try std.testing.expectEqual(InputRouter.Action.none, fallbackKeyAction(c.VK_F6, false, false, false));
+    try std.testing.expectEqual(InputRouter.Action.none, fallbackKeyAction(c.VK_F10, false, false, false));
+    try std.testing.expectEqual(InputRouter.Action.cycle_attention, fallbackKeyAction(c.VK_TAB, true, false, false));
+}
+
+const WorkspaceCycleFixture = struct {
+    const wide = std.unicode.utf8ToUtf16LeStringLiteral;
+    const home = "C:\\fixture";
+    const default_path = "C:\\fixture\\.graphcode";
+    const outside = "D:\\Nonstandard\\Current";
+    const rows = [_]WorkspaceLifecycle.Workspace{
+        .{ .name = "beta", .path = "C:\\fixture\\.graphcode-beta", .identity = "c:/fixture/.graphcode-beta", .is_default = false, .created_at = 2 },
+        .{ .name = "unknown", .path = "C:\\fixture\\.graphcode-unknown", .identity = "c:/fixture/.graphcode-unknown", .is_default = false },
+        .{ .name = "alpha", .path = "C:\\fixture\\.graphcode-alpha", .identity = "c:/fixture/.graphcode-alpha", .is_default = false, .created_at = 2 },
+        .{ .name = "Zulu", .path = "C:\\fixture\\.graphcode-Zulu", .identity = "c:/fixture/.graphcode-zulu", .is_default = false, .created_at = 2 },
+        .{ .name = "old", .path = "C:\\fixture\\.graphcode-old", .identity = "c:/fixture/.graphcode-old", .is_default = false, .created_at = 1 },
+        .{ .name = "Default", .path = default_path, .identity = "c:/fixture/.graphcode", .is_default = true },
+        .{ .name = "alias", .path = "c:/FIXTURE/./.graphcode-alpha/", .identity = "c:/fixture/.graphcode-alpha", .is_default = false },
+    };
+    var known: []const WorkspaceLifecycle.Workspace = &rows;
+    var open: []const []const u16 = &.{};
+    var expected_restore: []const u16 = &.{};
+    var lists: usize = 0;
+    var lookups: usize = 0;
+    var restores: usize = 0;
+    var launches: usize = 0;
+    var omit_current = false;
+    var list_error: ?anyerror = null;
+    var key_error: ?anyerror = null;
+    var lookup_error: ?anyerror = null;
+    var lookup_error_at: usize = 1;
+    var unidentified_at: ?usize = null;
+    var close_at: ?usize = null;
+    var restore_error: ?anyerror = null;
+    var release_source: ?*WorkspaceLifecycle.List = null;
+
+    fn reset() void {
+        known = &rows;
+        open = &.{};
+        expected_restore = &.{};
+        lists = 0;
+        lookups = 0;
+        restores = 0;
+        launches = 0;
+        omit_current = false;
+        list_error = null;
+        key_error = null;
+        lookup_error = null;
+        lookup_error_at = 1;
+        unidentified_at = null;
+        close_at = null;
+        restore_error = null;
+        release_source = null;
+    }
+
+    fn list(allocator: std.mem.Allocator, current: []const u8) !WorkspaceLifecycle.List {
+        lists += 1;
+        if (list_error) |err| return err;
+        if (omit_current) return .{ .items = try allocator.alloc(WorkspaceLifecycle.Workspace, 0) };
+        const result = try WorkspaceLifecycle.managerList(allocator, known, home, current);
+        if (release_source) |source| {
+            source.deinit(allocator);
+            release_source = null;
+            known = &.{};
+        }
+        return result;
+    }
+
+    fn instanceKey(allocator: std.mem.Allocator, path: []const u8) ![:0]u16 {
+        if (key_error) |err| return err;
+        return std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
+    }
+
+    fn windows(key: [:0]const u16) !struct { target: ?usize = null, unidentified: bool = false } {
+        lookups += 1;
+        if (lookups == lookup_error_at) {
+            if (lookup_error) |err| return err;
+        }
+        if (close_at == lookups) return .{};
+        for (open) |path| {
+            if (std.mem.eql(u16, path, key)) return .{ .target = 1, .unidentified = unidentified_at == lookups };
+        }
+        return .{ .unidentified = unidentified_at == lookups };
+    }
+
+    fn restore(key: [:0]const u16) !void {
+        restores += 1;
+        try std.testing.expectEqualSlices(u16, expected_restore, key);
+        if (restore_error) |err| return err;
+    }
+
+    fn launch(_: std.mem.Allocator, _: []const u8) !void {
+        launches += 1;
+    }
+
+    fn cycle(allocator: std.mem.Allocator, current: []const u8, direction: isize) !WorkspaceCycleResult {
+        const identity = try WorkspaceLifecycle.pathIdentity(allocator, current);
+        defer allocator.free(identity);
+        return cycleWorkspaceWith(@This(), allocator, current, identity, direction);
+    }
+};
+
+test "workspace running cycle keeps creation order ordinal ties unknown last dedup and both wraps" {
+    const F = WorkspaceCycleFixture;
+    F.reset();
+    const ordered = [_][]const u8{
+        F.default_path, F.rows[4].path, F.rows[3].path, F.rows[2].path, F.rows[0].path, F.rows[1].path,
+    };
+    F.open = &.{
+        F.wide(F.default_path), F.wide(F.rows[4].path), F.wide(F.rows[3].path),
+        F.wide(F.rows[2].path), F.wide(F.rows[0].path), F.wide(F.rows[1].path),
+    };
+    for (ordered, 0..) |current, index| {
+        for ([_]isize{ -13, -7, -1, 1, 7, 13 }) |direction| {
+            const expected: usize = @intCast(@mod(@as(isize, @intCast(index)) + direction, 6));
+            F.expected_restore = F.open[expected];
+            try std.testing.expectEqual(WorkspaceCycleResult.restored, try F.cycle(std.testing.allocator, current, direction));
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 36), F.restores);
+    try std.testing.expectEqual(@as(usize, 0), F.launches);
+}
+
+test "workspace running cycle rereads candidates skips closed and includes nonstandard outside current" {
+    const F = WorkspaceCycleFixture;
+    F.reset();
+    F.open = &.{ F.wide(F.default_path), F.wide(F.rows[0].path) };
+    F.expected_restore = F.wide(F.default_path);
+    try std.testing.expectEqual(WorkspaceCycleResult.restored, try F.cycle(std.testing.allocator, F.outside, 1));
+    F.expected_restore = F.wide(F.rows[0].path);
+    try std.testing.expectEqual(WorkspaceCycleResult.restored, try F.cycle(std.testing.allocator, F.outside, -1));
+    F.open = &.{};
+    try std.testing.expectEqual(WorkspaceCycleResult.no_other, try F.cycle(std.testing.allocator, F.outside, -1));
+    F.open = &.{F.wide(F.rows[4].path)};
+    F.expected_restore = F.open[0];
+    try std.testing.expectEqual(WorkspaceCycleResult.restored, try F.cycle(std.testing.allocator, F.outside, 1));
+    try std.testing.expectEqual(@as(usize, 4), F.lists);
+    try std.testing.expectEqual(@as(usize, 3), F.restores);
+    try std.testing.expectEqual(@as(usize, 0), F.launches);
+}
+
+test "workspace running cycle zero one missing current and self offsets do not restore or launch" {
+    const F = WorkspaceCycleFixture;
+    F.reset();
+    F.known = &.{};
+    try std.testing.expectEqual(WorkspaceCycleResult.no_other, try F.cycle(std.testing.allocator, F.default_path, 1));
+    try std.testing.expectEqual(@as(usize, 0), F.lookups);
+    F.known = &F.rows;
+    try std.testing.expectEqual(WorkspaceCycleResult.no_other, try F.cycle(std.testing.allocator, F.default_path, -1));
+    F.open = &.{F.wide(F.rows[0].path)};
+    for ([_]isize{ 0, 2, -2, std.math.minInt(isize) }) |direction| {
+        try std.testing.expectEqual(WorkspaceCycleResult.current, try F.cycle(std.testing.allocator, F.default_path, direction));
+    }
+    F.omit_current = true;
+    try std.testing.expectError(error.CurrentWorkspaceMissing, F.cycle(std.testing.allocator, F.default_path, 1));
+    try std.testing.expectError(error.WorkspaceIdentityChanged, cycleWorkspaceWith(F, std.testing.allocator, F.default_path, "c:/different", 1));
+    try std.testing.expectEqual(@as(usize, 0), F.restores + F.launches);
+}
+
+test "workspace running cycle propagates owner session key lookup and unidentified failures" {
+    const F = WorkspaceCycleFixture;
+    for ([_]anyerror{
+        error.WorkspaceWindowOwnerUnknown, error.WorkspaceWindowLookupFailed, error.AmbiguousWorkspaceWindow,
+    }) |failure| {
+        F.reset();
+        F.lookup_error = failure;
+        try std.testing.expectError(failure, F.cycle(std.testing.allocator, F.default_path, 1));
+        try std.testing.expectEqual(@as(usize, 0), F.restores + F.launches);
+    }
+    for ([_]bool{ false, true }) |has_identified| {
+        F.reset();
+        if (has_identified) F.open = &.{F.wide(F.rows[4].path)};
+        F.unidentified_at = 1;
+        try std.testing.expectError(error.UnidentifiedWorkspaceWindow, F.cycle(std.testing.allocator, F.default_path, 1));
+        try std.testing.expectEqual(@as(usize, 0), F.restores + F.launches);
+    }
+    F.reset();
+    F.key_error = error.InvalidWorkspaceIdentity;
+    try std.testing.expectError(error.InvalidWorkspaceIdentity, F.cycle(std.testing.allocator, F.default_path, 1));
+    try std.testing.expectEqual(@as(usize, 0), F.lookups + F.restores + F.launches);
+    F.reset();
+    F.list_error = error.AccessDenied;
+    try std.testing.expectError(error.AccessDenied, F.cycle(std.testing.allocator, F.default_path, 1));
+    try std.testing.expectEqual(@as(usize, 0), F.lookups + F.restores + F.launches);
+}
+
+test "workspace running cycle rechecks disappearance and identity before restore without cold fallback" {
+    const F = WorkspaceCycleFixture;
+    for (0..4) |scenario| {
+        F.reset();
+        F.known = &.{F.rows[0]};
+        F.open = &.{F.wide(F.rows[0].path)};
+        F.expected_restore = F.open[0];
+        switch (scenario) {
+            0 => F.close_at = 2,
+            1 => F.unidentified_at = 2,
+            2 => {
+                F.lookup_error_at = 2;
+                F.lookup_error = error.WorkspaceWindowOwnerUnknown;
+            },
+            3 => F.restore_error = error.WorkspaceWindowNotFound,
+            else => unreachable,
+        }
+        const failure = switch (scenario) {
+            1 => error.UnidentifiedWorkspaceWindow,
+            2 => error.WorkspaceWindowOwnerUnknown,
+            else => error.WorkspaceWindowNotFound,
+        };
+        try std.testing.expectError(failure, F.cycle(std.testing.allocator, F.default_path, 1));
+        try std.testing.expectEqual(@as(usize, if (scenario == 3) 1 else 0), F.restores);
+        try std.testing.expectEqual(@as(usize, 0), F.launches);
+    }
+    for ([_]anyerror{ error.WorkspaceRestoreFailed, error.WorkspaceActivationFailed }) |failure| {
+        F.reset();
+        F.open = &.{F.wide(F.rows[0].path)};
+        F.expected_restore = F.open[0];
+        F.restore_error = failure;
+        try std.testing.expectError(failure, F.cycle(std.testing.allocator, F.default_path, 1));
+        try std.testing.expectEqual(@as(usize, 0), F.launches);
+    }
+    try std.testing.expectEqualStrings("The next workspace is no longer open", workspaceCycleFailure(error.WorkspaceWindowNotFound));
+    try std.testing.expectEqualStrings(workspace_restart_message, workspaceCycleFailure(error.WorkspaceIdentityChanged));
+}
+
+test "workspace running cycle owns refreshed paths and releases every failing allocation without an arena" {
+    const F = WorkspaceCycleFixture;
+    const Case = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            F.reset();
+            var source = try WorkspaceLifecycle.managerList(allocator, &F.rows, F.home, F.default_path);
+            F.release_source = &source;
+            defer if (F.release_source != null) {
+                source.deinit(allocator);
+                F.release_source = null;
+            };
+            F.known = source.items;
+            F.open = &.{F.wide(F.rows[0].path)};
+            F.expected_restore = F.open[0];
+            try std.testing.expectEqual(WorkspaceCycleResult.restored, try F.cycle(allocator, F.default_path, 1));
+            try std.testing.expect(F.release_source == null);
+            try std.testing.expectEqual(@as(usize, 1), F.restores);
+            try std.testing.expectEqual(@as(usize, 0), F.launches);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Case.run, .{});
+}
+
+test "workspace running cycle production helper compiles with no launch capability" {
+    try std.testing.expect(!@hasDecl(WorkspaceCycleApi, "launch"));
+    const F = WorkspaceCycleFixture;
+    const RestoreOnly = struct {
+        const list = F.list;
+        const instanceKey = F.instanceKey;
+        const windows = F.windows;
+        const restore = F.restore;
+    };
+    F.reset();
+    F.open = &.{F.wide(F.rows[0].path)};
+    F.expected_restore = F.open[0];
+    try std.testing.expectEqual(WorkspaceCycleResult.restored, try cycleWorkspaceWith(
+        RestoreOnly, std.testing.allocator, F.default_path, "c:/fixture/.graphcode", 1,
+    ));
+    try std.testing.expectEqual(@as(usize, 1), F.restores);
+}
+
 test "workspace cycling wraps from the current identity and never invents a current target" {
     const items = [_]WorkspaceLifecycle.Workspace{
         .{ .name = "alpha", .path = "C:\\fixture\\.graphcode-alpha", .identity = "c:/fixture/.graphcode-alpha", .is_default = false },
@@ -7602,6 +7992,8 @@ test "workspace cycling wraps from the current identity and never invents a curr
     try std.testing.expectEqual(@as(?usize, 0), workspaceCycleTarget(&items, items[1].identity, 1));
     try std.testing.expect(workspaceCycleTarget(&items, "c:/missing", 1) == null);
     try std.testing.expect(workspaceCycleTarget(items[0..1], items[0].identity, 1) == null);
+    try std.testing.expectEqual(@as(?usize, 0), workspaceCycleTarget(&items, items[0].identity, std.math.minInt(isize)));
+    try std.testing.expectEqual(@as(?usize, 1), workspaceCycleTarget(&items, items[0].identity, std.math.maxInt(isize)));
 }
 
 test "input routing bounds follow hidden workspace panel and rail" {

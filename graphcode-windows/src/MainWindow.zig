@@ -213,7 +213,10 @@ pub const Window = struct {
             const result = c.GetMessageW(&message, null, 0, 0);
             if (result == 0) break;
             if (result == -1) return error.MessageLoopFailed;
-            if (self.pretranslateKey(&message, KeyContext.capture(self.hwnd, message.hwnd))) continue;
+            const keys = KeyContext.capture(self.hwnd, message.hwnd);
+            // A rejected cycle chord must not reach a child that discards Alt.
+            if (!cycleKeyEligible(&message, keys)) continue;
+            if (self.pretranslateKey(&message, keys)) continue;
             if (self.accelerators != null and c.TranslateAcceleratorW(self.hwnd, self.accelerators, &message) != 0)
                 continue;
             _ = c.TranslateMessage(&message);
@@ -222,7 +225,7 @@ pub const Window = struct {
     }
 
     pub fn pretranslateKey(self: *Window, message: *const c.MSG, keys: KeyContext) bool {
-        if (message.message != c.WM_KEYDOWN or !keys.eligible()) return false;
+        if ((message.message != c.WM_KEYDOWN and cycleKeyMessage(message, keys) == null) or !keys.eligible()) return false;
         const callback = self.key_callback orelse return false;
         return callback(self.context, message.wParam, keys.ctrl, keys.shift, keys.alt);
     }
@@ -381,7 +384,27 @@ fn sameWindowUser(hwnd: c.HWND) !bool {
 }
 
 pub fn restoreExistingInstance(key: [:0]const u16) !void {
-    const hwnd = (try workspaceWindows(key)).target orelse return error.WorkspaceWindowNotFound;
+    try restoreWorkspaceWith(WorkspaceRestoreApi, key, .target_first);
+}
+
+pub fn restoreCycleInstance(key: [:0]const u16) !void {
+    try restoreWorkspaceWith(WorkspaceRestoreApi, key, .identified_only);
+}
+
+const WorkspaceRestorePolicy = enum { target_first, identified_only };
+const WorkspaceRestoreApi = struct {
+    const windows = workspaceWindows;
+    const activate = activateWorkspaceWindow;
+};
+
+fn restoreWorkspaceWith(comptime Api: type, key: [:0]const u16, policy: WorkspaceRestorePolicy) !void {
+    const windows = try Api.windows(key);
+    if (policy == .identified_only and windows.unidentified) return error.UnidentifiedWorkspaceWindow;
+    const hwnd = windows.target orelse return error.WorkspaceWindowNotFound;
+    try Api.activate(hwnd, key);
+}
+
+fn activateWorkspaceWindow(hwnd: c.HWND, key: [:0]const u16) !void {
     const message = c.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.Restore").ptr);
     if (message == 0) return error.WorkspaceRestoreFailed;
     var process_id: c.DWORD = 0;
@@ -519,12 +542,31 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState, refresh: MenuRefresh) void {
     setEnabled(hwnd, .reconnect, true);
     setEnabled(hwnd, .check_updates, !state.update_checking);
     setEnabled(hwnd, .workspace_manage, true);
-    setEnabled(hwnd, .workspace_next, state.workspaces.len > 1);
-    setEnabled(hwnd, .workspace_previous, state.workspaces.len > 1);
+    setEnabled(hwnd, .workspace_next, workspaceCycleAvailable(state.workspaces));
+    setEnabled(hwnd, .workspace_previous, workspaceCycleAvailable(state.workspaces));
     setChecked(hwnd, .toggle_sidebar, state.sidebar_visible);
     setChecked(hwnd, .toggle_workspace, state.workspace_visible);
     setChecked(hwnd, .toggle_activity, state.activity_visible);
     if (redrawsMenuBar(refresh)) _ = c.DrawMenuBar(hwnd);
+}
+
+fn workspaceCycleAvailable(workspaces: []const WorkspaceItem) bool {
+    // Like macOS, use known count, including this window outside the home listing.
+    return workspaces.len > 1 or (workspaces.len == 1 and !workspaces[0].is_current);
+}
+
+test "workspace cycle capability counts an outside current without window queries" {
+    const current = WorkspaceItem{ .name = "Default", .is_current = true };
+    const other = WorkspaceItem{ .name = "Default", .is_current = false };
+    try std.testing.expect(!workspaceCycleAvailable(&.{}));
+    try std.testing.expect(!workspaceCycleAvailable(&.{current}));
+    try std.testing.expect(workspaceCycleAvailable(&.{other}));
+    try std.testing.expect(workspaceCycleAvailable(&.{ current, other }));
+    try std.testing.expect(workspaceCycleAvailable(&.{ other, other }));
+    var changed = [_]WorkspaceItem{other};
+    try std.testing.expect(workspaceCycleAvailable(&changed));
+    changed[0].is_current = true;
+    try std.testing.expect(!workspaceCycleAvailable(&changed));
 }
 
 fn updateWorkspaceMenu(hwnd: c.HWND, workspaces: []const WorkspaceItem) void {
@@ -540,8 +582,8 @@ fn updateWorkspaceMenu(hwnd: c.HWND, workspaces: []const WorkspaceItem) void {
     appendEnabled(menu, "Rename Workspace...", @intFromEnum(Command.workspace_rename), workspaces.len > 1);
     appendEnabled(menu, "Delete Workspace...", @intFromEnum(Command.workspace_delete), workspaces.len > 1);
     separator(menu);
-    appendEnabled(menu, "Next Workspace\tCtrl+Alt+PageDown", @intFromEnum(Command.workspace_next), workspaces.len > 1);
-    appendEnabled(menu, "Previous Workspace\tCtrl+Alt+PageUp", @intFromEnum(Command.workspace_previous), workspaces.len > 1);
+    appendEnabled(menu, "Next Workspace\tCtrl+Alt+PageDown", @intFromEnum(Command.workspace_next), workspaceCycleAvailable(workspaces));
+    appendEnabled(menu, "Previous Workspace\tCtrl+Alt+PageUp", @intFromEnum(Command.workspace_previous), workspaceCycleAvailable(workspaces));
     separator(menu);
     for (workspaces[0..@min(workspaces.len, workspace_command_limit - workspace_command_base + 1)], 0..) |item, index| {
         const command: c.UINT = @intCast(workspace_command_base + index);
@@ -641,8 +683,7 @@ fn separator(menu: c.HMENU) void {
     _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
 }
 
-fn createAccelerators() c.HACCEL {
-    var entries = [_]c.ACCEL{
+const accelerator_entries = [_]c.ACCEL{
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'O', .cmd = @intFromEnum(Command.open_folder) },
         .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 'W', .cmd = @intFromEnum(Command.worktrees) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'J', .cmd = @intFromEnum(Command.jump_loop) },
@@ -658,7 +699,37 @@ fn createAccelerators() c.HACCEL {
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_NEXT, .cmd = @intFromEnum(Command.next_tab) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_PRIOR, .cmd = @intFromEnum(Command.previous_tab) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 0xBC, .cmd = @intFromEnum(Command.settings) },
-    };
+        .{ .fVirt = c.FCONTROL | c.FALT | c.FVIRTKEY, .key = c.VK_NEXT, .cmd = @intFromEnum(Command.workspace_next) },
+        .{ .fVirt = c.FCONTROL | c.FALT | c.FVIRTKEY, .key = c.VK_PRIOR, .cmd = @intFromEnum(Command.workspace_previous) },
+};
+
+pub fn workspaceCycleDirection(key: usize, ctrl: bool, shift: bool, alt: bool) ?isize {
+    var flags: c.BYTE = c.FVIRTKEY;
+    if (ctrl) flags |= c.FCONTROL;
+    if (shift) flags |= c.FSHIFT;
+    if (alt) flags |= c.FALT;
+    for (accelerator_entries) |entry| {
+        if (entry.key != key or entry.fVirt != flags) continue;
+        return switch (entry.cmd) {
+            @intFromEnum(Command.workspace_next) => 1,
+            @intFromEnum(Command.workspace_previous) => -1,
+            else => null,
+        };
+    }
+    return null;
+}
+
+fn cycleKeyMessage(message: *const c.MSG, keys: KeyContext) ?isize {
+    if (message.message != c.WM_KEYDOWN and message.message != c.WM_SYSKEYDOWN) return null;
+    return workspaceCycleDirection(message.wParam, keys.ctrl, keys.shift, keys.alt);
+}
+
+fn cycleKeyEligible(message: *const c.MSG, keys: KeyContext) bool {
+    return cycleKeyMessage(message, keys) == null or keys.eligible();
+}
+
+fn createAccelerators() c.HACCEL {
+    var entries = accelerator_entries;
     const accelerators = c.CreateAcceleratorTableW(&entries, entries.len);
     if (accelerators == null) {
         const last_error = c.GetLastError();
@@ -677,6 +748,174 @@ test "native menu exposes the parity command groups" {
     try std.testing.expectEqual(Command.split_right, commandFromId(4303).?);
     try std.testing.expectEqual(Command.about, commandFromId(4501).?);
     try std.testing.expectEqual(@as(?Command, null), commandFromId(9999));
+}
+
+test "workspace running cycle final mixed lookup refuses without activation" {
+    const Probe = struct {
+        var activations: usize = 0;
+        fn windows(_: [:0]const u16) !struct { target: ?usize, unidentified: bool } {
+            return .{ .target = 7, .unidentified = true };
+        }
+        fn activate(_: usize, _: [:0]const u16) !void {
+            activations += 1;
+        }
+    };
+    Probe.activations = 0;
+    const outcome = restoreWorkspaceWith(Probe, std.unicode.utf8ToUtf16LeStringLiteral("fixture-key"), .identified_only);
+    try std.testing.expectEqual(@as(usize, 0), Probe.activations);
+    try std.testing.expectError(error.UnidentifiedWorkspaceWindow, outcome);
+}
+
+test "workspace running cycle final lookup preserves ordinary restore and propagates failures" {
+    const Probe = struct {
+        const key = std.unicode.utf8ToUtf16LeStringLiteral("fixture-key");
+        const Facts = struct { target: ?usize = 42, unidentified: bool = false };
+        var facts: Facts = .{};
+        var lookup_error: ?anyerror = null;
+        var activation_error: ?anyerror = null;
+        var lookups: usize = 0;
+        var activations: usize = 0;
+        fn windows(actual_key: [:0]const u16) !Facts {
+            lookups += 1;
+            try std.testing.expectEqualSlices(u16, key, actual_key);
+            if (lookup_error) |err| return err;
+            return facts;
+        }
+        fn activate(target: usize, actual_key: [:0]const u16) !void {
+            activations += 1;
+            try std.testing.expectEqual(@as(usize, 42), target);
+            try std.testing.expectEqualSlices(u16, key, actual_key);
+            if (activation_error) |err| return err;
+        }
+        fn reset() void {
+            facts = .{};
+            lookup_error = null;
+            activation_error = null;
+            lookups = 0;
+            activations = 0;
+        }
+    };
+    try std.testing.expect(!@hasDecl(WorkspaceRestoreApi, "launch"));
+    Probe.reset();
+    try restoreWorkspaceWith(Probe, Probe.key, .identified_only);
+    try std.testing.expectEqual(@as(usize, 1), Probe.lookups);
+    try std.testing.expectEqual(@as(usize, 1), Probe.activations);
+    Probe.reset();
+    Probe.facts.unidentified = true;
+    try restoreWorkspaceWith(Probe, Probe.key, .target_first);
+    try std.testing.expectEqual(@as(usize, 1), Probe.lookups);
+    try std.testing.expectEqual(@as(usize, 1), Probe.activations);
+    for ([_]bool{ false, true }) |unidentified| {
+        Probe.reset();
+        Probe.facts = .{ .target = null, .unidentified = unidentified };
+        try std.testing.expectError(if (unidentified) error.UnidentifiedWorkspaceWindow else error.WorkspaceWindowNotFound, restoreWorkspaceWith(Probe, Probe.key, .identified_only));
+        try std.testing.expectEqual(@as(usize, 1), Probe.lookups);
+        try std.testing.expectEqual(@as(usize, 0), Probe.activations);
+    }
+    for ([_]anyerror{ error.WorkspaceWindowOwnerUnknown, error.WorkspaceWindowLookupFailed, error.AmbiguousWorkspaceWindow }) |failure| {
+        Probe.reset();
+        Probe.lookup_error = failure;
+        try std.testing.expectError(failure, restoreWorkspaceWith(Probe, Probe.key, .identified_only));
+        try std.testing.expectEqual(@as(usize, 1), Probe.lookups);
+        try std.testing.expectEqual(@as(usize, 0), Probe.activations);
+    }
+    for ([_]anyerror{ error.WorkspaceWindowNotFound, error.WorkspaceWindowOwnerUnknown, error.WorkspaceRestoreFailed, error.WorkspaceActivationFailed }) |failure| {
+        Probe.reset();
+        Probe.activation_error = failure;
+        try std.testing.expectError(failure, restoreWorkspaceWith(Probe, Probe.key, .identified_only));
+        try std.testing.expectEqual(@as(usize, 1), Probe.lookups);
+        try std.testing.expectEqual(@as(usize, 1), Probe.activations);
+    }
+}
+
+test "workspace cycle keyboard actual accelerator descriptors provide both directions" {
+    try std.testing.expectEqual(@as(?isize, 1), workspaceCycleDirection(c.VK_NEXT, true, false, true));
+    try std.testing.expectEqual(@as(?isize, -1), workspaceCycleDirection(c.VK_PRIOR, true, false, true));
+    for ([_]bool{ false, true }) |ctrl| {
+        for ([_]bool{ false, true }) |shift| {
+            for ([_]bool{ false, true }) |alt| {
+                const enabled = ctrl and !shift and alt;
+                try std.testing.expectEqual(@as(?isize, if (enabled) 1 else null), workspaceCycleDirection(c.VK_NEXT, ctrl, shift, alt));
+                try std.testing.expectEqual(@as(?isize, if (enabled) -1 else null), workspaceCycleDirection(c.VK_PRIOR, ctrl, shift, alt));
+                for ([_]usize{ c.VK_TAB, c.VK_F6, c.VK_F10 }) |key| {
+                    try std.testing.expect(workspaceCycleDirection(key, ctrl, shift, alt) == null);
+                }
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 17), accelerator_entries.len);
+    const previous_commands = [_]Command{
+        .open_folder, .worktrees, .jump_loop, .review_attention, .next_loop,
+        .previous_loop, .create_node, .stop_loop, .new_tab, .close_tab,
+        .split_right, .split_down, .next_tab, .previous_tab, .settings,
+    };
+    for (previous_commands, accelerator_entries[0..15]) |command, entry| {
+        try std.testing.expectEqual(@intFromEnum(command), entry.cmd);
+    }
+    try std.testing.expectEqual(c.VK_NEXT, accelerator_entries[12].key);
+    try std.testing.expectEqual(c.VK_PRIOR, accelerator_entries[13].key);
+    for (accelerator_entries[12..14]) |entry| {
+        try std.testing.expectEqual(@as(c.BYTE, c.FCONTROL | c.FVIRTKEY), entry.fVirt);
+    }
+    for (accelerator_entries, 0..) |entry, index| {
+        for (accelerator_entries[index + 1 ..]) |later| {
+            try std.testing.expect(entry.key != later.key or entry.fVirt != later.fVirt);
+        }
+    }
+}
+
+test "workspace cycle keyboard pretranslation consumes owned normal and system keys before child dispatch" {
+    const Probe = struct {
+        direction: ?isize = null,
+        calls: usize = 0,
+        fn callback(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            self.direction = workspaceCycleDirection(key, ctrl, shift, alt);
+            return self.direction != null;
+        }
+    };
+    var probe = Probe{};
+    var window = Window{ .context = &probe, .key_callback = &Probe.callback };
+    const eligible = KeyContext{
+        .active = true, .owner_enabled = true, .target_owned = true, .target_visible = true,
+        .target_enabled = true, .ctrl = true, .alt = true,
+    };
+    var message = std.mem.zeroes(c.MSG);
+    for ([_]c.UINT{ c.WM_KEYDOWN, c.WM_SYSKEYDOWN }) |message_type| {
+        message.message = message_type;
+        for ([_]usize{ c.VK_PRIOR, c.VK_NEXT }) |key| {
+            message.wParam = key;
+            try std.testing.expect(window.pretranslateKey(&message, eligible));
+            try std.testing.expectEqual(@as(?isize, if (key == c.VK_PRIOR) -1 else 1), probe.direction);
+            try std.testing.expect(cycleKeyEligible(&message, eligible));
+            inline for (.{ "active", "owner_enabled", "target_owned", "target_visible", "target_enabled" }) |field| {
+                var excluded = eligible;
+                @field(excluded, field) = false;
+                const calls = probe.calls;
+                try std.testing.expect(!window.pretranslateKey(&message, excluded));
+                try std.testing.expectEqual(calls, probe.calls);
+                try std.testing.expect(!cycleKeyEligible(&message, excluded));
+            }
+        }
+    }
+    for ([_]c.UINT{ c.WM_KEYUP, c.WM_SYSKEYUP, c.WM_CHAR, c.WM_COMMAND }) |message_type| {
+        message.message = message_type;
+        const calls = probe.calls;
+        try std.testing.expect(!window.pretranslateKey(&message, eligible));
+        try std.testing.expectEqual(calls, probe.calls);
+    }
+    message.message = c.WM_SYSKEYDOWN;
+    message.wParam = c.VK_F10;
+    const calls = probe.calls;
+    try std.testing.expect(!window.pretranslateKey(&message, eligible));
+    try std.testing.expectEqual(calls, probe.calls);
+    message.message = c.WM_KEYDOWN;
+    message.wParam = c.VK_NEXT;
+    var ctrl_only = eligible;
+    ctrl_only.alt = false;
+    try std.testing.expect(!window.pretranslateKey(&message, ctrl_only));
+    try std.testing.expect(cycleKeyEligible(&message, ctrl_only));
 }
 
 test "pretranslation invokes the real header key classifier only for eligible input" {
@@ -905,6 +1144,9 @@ test "workspace menu checks the exact command and retains target labels and enab
         }
         try std.testing.expect(c.GetMenuState(menu, @intFromEnum(Command.workspace_next), c.MF_BYCOMMAND) & c.MF_GRAYED == 0);
     }
+    updateWorkspaceMenu(hwnd, items[0..1]);
+    try std.testing.expect(c.GetMenuState(menu, @intFromEnum(Command.workspace_next), c.MF_BYCOMMAND) & c.MF_GRAYED == 0);
+    items[0].is_current = true;
     updateWorkspaceMenu(hwnd, items[0..1]);
     try expectDisabledWorkspaceCommand(menu, .workspace_next);
     try std.testing.expect(c.DeleteMenu(menu, @intFromEnum(Command.workspace_next), c.MF_BYCOMMAND) != 0);

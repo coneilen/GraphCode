@@ -79,8 +79,38 @@ the new support directory rather than reusing the parent's explicit override.
 The parent's environment and other inherited variables remain unchanged.
 Selecting the current workspace does nothing; selecting an identified running
 workspace restores its exact window rather than the first GraphCode window.
-`Ctrl+Alt+PageUp` / `Ctrl+Alt+PageDown` cycles the discovered list, including
-workspaces not yet open.
+`Ctrl+Alt+PageUp` / `Ctrl+Alt+PageDown` and Previous/Next Workspace cycle only
+identified running workspaces. Each invocation rereads the manager's discovery
+order: Default first, named directories by creation time (ordinal name ties,
+unreadable dates last), then the current workspace outside the home listing.
+Closed workspaces are skipped; the current validated instance anchors the cycle,
+and both directions wrap. With no other identified window, cycling does nothing
+except report that status. A separate restore-only API has no launch operation:
+the selected identity is checked again, and the final native lookup used for
+activation must contain an identified target and no unidentified-window flag.
+That same target goes directly to the existing activation implementation without
+another lookup discarding the flag. Disappearance or restore failure reports an
+error, never a cold launch. Normal workspace selection, New, and manager Open keep
+their existing restore-or-launch behavior and the ordinary menu's list order.
+
+Discovery and restore retain the existing SID/session, GraphCode window-class,
+and published workspace-metadata checks; these are not executable-path
+attestation. Any unidentified-window flag refuses the cycle, even alongside an
+identified target, and owner/lookup errors are not treated as closed windows.
+Menu enablement follows the macOS known-count policy, not a periodically polled
+running count: it includes the implicit current workspace when the sole listed
+row is elsewhere. Runtime filtering is authoritative; opening the menu does not
+start global window polling.
+
+Both paging shortcuts are registered in the actual native accelerator descriptor.
+The app also intercepts their exact Ctrl+Alt modifiers before dispatching normal
+or system key-down messages to an owned terminal child, using the same cycle
+action as the menu. Active/enabled/visible ownership gates remain in effect;
+modal dialogs keep their own disabled-owner message loops. The top-level fallback
+does not reinterpret Alt paging as Ctrl-only terminal-tab switching. Existing
+Ctrl+PageUp/Down, header F6, and system F10 behavior retain their separate routes.
+This is source wiring plus pure descriptor/classifier/message-data evidence,
+not a physical-keyboard, native accelerator, or live terminal-window proof.
 
 Instance reservations, selected identity, and mutation guards share lexical
 Windows path normalization: drive/ASCII case, separators, dot segments, and
@@ -110,16 +140,21 @@ existing destination and preserves the directory's saved files.
 Executable coverage includes production helpers, allocation failures, disposable
 filesystem mutations, exact launch/restore routing, and never-shown native
 controls/windows/menus. This is not a live multi-instance, keyboard, UIA, or
-real-daemon walkthrough. The lifecycle parity row remains Partial, including
-running-only cycling and recoverable deletion with daemon/session teardown.
+real-daemon walkthrough. Running-only cycling adds injected data-only coverage
+for creation order, wrapping, identity refusals at the final observed lookup,
+close-before-restore, fresh owned paths, allocation failure, and never-launch
+routing. This does not claim an atomic snapshot of all windows. These tests run through the
+existing App/MainWindow test roots without requiring native window activity.
+The lifecycle parity row remains Partial: real cycling keyboard/window proof
+and recoverable deletion with daemon/session teardown are still missing.
 
 Manage Workspaces now opens a native list with owned workspace names, full paths,
 saved-summary states, and current/default/open-elsewhere or uncertain-window
 refusals. Its discovery order follows macOS: Default first, named directories by
 creation time (ordinal name ties, unreadable dates last), then the current
 workspace outside the home directory if its lexical identity is not already
-listed. This manager-only order does not change the menu or next/previous
-cycling policy above. Manage remains available with zero or one old-menu rows,
+listed. Running-only cycling reuses this order; the ordinary menu's list order
+is unchanged. Manage remains available with zero or one old-menu rows,
 so New and the current-outside-home row stay reachable. Open and targeted Rename
 capture an owned identity, not a row index; New uses the existing guarded
 creation flow. The manager releases
@@ -164,7 +199,7 @@ Manager coverage is pure owned-data/fixture testing, controlled memory-only
 joined-worker tests, and a Windows ReleaseSafe build, without launching the app
 or exercising native controls, actual user windows, UIA, or real workspaces.
 The parity row remains **Partial**: shown-dialog accessibility/keyboard/layout
-and multi-instance behavior, complete live totals, running-only cycling, and
+and multi-instance behavior, complete live totals, real running-cycle keyboard/window proof, and
 recoverable deletion still need their own evidence or implementation.
 
 ## Build
