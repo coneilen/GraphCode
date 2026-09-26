@@ -48,6 +48,206 @@ function Assert-ShellHostPrerequisite([string] $source) {
   }
 }
 
+function Test-ZigResolverDiagnostics([string] $source) {
+  $tokens = $null
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+  if ($errors.Count -ne 0) { throw "Resolver source does not parse" }
+  foreach ($name in @("Invoke-ZigResolverProbe", "Write-ZigResolverDiagnostic", "Resolve-ZigVersion")) {
+    $definition = $ast.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+      }, $true)
+    if ($null -eq $definition) { throw "Missing actual resolver helper: $name" }
+    . ([scriptblock]::Create($definition.Extent.Text))
+  }
+  function Assert-Resolver([bool] $condition, [string] $message) {
+    if (-not $condition) { throw "Zig diagnostic contract: $message" }
+  }
+  $environmentName = "GRAPHCODE_ZIG_RESOLVER_TEST"
+  $priorEnvironment = [Environment]::GetEnvironmentVariable($environmentName)
+  $priorExit = Get-Variable LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+  $priorExitValue = if ($null -ne $priorExit) { $priorExit.Value } else { $null }
+  try {
+    function InMemoryZigProbe([string] $operation) {
+      if ($operation -eq "throw") { throw [ComponentModel.Win32Exception]::new(5, "ghp_PRIVATE_CANARY") }
+      $global:LASTEXITCODE = -1073741502
+      Write-Output "0.15.2"
+      Write-Error "ghp_PRIVATE_CANARY" -ErrorAction Continue
+    }
+    $probe = Invoke-ZigResolverProbe "InMemoryZigProbe" "version"
+    Assert-Resolver ($probe.Output -ceq "0.15.2" -and $probe.ExitCode -eq -1073741502) "actual probe lost stdout or native exit"
+    Assert-Resolver ($probe.ErrorText -match "ghp_PRIVATE_CANARY" -and $null -eq $probe.Failure) "actual probe did not separate stderr"
+    $probe = Invoke-ZigResolverProbe "InMemoryZigProbe" "throw"
+    Assert-Resolver ($null -eq $probe.ExitCode -and $null -ne $probe.Failure) "launch failure reused stale LASTEXITCODE"
+
+    $a = "C:\fixture\configured\zig.exe"
+    $b = "C:\fixture\path\zig.exe"
+    $c = "C:\fixture\discovered\zig.exe"
+    $repoRoot = "C:\fixture\repo"
+    $state = @{
+      PathCandidate = $b; Discovered = @($c); Exists = @{}; Probes = @{}
+      Calls = [Collections.Generic.List[string]]::new()
+      Diagnostics = [Collections.Generic.List[string]]::new()
+      Warnings = [Collections.Generic.List[string]]::new()
+      WriterFails = $false
+      WarningFails = $false
+    }
+    function Get-Command($Name, $ErrorAction) { [pscustomobject]@{ Source = $state.PathCandidate } }
+    function Get-ChildItem($Path, [switch] $Recurse, $Filter, [switch] $File, $ErrorAction) {
+      foreach ($entry in $state.Discovered) { [pscustomobject]@{ FullName = $entry } }
+    }
+    function Test-Path($LiteralPath, $PathType, $ErrorAction) { $state.Exists[$LiteralPath] -eq $true }
+    function Resolve-Path($LiteralPath) { [pscustomobject]@{ Path = $LiteralPath } }
+    function Invoke-ZigResolverProbe([string] $candidate, [string] $operation) {
+      $key = "$candidate|$operation"
+      $state.Calls.Add($key)
+      if (-not $state.Probes.ContainsKey($key)) { throw "Unplanned in-memory probe" }
+      $state.Probes[$key]
+    }
+    function Write-Host($Object) {
+      if ($state.WriterFails) { throw "ghp_PRIVATE_CANARY" }
+      $state.Diagnostics.Add([string]$Object)
+    }
+    function Write-Warning($Message, $WarningAction) {
+      $state.Warnings.Add([string]$Message)
+      if ($state.WarningFails) { throw "ghp_PRIVATE_CANARY" }
+    }
+    function New-Probe($output, $exitCode = 0, $stderr = "") {
+      [pscustomobject]@{ Output = $output; ExitCode = $exitCode; ErrorText = $stderr; Failure = $null }
+    }
+    function Reset-ResolverCase {
+      $state.Calls.Clear(); $state.Diagnostics.Clear(); $state.Warnings.Clear()
+      $state.WriterFails = $false
+      $state.WarningFails = $false
+      $state.PathCandidate = $b
+      $state.Discovered = @($a, $c)
+      $state.Exists = @{ $a = $true; $b = $true; $c = $true }
+      $state.Probes = @{}
+      foreach ($candidate in @($a, $b, $c)) {
+        $state.Probes["$candidate|version"] = New-Probe "0.15.2"
+        $state.Probes["$candidate|env"] = New-Probe '{"version":"0.15.2","lib_dir":"C:\\fixture\\lib"}'
+      }
+      [Environment]::SetEnvironmentVariable($environmentName, $a)
+    }
+    function Invoke-ResolverCase {
+      $result = @()
+      $failure = $null
+      try { $result = @(Resolve-ZigVersion "0.15.2" $environmentName) } catch { $failure = $_ }
+      [pscustomobject]@{ Result = $result; Failure = $failure }
+    }
+    function Read-Diagnostic([int] $index = 0) {
+      $line = $state.Diagnostics[$index]
+      Assert-Resolver ($line.StartsWith("ZIG_RESOLVER_DIAGNOSTIC ") -and $line.Length -lt 2500) "diagnostic tag or bound"
+      Assert-Resolver ($line -notmatch "ghp_PRIVATE_CANARY|userinfo|GITHUB_TOKEN") "secret canary escaped diagnostic"
+      $line.Substring("ZIG_RESOLVER_DIAGNOSTIC ".Length) | ConvertFrom-Json
+    }
+
+    Reset-ResolverCase
+    $case = Invoke-ResolverCase
+    Assert-Resolver ($case.Result.Count -eq 1 -and $case.Result[0] -ceq $a -and $null -eq $case.Failure) "success return changed"
+    Assert-Resolver (($state.Calls -join ",") -ceq "$a|version,$a|env" -and $state.Diagnostics.Count -eq 0) "success probes repeated or diagnosed"
+    Reset-ResolverCase
+    $state.Exists[$a] = $false
+    $state.Probes["$b|version"] = New-Probe "0.16.0"
+    $case = Invoke-ResolverCase
+    Assert-Resolver ($case.Result.Count -eq 1 -and $case.Result[0] -ceq $c) "fallback selection changed"
+    Assert-Resolver (($state.Calls -join ",") -ceq "$b|version,$c|version,$c|env") "fallback order/deduplication/env skipping changed"
+    $missing = Read-Diagnostic
+    $mismatch = Read-Diagnostic 1
+    Assert-Resolver (-not $missing.exists -and $null -eq $missing.version -and $missing.source -eq "configured") "missing candidate fabricated probe"
+    Assert-Resolver ($mismatch.source -eq "PATH" -and $mismatch.version.observedVersion -eq "0.16.0" -and $null -eq $mismatch.env) "mismatch evidence wrong"
+
+    Reset-ResolverCase
+    $state.Probes["$a|version"] = New-Probe "ghp_PRIVATE_CANARY" -1073741502 "ghp_PRIVATE_CANARY"
+    $case = Invoke-ResolverCase
+    $diagnostic = Read-Diagnostic
+    Assert-Resolver ($case.Result[0] -ceq $b -and $diagnostic.version.exitCodeHex -eq "0xC0000142") "nonzero exit/fallback changed"
+    Assert-Resolver ($null -eq $diagnostic.version.observedVersion -and $diagnostic.version.stderr.reason -eq "unclassified") "unsafe version or stderr surfaced"
+    foreach ($envText in @("invalid ghp_PRIVATE_CANARY", '{"version":"0.15.2","lib_dir":"C:\\fixture\\absent","env":{"GITHUB_TOKEN":"ghp_PRIVATE_CANARY"}}')) {
+      Reset-ResolverCase
+      $state.Probes["$a|env"] = New-Probe $envText 9 "error: unable to find zig installation directory ghp_PRIVATE_CANARY"
+      $case = Invoke-ResolverCase
+      $diagnostic = Read-Diagnostic
+      Assert-Resolver ($case.Result[0] -ceq $b -and $diagnostic.reason -eq "env-exit" -and $diagnostic.env.exitCode -eq 9) "env failure selection changed"
+      Assert-Resolver ($diagnostic.env.stderr.reason -eq "unable to find zig installation directory") "safe known reason missing"
+      if ($envText.StartsWith("{")) {
+        Assert-Resolver ($diagnostic.env.parse -eq "parsed" -and $diagnostic.env.libDirectoryPresent -eq $false) "library metadata missing"
+      } else {
+        Assert-Resolver ($diagnostic.env.parse -eq "metadata-unavailable") "parse metadata missing"
+      }
+      $state.Probes["$a|env"] = New-Probe $envText
+      $state.Diagnostics.Clear()
+      $case = Invoke-ResolverCase
+      Assert-Resolver ($case.Result[0] -ceq $a -and $state.Diagnostics.Count -eq 0) "new JSON/lib gate was introduced"
+    }
+
+    Reset-ResolverCase
+    $failure = [Management.Automation.ErrorRecord]::new(
+      [Management.Automation.RuntimeException]::new("ghp_PRIVATE_CANARY",
+        [ComponentModel.Win32Exception]::new(5, "ghp_PRIVATE_CANARY")),
+      "Launch", [Management.Automation.ErrorCategory]::OpenError, $null)
+    $state.Probes["$a|version"] = [pscustomobject]@{ Output = $null; ExitCode = $null; ErrorText = ""; Failure = $failure }
+    $case = Invoke-ResolverCase
+    $diagnostic = Read-Diagnostic
+    Assert-Resolver ($null -ne $case.Failure -and $state.Calls.Count -eq 1 -and $case.Failure.ToString() -notmatch "ghp_PRIVATE_CANARY") "exception changed stop behavior or exposed secret"
+    Assert-Resolver ($null -eq $diagnostic.version.exitCode -and $diagnostic.version.nativeErrorCode -eq 5) "exception fabricated exit"
+    Reset-ResolverCase
+    $state.Probes["$a|env"] = [pscustomobject]@{ Output = $null; ExitCode = $null; ErrorText = ""; Failure = $failure }
+    $case = Invoke-ResolverCase
+    $diagnostic = Read-Diagnostic
+    Assert-Resolver ($null -ne $case.Failure -and $state.Calls.Count -eq 2 -and $diagnostic.reason -eq "env-exception") "env exception did not stop after one probe"
+    Assert-Resolver ($null -eq $diagnostic.env.exitCode -and $diagnostic.env.nativeErrorCode -eq 5) "env exception lost nullable exit/native code"
+    Reset-ResolverCase
+    $state.Probes["$a|version"] = New-Probe "0.16.0"
+    $state.WriterFails = $true
+    $case = Invoke-ResolverCase
+    Assert-Resolver ($case.Result[0] -ceq $b -and $state.Warnings.Count -eq 1) "writer failure changed fallback"
+    $state.WarningFails = $true
+    $state.Calls.Clear()
+    $case = Invoke-ResolverCase
+    Assert-Resolver ($case.Result.Count -eq 1 -and $case.Result[0] -ceq $b -and $null -eq $case.Failure) "both writer failures changed fallback"
+    Assert-Resolver (($state.Calls -join ",") -ceq "$a|version,$b|version,$b|env") "both writer failures changed probe order"
+    foreach ($candidate in @($a, $b, $c)) { $state.Exists[$candidate] = $false }
+    $case = Invoke-ResolverCase
+    Assert-Resolver ($case.Result.Count -eq 0 -and $case.Failure.ToString() -eq "Zig 0.15.2 is required for the pinned Windows provider; set $environmentName.") "both writer failures masked original guard"
+
+    Reset-ResolverCase
+    $nonAsciiVersion = ([string][char]0x0661) + ".2.3"
+    $overLimitVersion = "1.2.3+" + ("a" * 65)
+    foreach ($unsafeVersion in @($nonAsciiVersion, $overLimitVersion)) {
+      foreach ($probeName in @("version", "env")) {
+        $state.Diagnostics.Clear()
+        $text = if ($probeName -eq "version") { $unsafeVersion } else { @{ version = $unsafeVersion } | ConvertTo-Json -Compress }
+        $probe = New-Probe $text 1
+        if ($probeName -eq "version") {
+          Write-ZigResolverDiagnostic $a "configured" "0.15.2" $true "version-exit" $probe $null
+        } else {
+          Write-ZigResolverDiagnostic $a "configured" "0.15.2" $true "env-exit" (New-Probe "0.15.2") $probe
+        }
+        $diagnostic = Read-Diagnostic
+        $summary = $diagnostic.$probeName
+        Assert-Resolver ($null -eq $summary.observedVersion -and
+          $summary.stdout.bytes -eq [Text.Encoding]::UTF8.GetByteCount($text) -and
+          $summary.stdout.sha256.Length -eq 64) "non-ASCII or over-limit version was not reduced to hash/length"
+        Assert-Resolver (-not $state.Diagnostics[0].Contains($unsafeVersion)) "unsafe version appeared literally"
+      }
+    }
+    Assert-Resolver ([Text.Encoding]::UTF8.GetByteCount($overLimitVersion) -gt 64) "version size control is not over limit"
+    $state.WriterFails = $false
+    foreach ($candidate in @("https://userinfo@github.com/zig", "C:\ghp_PRIVATE_CANARY\zig.exe", ("C:\" + ("x" * 520)))) {
+      $state.Diagnostics.Clear()
+      Write-ZigResolverDiagnostic $candidate "configured" "0.15.2" $true "version-exit" (New-Probe ("ghp_PRIVATE_CANARY" * 2000) 1) $null
+      $diagnostic = Read-Diagnostic
+      Assert-Resolver ($diagnostic.candidate -eq "[omitted]" -and $diagnostic.version.stdout.bytes -gt 16384) "candidate/output cap or redaction failed"
+    }
+  } finally {
+    [Environment]::SetEnvironmentVariable($environmentName, $priorEnvironment)
+    if ($null -eq $priorExit) { Remove-Variable LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue }
+    else { $global:LASTEXITCODE = $priorExitValue }
+  }
+}
+
 $runner = Join-Path $PSScriptRoot "..\validate.ps1"
 if (-not (Test-Path $runner)) {
   throw "RED: validation runner does not exist at $runner"
@@ -218,6 +418,7 @@ try {
     throw "RED: Windows shell CI does not invoke the shell task containing live UI Automation"
   }
   $runnerSource = Get-Content $runner -Raw
+  Test-ZigResolverDiagnostics $runnerSource
   Assert-ShellHostPrerequisite $runnerSource
   $contractCall = [regex]::Match($runnerSource,
     '(?s)& \(Join-Path \$repoRoot "Tools\\windows\\Tests\\WindowsShell\.Tests\.ps1"\)\s*`\s*-ZigExecutable \$zig0152').Value
