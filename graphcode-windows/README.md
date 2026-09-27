@@ -38,7 +38,8 @@ conformance, and end-to-end accessibility parity remain unverified or incomplete
 The graph surface also provides native Win32 create/edit forms for nodes and
 edges, a settings dialog, context menus, and keyboard-accessible actions:
 `Ctrl+N` creates a node, `Ctrl+J` opens the jump palette, and `Ctrl+,` opens
-advanced connection settings. With the graph canvas owning the keyboard,
+Advanced Connection Settings. `Ctrl+Shift+,` opens product Settings.
+With the graph canvas owning the keyboard,
 `F2` or `Ctrl+E` renames the selected loop; `Ctrl+E` edits the selected edge
 instead when an edge is selected. Full **Edit Details...** remains a node
 context-menu action, not the `Ctrl+E` action. **Open Terminal** is also in that
