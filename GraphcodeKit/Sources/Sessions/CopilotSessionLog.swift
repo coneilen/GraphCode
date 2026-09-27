@@ -324,7 +324,7 @@ public enum CopilotSessionLog {
   ) async -> SummaryReading? {
     let stamp = await TranscriptFreshness.shared.remoteStamp(forNode: node.id)
     let reply = await RemoteTranscriptProbe.run(
-      remoteSummaryInvocation(forNode: node, at: location, since: stamp))
+      remoteSummaryInvocation(forNode: node, at: location, since: stamp), at: location)
     guard case .lines(let newStamp, let lines) = reply else { return nil }
     await TranscriptFreshness.shared.recordRemoteStamp(newStamp, forNode: node.id)
     var builder = builder(forLines: lines)
@@ -477,13 +477,8 @@ public enum CopilotSessionLog {
   static func remotePresence(
     of node: LoopNode, at location: RemoteProjectLocation
   ) async -> PresenceReading {
-    RemoteProjectLocation.prepareControlSocketDirectory()
-    let invocation = remotePresenceInvocation(forNode: node, at: location)
-    guard
-      let session = try? PTYProcessSession(
-        executable: invocation[0], arguments: Array(invocation.dropFirst()))
-    else { return .unknown }
-    let (succeeded, output) = await session.waitCollectingOutput()
+    let (succeeded, output) = await ZmxSessionLauncher.collectRemoteOutput(
+      remotePresenceInvocation(forNode: node, at: location), location: location)
     return parseRemotePresence(succeeded: succeeded, output: output)
   }
 

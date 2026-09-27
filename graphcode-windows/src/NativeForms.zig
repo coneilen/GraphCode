@@ -296,28 +296,7 @@ pub fn nodeWithTemplates(
         allocator.destroy(state);
     }
 
-    state.values[0] = try allocator.dupe(u8, initial.title);
-    state.values[1] = try allocator.dupe(u8, initial.loop_type);
-    state.values[2] = try allocator.dupe(u8, initial.check_description);
-    state.values[3] = try allocator.dupe(u8, initial.trigger_prompt);
-    state.values[4] = try allocator.dupe(u8, initial.first_instruction);
-    state.values[5] = try allocator.dupe(u8, if (initial.pauses_before_writes_only) "true" else "false");
-    state.values[6] = try allocator.dupe(u8, initial.goal_summary);
-    state.values[7] = try allocator.dupe(u8, initial.goal_predicate);
-    state.values[8] = try dupFloatText(allocator, initial.poll_interval_seconds);
-    state.values[9] = try dupOptionalFloatText(allocator, initial.stall_after_seconds);
-    state.values[10] = try allocator.dupe(u8, initial.metric_command);
-    state.values[11] = try allocator.dupe(u8, initial.metric_direction);
-    state.values[12] = try allocator.dupe(u8, initial.backend orelse "");
-    state.values[13] = try allocator.dupe(u8, initial.model_tier);
-    state.values[14] = try worktreeSelectionText(allocator, worktree_choices, initial.worktree_path);
-    state.values[15] = try allocator.dupe(u8, initial.worktree_repository);
-    state.values[16] = try allocator.dupe(u8, initial.worktree_id);
-    state.values[17] = try allocator.dupe(u8, initial.worktree_path);
-    state.values[18] = try allocator.dupe(u8, initial.worktree_branch);
-    state.values[19] = try allocator.dupe(u8, initial.subgraph_json);
-    state.values[20] = try allocator.dupe(u8, initial.created_by);
-    for (0..21) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
+    try initializeNodeDraft(state, initial);
     try restoreStagedAttachments(state, initial);
     if (!(try show(state, "Create or edit node", &.{}))) {
         if (!state.template_requested) return .cancelled;
@@ -357,14 +336,7 @@ pub fn templatePicker(
 
 fn restoreStagedAttachments(state: *DialogState, initial: Forms.NodeDraft) !void {
     if (initial.attachment_count == 0) return;
-    const support = try DraftAttachments.supportDirectory(state.allocator);
-    defer state.allocator.free(support);
-    state.attachment_dir = try DraftAttachments.attachmentsDirectory(
-        state.allocator,
-        support,
-        state.attachment_project_path,
-        state.attachment_draft_id,
-    );
+    _ = try ensureAttachmentsDirectory(state);
     for (0..initial.attachment_count) |index| {
         state.attachment_paths[index] = try state.allocator.dupe(u8, initial.attachment_paths[index]);
         state.attachment_ids[index] = try state.allocator.dupe(u8, initial.attachment_ids[index]);
@@ -374,6 +346,32 @@ fn restoreStagedAttachments(state: *DialogState, initial: Forms.NodeDraft) !void
         );
     }
     state.attachment_count = initial.attachment_count;
+}
+
+fn initializeNodeDraft(state: *DialogState, initial: Forms.NodeDraft) !void {
+    const allocator = state.allocator;
+    state.values[0] = try allocator.dupe(u8, initial.title);
+    state.values[1] = try allocator.dupe(u8, initial.loop_type);
+    state.values[2] = try allocator.dupe(u8, initial.check_description);
+    state.values[3] = try allocator.dupe(u8, initial.trigger_prompt);
+    state.values[4] = try allocator.dupe(u8, initial.first_instruction);
+    state.values[5] = try allocator.dupe(u8, if (initial.pauses_before_writes_only) "true" else "false");
+    state.values[6] = try allocator.dupe(u8, initial.goal_summary);
+    state.values[7] = try allocator.dupe(u8, initial.goal_predicate);
+    state.values[8] = try dupFloatText(allocator, initial.poll_interval_seconds);
+    state.values[9] = try dupOptionalFloatText(allocator, initial.stall_after_seconds);
+    state.values[10] = try allocator.dupe(u8, initial.metric_command);
+    state.values[11] = try allocator.dupe(u8, initial.metric_direction);
+    state.values[12] = try allocator.dupe(u8, initial.backend orelse "");
+    state.values[13] = try allocator.dupe(u8, initial.model_tier);
+    state.values[14] = try worktreeSelectionText(allocator, state.node_worktree_choices, initial.worktree_path);
+    state.values[15] = try allocator.dupe(u8, initial.worktree_repository);
+    state.values[16] = try allocator.dupe(u8, initial.worktree_id);
+    state.values[17] = try allocator.dupe(u8, initial.worktree_path);
+    state.values[18] = try allocator.dupe(u8, initial.worktree_branch);
+    state.values[19] = try allocator.dupe(u8, initial.subgraph_json);
+    state.values[20] = try allocator.dupe(u8, initial.created_by);
+    for (0..21) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
 }
 
 fn buildNodeDraft(
@@ -789,13 +787,13 @@ pub fn worktreeSweep(
         else
             "LOOK BEFORE REMOVING";
         const branch = if (entry.branch.len != 0) entry.branch else entry.path;
-        const size = WorktreeStatus.sizeText(allocator, entry.size_bytes) catch allocator.dupe(u8, "size unavailable") catch &.{};
+        const size = try WorktreeStatus.sizeCoverageText(allocator, entry.sizeCoverage());
+        defer allocator.free(size);
         state.display_labels[index] = try std.fmt.allocPrint(
             allocator,
             "{s}: {s} - {s} - {s}",
             .{ tier, branch, WorktreeStatus.failureReasonText(entry), size },
         );
-        allocator.free(size);
         state.values[index] = try allocator.dupe(u8, if (WorktreeStatus.sweepSelectable(entry) and WorktreeStatus.decision(entry) == .reclaimable) "true" else "false");
         state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
         state.input_kinds[index] = .checkbox;
@@ -804,12 +802,10 @@ pub fn worktreeSweep(
         state.sweep_paths[index] = entry.path;
     }
     state.field_count = count;
-    var total_bytes: u64 = 0;
     var safe_count: usize = 0;
     var look_count: usize = 0;
     var in_use_count: usize = 0;
     for (entries[0..count]) |entry| {
-        total_bytes += entry.size_bytes;
         if (entry.primary or entry.bound_running) {
             in_use_count += 1;
         } else if (WorktreeStatus.decision(entry) == .reclaimable) {
@@ -818,7 +814,7 @@ pub fn worktreeSweep(
             look_count += 1;
         }
     }
-    const total_text = try WorktreeStatus.sizeText(allocator, total_bytes);
+    const total_text = try WorktreeStatus.sizeCoverageText(allocator, WorktreeStatus.totalSize(entries[0..count]));
     defer allocator.free(total_text);
     const title = try std.fmt.allocPrint(
         allocator,
@@ -1582,6 +1578,8 @@ fn attachmentErrorReason(err: DraftAttachments.IngestError) []const u8 {
         error.EmptyFile => "That file is empty.",
         error.SourceUnreadable => "That file couldn't be read.",
         error.DestinationUnwritable => "Unable to save the attachment.",
+        error.DestinationExists => "An attachment already uses that storage path. No file was replaced.",
+        error.DestinationWriteAndCleanupFailed => "Unable to save the attachment or remove its incomplete copy.",
         error.TooManyAttachments => "Up to 8 attachments per node.",
         error.OutOfMemory => "Out of memory while attaching the file.",
     };
@@ -1622,7 +1620,7 @@ fn removeAttachmentToken(state: *DialogState, number: usize) void {
 }
 
 /// Runs the native multi-select picker, then ingests every path it returned in order —
-/// each success adds one `attachment-<n>.<ext>` file plus a `[image #n]` token in the
+/// each success adds a uniquely named file plus a `[image #n]` token in the
 /// brief field; each failure surfaces its reason in the validation line without
 /// aborting the rest of the batch.
 fn attachFiles(hwnd: c.HWND, state: *DialogState) void {
@@ -1632,46 +1630,55 @@ fn attachFiles(hwnd: c.HWND, state: *DialogState) void {
     }
     const remaining = DraftAttachments.max_attachments - state.attachment_count;
     const stride: usize = 260;
-    const buffer = state.allocator.alloc(u16, remaining * stride) catch return;
+    const buffer = state.allocator.alloc(u16, remaining * stride) catch {
+        setStaticText(state, state.validation, attachmentErrorReason(error.OutOfMemory));
+        return;
+    };
     defer state.allocator.free(buffer);
     @memset(buffer, 0);
     const picked = graphcode_pick_files(hwnd, buffer.ptr, @intCast(stride), @intCast(remaining));
     if (picked <= 0) return;
-    const dir = ensureAttachmentsDirectory(state) catch {
-        setStaticText(state, state.validation, "Unable to prepare attachment storage.");
-        return;
-    };
     var added = false;
     var index: usize = 0;
     while (index < @as(usize, @intCast(picked)) and state.attachment_count < DraftAttachments.max_attachments) : (index += 1) {
         const slot = buffer[index * stride .. index * stride + stride];
         const length = std.mem.indexOfScalar(u16, slot, 0) orelse slot.len;
-        const path_utf8 = std.unicode.utf16LeToUtf8Alloc(state.allocator, slot[0..length]) catch continue;
+        const path_utf8 = std.unicode.utf16LeToUtf8Alloc(state.allocator, slot[0..length]) catch |err| {
+            setStaticText(state, state.validation, if (err == error.OutOfMemory)
+                attachmentErrorReason(error.OutOfMemory)
+            else
+                "That attachment path could not be decoded.");
+            continue;
+        };
         defer state.allocator.free(path_utf8);
-        const number = state.attachment_count + 1;
-        const dest_path = DraftAttachments.ingest(state.allocator, path_utf8, dir, number) catch |err| {
+        appendAttachment(state, path_utf8) catch |err| {
             setStaticText(state, state.validation, attachmentErrorReason(err));
             continue;
         };
-        var id_buffer: [36]u8 = undefined;
-        Forms.generateDraftId(&id_buffer);
-        const id = state.allocator.dupe(u8, &id_buffer) catch {
-            state.allocator.free(dest_path);
-            continue;
-        };
-        const name = state.allocator.dupe(u8, std.fs.path.basename(path_utf8)) catch {
-            state.allocator.free(dest_path);
-            state.allocator.free(id);
-            continue;
-        };
-        state.attachment_paths[state.attachment_count] = dest_path;
-        state.attachment_ids[state.attachment_count] = id;
-        state.attachment_names[state.attachment_count] = name;
-        state.attachment_count += 1;
         added = true;
-        insertAttachmentToken(state, number);
+        insertAttachmentToken(state, state.attachment_count);
     }
     if (added) refreshAttachmentListbox(state);
+}
+
+fn appendAttachment(state: *DialogState, source_path: []const u8) DraftAttachments.IngestError!void {
+    if (state.attachment_count >= DraftAttachments.max_attachments) return error.TooManyAttachments;
+    var id_buffer: [36]u8 = undefined;
+    Forms.generateDraftId(&id_buffer);
+    const id = try state.allocator.dupe(u8, &id_buffer);
+    errdefer state.allocator.free(id);
+    const name = try state.allocator.dupe(u8, std.fs.path.basename(source_path));
+    errdefer state.allocator.free(name);
+    const dir = ensureAttachmentsDirectory(state) catch |err| return if (err == error.OutOfMemory)
+        error.OutOfMemory
+    else
+        error.DestinationUnwritable;
+    // Nothing fallible remains between successful ingestion and slot ownership.
+    const dest_path = try DraftAttachments.ingest(state.allocator, source_path, dir, state.attachment_count + 1);
+    state.attachment_paths[state.attachment_count] = dest_path;
+    state.attachment_ids[state.attachment_count] = id;
+    state.attachment_names[state.attachment_count] = name;
+    state.attachment_count += 1;
 }
 
 fn removeSelectedAttachment(state: *DialogState) void {
@@ -1681,6 +1688,11 @@ fn removeSelectedAttachment(state: *DialogState) void {
     const index: usize = @intCast(selected);
     if (index >= state.attachment_count) return;
     removeAttachmentToken(state, index + 1);
+    removeAttachmentAt(state, index);
+    refreshAttachmentListbox(state);
+}
+
+fn removeAttachmentAt(state: *DialogState, index: usize) void {
     state.allocator.free(state.attachment_names[index]);
     state.allocator.free(state.attachment_paths[index]);
     state.allocator.free(state.attachment_ids[index]);
@@ -1691,7 +1703,6 @@ fn removeSelectedAttachment(state: *DialogState) void {
         state.attachment_ids[i] = state.attachment_ids[i + 1];
     }
     state.attachment_count -= 1;
-    refreshAttachmentListbox(state);
 }
 
 /// Teaching tiles: one owner-drawn, tab-stop BUTTON per loop-type choice,
@@ -2697,6 +2708,204 @@ test "node worktree picker has an honest empty state and binds only real choices
     try std.testing.expect(selectedWorktreeChoice(&state) == null);
 }
 
+test "node creation ownership current nondefault choice reaches exact wire fields" {
+    const allocator = std.testing.allocator;
+    const Wire = @import("Wire.zig");
+    const choices_value = [_]WorktreeChoice{
+        .{ .path = "C:\\repo\\main", .branch = "main", .is_default = true },
+        .{ .path = "C:\\repo-topic", .branch = "feature/exact-choice", .is_default = false },
+    };
+    var state = DialogState{
+        .allocator = allocator,
+        .kind = .node,
+        .parent = null,
+        .attachment_project_path = "C:\\repo",
+        .node_worktree_choices = &choices_value,
+    };
+    defer freeValues(&state);
+    const initial = Forms.NodeDraft{
+        .title = "Exact choice",
+        .first_instruction = "Keep the selected branch",
+        .backend = "codex",
+        .model_tier = "capable",
+        .created_by = "11111111-1111-4111-8111-111111111111",
+        .briefing_enabled = false,
+        .activity_enabled = true,
+    };
+    try initializeNodeDraft(&state, initial);
+    try std.testing.expectEqualStrings("0", state.values[14]);
+    try std.testing.expect(selectedWorktreeChoice(&state) == null);
+    state.values[14][0] = '2';
+    try std.testing.expect(validationReason(&state) == null);
+    var draft = try buildNodeDraft(allocator, &state, initial);
+    defer draft.deinit(allocator);
+    const command = try Wire.commandGraphCreateNodeFull(allocator, state.attachment_project_path, initial.created_by, draft);
+    defer allocator.free(command);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, command, .{});
+    defer parsed.deinit();
+    const graph_command = parsed.value.object.get("graphCommand").?.object;
+    try std.testing.expectEqualStrings("C:\\repo", graph_command.get("projectPath").?.string);
+    const wire_node = graph_command.get("command").?.object.get("createNode").?.object.get("_0").?.object;
+    const worktree = wire_node.get("worktree").?.object;
+    try std.testing.expectEqualStrings("C:\\repo", worktree.get("repositoryPath").?.string);
+    try std.testing.expectEqualStrings("feature/exact-choice", worktree.get("id").?.string);
+    try std.testing.expectEqualStrings("C:\\repo-topic", worktree.get("worktreePath").?.string);
+    try std.testing.expectEqualStrings("feature/exact-choice", worktree.get("branch").?.string);
+    try std.testing.expectEqualStrings(initial.title, wire_node.get("title").?.string);
+    try std.testing.expectEqualStrings(initial.first_instruction, wire_node.get("firstInstruction").?.string);
+    try std.testing.expectEqualStrings(initial.backend.?, wire_node.get("backend").?.string);
+    try std.testing.expectEqualStrings(initial.model_tier, wire_node.get("modelTier").?.string);
+    try std.testing.expectEqualStrings(initial.created_by, wire_node.get("createdBy").?.string);
+    try std.testing.expectEqual(@as(usize, 0), wire_node.get("attachments").?.array.items.len);
+    try std.testing.expectEqual(initial.briefing_enabled, draft.briefing_enabled);
+    try std.testing.expectEqual(initial.activity_enabled, draft.activity_enabled);
+
+    state.values[14][0] = '0';
+    var unbound = try buildNodeDraft(allocator, &state, draft);
+    defer unbound.deinit(allocator);
+    try std.testing.expectEqualStrings("", unbound.worktree_repository);
+    try std.testing.expectEqualStrings("", unbound.worktree_id);
+    try std.testing.expectEqualStrings("", unbound.worktree_path);
+    try std.testing.expectEqualStrings("", unbound.worktree_branch);
+    const unbound_command = try Wire.commandGraphCreateNodeFull(allocator, state.attachment_project_path, initial.created_by, unbound);
+    defer allocator.free(unbound_command);
+    var unbound_parsed = try std.json.parseFromSlice(std.json.Value, allocator, unbound_command, .{});
+    defer unbound_parsed.deinit();
+    const unbound_node = unbound_parsed.value.object.get("graphCommand").?.object.get("command").?.object.get("createNode").?.object.get("_0").?.object;
+    try std.testing.expect(unbound_node.get("worktree").? == .null);
+}
+
+test "node creation ownership restores the same branch through template handoff" {
+    const allocator = std.testing.allocator;
+    const TemplateLibrary = @import("TemplateLibrary.zig");
+    const choices_value = [_]WorktreeChoice{
+        .{ .path = "C:\\repo\\main", .branch = "main", .is_default = true },
+        .{ .path = "C:\\repo-topic", .branch = "feature/restored", .is_default = false },
+    };
+    const initial = Forms.NodeDraft{
+        .title = "Before template",
+        .first_instruction = "",
+        .worktree_repository = "C:\\repo",
+        .worktree_id = "feature/restored",
+        .worktree_path = "C:\\repo-topic",
+        .worktree_branch = "feature/restored",
+        .backend = "codex",
+        .model_tier = "capable",
+    };
+    var state = DialogState{
+        .allocator = allocator,
+        .kind = .node,
+        .parent = null,
+        .attachment_project_path = "C:\\repo",
+        .node_worktree_choices = &choices_value,
+    };
+    defer freeValues(&state);
+    try initializeNodeDraft(&state, initial);
+    try std.testing.expectEqualStrings("2", state.values[14]);
+    var handoff = try buildNodeDraftUnchecked(allocator, &state, initial);
+    defer handoff.deinit(allocator);
+    try std.testing.expectEqualStrings("", handoff.first_instruction);
+    try TemplateLibrary.applyOwned(&handoff, .{
+        .id = @constCast("template"),
+        .name = @constCast("From template"),
+        .body = @constCast("A template changes the brief, not its branch."),
+        .shape = @constCast("turn"),
+    }, allocator);
+    const reordered_choices = [_]WorktreeChoice{ choices_value[1], choices_value[0] };
+    for ([_][]const WorktreeChoice{ &choices_value, &reordered_choices }, 0..) |choice_list, index| {
+        var restored = DialogState{
+            .allocator = allocator,
+            .kind = .node,
+            .parent = null,
+            .attachment_project_path = "C:\\repo",
+            .node_worktree_choices = choice_list,
+        };
+        defer freeValues(&restored);
+        try initializeNodeDraft(&restored, handoff);
+        try std.testing.expectEqualStrings(if (index == 0) "2" else "1", restored.values[14]);
+        var draft = try buildNodeDraft(allocator, &restored, handoff);
+        defer draft.deinit(allocator);
+        try std.testing.expectEqualStrings(initial.worktree_repository, draft.worktree_repository);
+        try std.testing.expectEqualStrings(initial.worktree_id, draft.worktree_id);
+        try std.testing.expectEqualStrings(initial.worktree_path, draft.worktree_path);
+        try std.testing.expectEqualStrings(initial.worktree_branch, draft.worktree_branch);
+        try std.testing.expectEqualStrings("From template", draft.title);
+        try std.testing.expectEqualStrings("A template changes the brief, not its branch.", draft.first_instruction);
+        try std.testing.expectEqualStrings(initial.backend.?, draft.backend.?);
+        try std.testing.expectEqualStrings(initial.model_tier, draft.model_tier);
+        applyModalCommand(&restored, .cancel);
+        try std.testing.expect(!restored.result);
+        try std.testing.expect(restored.closed);
+        try std.testing.expectEqualStrings(initial.worktree_path, restored.initial_values[17]);
+    }
+}
+
+test "node creation ownership preserves empty-list and unmatched-path behavior" {
+    const allocator = std.testing.allocator;
+    const initial = Forms.NodeDraft{
+        .title = "Existing binding",
+        .worktree_repository = "C:\\repo",
+        .worktree_id = "original-id",
+        .worktree_path = "C:\\old-worktree",
+        .worktree_branch = "feature/old",
+    };
+    const choices_value = [_]WorktreeChoice{
+        .{ .path = "C:\\repo\\main", .branch = "main", .is_default = true },
+    };
+    for ([_][]const WorktreeChoice{ &.{}, &choices_value }) |choice_list| {
+        var state = DialogState{
+            .allocator = allocator,
+            .kind = .node,
+            .parent = null,
+            .attachment_project_path = "C:\\repo",
+            .node_worktree_choices = choice_list,
+        };
+        defer freeValues(&state);
+        try initializeNodeDraft(&state, initial);
+        try std.testing.expectEqualStrings("0", state.values[14]);
+        try std.testing.expect(selectedWorktreeChoice(&state) == null);
+        var draft = try buildNodeDraft(allocator, &state, initial);
+        defer draft.deinit(allocator);
+        try std.testing.expectEqualStrings(if (choice_list.len == 0) initial.worktree_repository else "", draft.worktree_repository);
+        try std.testing.expectEqualStrings(if (choice_list.len == 0) initial.worktree_id else "", draft.worktree_id);
+        try std.testing.expectEqualStrings(if (choice_list.len == 0) initial.worktree_path else "", draft.worktree_path);
+        try std.testing.expectEqualStrings(if (choice_list.len == 0) initial.worktree_branch else "", draft.worktree_branch);
+    }
+}
+
+test "node creation ownership initializer and selected draft release every partial allocation" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const choices_value = [_]WorktreeChoice{
+                .{ .path = "C:\\repo\\main", .branch = "main", .is_default = true },
+                .{ .path = "C:\\repo-topic", .branch = "feature/allocations", .is_default = false },
+            };
+            var state = DialogState{
+                .allocator = allocator,
+                .kind = .node,
+                .parent = null,
+                .attachment_project_path = "C:\\repo",
+                .node_worktree_choices = &choices_value,
+            };
+            defer freeValues(&state);
+            const initial = Forms.NodeDraft{
+                .title = "Allocation probe",
+                .first_instruction = "Keep every allocation owned",
+                .backend = "codex",
+                .model_tier = "capable",
+            };
+            try initializeNodeDraft(&state, initial);
+            state.values[14][0] = '2';
+            var draft = try buildNodeDraft(allocator, &state, initial);
+            defer draft.deinit(allocator);
+            try std.testing.expectEqualStrings("C:\\repo", draft.worktree_repository);
+            try std.testing.expectEqualStrings("C:\\repo-topic", draft.worktree_path);
+            try std.testing.expectEqualStrings("feature/allocations", draft.worktree_branch);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
 test "node draft builder preserves every hidden initial field" {
     var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
     state.values[1] = @constCast("turnBased");
@@ -2804,6 +3013,243 @@ test "attachments are hidden for composite loops and mapped to the shown brief f
     state.values[1] = @constCast("proactive");
     try std.testing.expect(!attachmentsVisible(&state));
     try std.testing.expectEqual(@as(?usize, null), briefFieldIndex(&state));
+}
+
+test "attachment staging preserves surviving bytes after remove and re-add" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    var state = DialogState{ .allocator = allocator, .kind = .node, .parent = null };
+    state.attachment_dir = try std.fs.path.join(allocator, &.{ root, "attachments" });
+    defer freeAttachmentState(&state);
+    const names = [_][]const u8{ "a.txt", "b.txt", "c.txt", "d.txt" };
+    const contents = [_][]const u8{ "source A", "source B", "surviving C", "new D" };
+    var sources: [4][]u8 = .{&.{}} ** 4;
+    defer for (sources) |source| allocator.free(source);
+    for (names, contents, 0..) |name, content, index| {
+        try tmp.dir.writeFile(.{ .sub_path = name, .data = content });
+        sources[index] = try tmp.dir.realpathAlloc(allocator, name);
+    }
+    for (sources[0..3]) |source| try appendAttachment(&state, source);
+    const survivor = try allocator.dupe(u8, state.attachment_paths[2]);
+    defer allocator.free(survivor);
+    removeAttachmentAt(&state, 1);
+    try appendAttachment(&state, sources[3]);
+
+    try std.testing.expectEqual(@as(usize, 3), state.attachment_count);
+    try std.testing.expectEqualStrings(survivor, state.attachment_paths[1]);
+    const surviving_bytes = try std.fs.cwd().readFileAlloc(allocator, survivor, 1024);
+    defer allocator.free(surviving_bytes);
+    try std.testing.expectEqualStrings(contents[2], surviving_bytes);
+    try std.testing.expect(!std.mem.eql(u8, survivor, state.attachment_paths[2]));
+    for ([_]usize{ 0, 2 }, [_]usize{ 0, 3 }) |slot, source_index| {
+        const bytes = try std.fs.cwd().readFileAlloc(allocator, state.attachment_paths[slot], 1024);
+        defer allocator.free(bytes);
+        try std.testing.expectEqualStrings(contents[source_index], bytes);
+    }
+    for (sources, contents) |source, content| {
+        const bytes = try std.fs.cwd().readFileAlloc(allocator, source, 1024);
+        defer allocator.free(bytes);
+        try std.testing.expectEqualStrings(content, bytes);
+    }
+}
+
+test "attachment staging after template restoration preserves existing and legacy files" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    try tmp.dir.writeFile(.{ .sub_path = "source.txt", .data = "first attachment" });
+    const source = try tmp.dir.realpathAlloc(allocator, "source.txt");
+    defer allocator.free(source);
+    var state = DialogState{ .allocator = allocator, .kind = .node, .parent = null };
+    state.attachment_dir = try std.fs.path.join(allocator, &.{ root, "attachments" });
+    defer freeAttachmentState(&state);
+    state.attachment_draft_id = "11111111-1111-4111-8111-111111111111";
+    state.values[1] = @constCast("turnBased");
+    state.values[4] = @constCast("review [image #1]");
+    try appendAttachment(&state, source);
+    var handoff = try buildNodeDraftUnchecked(allocator, &state, .{ .title = "" });
+    defer handoff.deinit(allocator);
+    try tmp.dir.writeFile(.{ .sub_path = "attachments\\attachment-2.txt", .data = "legacy staged bytes" });
+    var reopened = DialogState{ .allocator = allocator, .kind = .node, .parent = null };
+    reopened.attachment_dir = try allocator.dupe(u8, state.attachment_dir);
+    defer freeAttachmentState(&reopened);
+    reopened.attachment_draft_id = handoff.node_id;
+    try restoreStagedAttachments(&reopened, handoff);
+    try tmp.dir.writeFile(.{ .sub_path = "source.txt", .data = "next attachment" });
+    try appendAttachment(&reopened, source);
+    try std.testing.expectEqual(@as(usize, 2), reopened.attachment_count);
+    try std.testing.expectEqualStrings(handoff.attachment_paths[0], reopened.attachment_paths[0]);
+    try std.testing.expectEqualStrings(handoff.attachment_ids[0], reopened.attachment_ids[0]);
+    try std.testing.expect(!std.mem.eql(u8, reopened.attachment_paths[0], reopened.attachment_paths[1]));
+    for (reopened.attachment_paths[0..2], [_][]const u8{ "first attachment", "next attachment" }) |path, expected| {
+        const bytes = try std.fs.cwd().readFileAlloc(allocator, path, 1024);
+        defer allocator.free(bytes);
+        try std.testing.expectEqualStrings(expected, bytes);
+    }
+    const legacy = try tmp.dir.readFileAlloc(allocator, "attachments\\attachment-2.txt", 1024);
+    defer allocator.free(legacy);
+    try std.testing.expectEqualStrings("legacy staged bytes", legacy);
+}
+
+test "attachment staging rejects invalid sources and an unwritable destination without changing prior attachments" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    try tmp.dir.writeFile(.{ .sub_path = "source.txt", .data = "retained source" });
+    try tmp.dir.writeFile(.{ .sub_path = "empty.txt", .data = "" });
+    try tmp.dir.writeFile(.{ .sub_path = "blocked", .data = "not a directory" });
+    const source = try tmp.dir.realpathAlloc(allocator, "source.txt");
+    defer allocator.free(source);
+    var state = DialogState{ .allocator = allocator, .kind = .node, .parent = null };
+    state.attachment_dir = try std.fs.path.join(allocator, &.{ root, "attachments" });
+    defer freeAttachmentState(&state);
+    try appendAttachment(&state, source);
+    const before = state;
+    const cases = [_]struct { name: []const u8, expected: DraftAttachments.IngestError }{
+        .{ .name = "unsupported.exe", .expected = error.UnsupportedFileType },
+        .{ .name = "missing.txt", .expected = error.SourceUnreadable },
+        .{ .name = "empty.txt", .expected = error.EmptyFile },
+    };
+    for (cases) |case| {
+        const path = try std.fs.path.join(allocator, &.{ root, case.name });
+        defer allocator.free(path);
+        try std.testing.expectError(case.expected, appendAttachment(&state, path));
+    }
+    {
+        state.attachment_dir = try std.fs.path.join(allocator, &.{ root, "blocked" });
+        defer {
+            allocator.free(state.attachment_dir);
+            state.attachment_dir = before.attachment_dir;
+        }
+        try std.testing.expectError(error.DestinationUnwritable, appendAttachment(&state, source));
+    }
+    try std.testing.expectEqual(before.attachment_count, state.attachment_count);
+    try std.testing.expectEqualStrings(before.attachment_paths[0], state.attachment_paths[0]);
+    try std.testing.expectEqualStrings(before.attachment_ids[0], state.attachment_ids[0]);
+    try std.testing.expectEqualStrings(before.attachment_names[0], state.attachment_names[0]);
+    for ([_][]const u8{ source, state.attachment_paths[0] }) |path| {
+        const bytes = try std.fs.cwd().readFileAlloc(allocator, path, 1024);
+        defer allocator.free(bytes);
+        try std.testing.expectEqualStrings("retained source", bytes);
+    }
+    const blocked = try tmp.dir.readFileAlloc(allocator, "blocked", 1024);
+    defer allocator.free(blocked);
+    try std.testing.expectEqualStrings("not a directory", blocked);
+    var directory = try tmp.dir.openDir("attachments", .{ .iterate = true });
+    defer directory.close();
+    var entries = directory.iterate();
+    var count: usize = 0;
+    while (try entries.next()) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 1), count);
+}
+
+test "attachment staging accepts eight slots and refuses a ninth before copying" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    try tmp.dir.writeFile(.{ .sub_path = "source.txt", .data = "bounded copy" });
+    const source = try tmp.dir.realpathAlloc(allocator, "source.txt");
+    defer allocator.free(source);
+    var state = DialogState{ .allocator = allocator, .kind = .node, .parent = null };
+    state.attachment_dir = try std.fs.path.join(allocator, &.{ root, "attachments" });
+    defer freeAttachmentState(&state);
+    for (0..DraftAttachments.max_attachments) |_| try appendAttachment(&state, source);
+    try std.testing.expectError(error.TooManyAttachments, appendAttachment(&state, source));
+    try std.testing.expectEqual(@as(usize, 8), state.attachment_count);
+    for (state.attachment_paths[0..state.attachment_count], 0..) |path, index| {
+        for (state.attachment_paths[0..index]) |previous| try std.testing.expect(!std.mem.eql(u8, previous, path));
+        const bytes = try std.fs.cwd().readFileAlloc(allocator, path, 1024);
+        defer allocator.free(bytes);
+        try std.testing.expectEqualStrings("bounded copy", bytes);
+    }
+    var directory = try tmp.dir.openDir("attachments", .{ .iterate = true });
+    defer directory.close();
+    var entries = directory.iterate();
+    var count: usize = 0;
+    while (try entries.next()) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 8), count);
+}
+
+test "attachment staging allocation failures preserve prior state and leave no new copy" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const backing = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const root = try tmp.dir.realpathAlloc(backing, ".");
+            defer backing.free(root);
+            try tmp.dir.writeFile(.{ .sub_path = "source.txt", .data = "unchanged source" });
+            const source = try tmp.dir.realpathAlloc(backing, "source.txt");
+            defer backing.free(source);
+            var state = DialogState{ .allocator = backing, .kind = .node, .parent = null };
+            state.attachment_dir = try std.fs.path.join(backing, &.{ root, "attachments" });
+            defer {
+                if (state.attachment_count == 2) {
+                    state.allocator = allocator;
+                    removeAttachmentAt(&state, 1);
+                }
+                state.allocator = backing;
+                freeAttachmentState(&state);
+            }
+            try appendAttachment(&state, source);
+            const expected_path = try backing.dupe(u8, state.attachment_paths[0]);
+            defer backing.free(expected_path);
+            const expected_id = try backing.dupe(u8, state.attachment_ids[0]);
+            defer backing.free(expected_id);
+            state.allocator = allocator;
+            const result = appendAttachment(&state, source);
+            state.allocator = backing;
+            try std.testing.expectEqualStrings(expected_path, state.attachment_paths[0]);
+            try std.testing.expectEqualStrings(expected_id, state.attachment_ids[0]);
+            try std.testing.expectEqualStrings("source.txt", state.attachment_names[0]);
+            for ([_][]const u8{ source, expected_path }) |path| {
+                const bytes = try std.fs.cwd().readFileAlloc(backing, path, 1024);
+                defer backing.free(bytes);
+                try std.testing.expectEqualStrings("unchanged source", bytes);
+            }
+            var directory = try tmp.dir.openDir("attachments", .{ .iterate = true });
+            defer directory.close();
+            var entries = directory.iterate();
+            var count: usize = 0;
+            while (try entries.next()) |_| count += 1;
+            if (result) |_| {
+                try std.testing.expectEqual(@as(usize, 2), state.attachment_count);
+                try std.testing.expectEqual(@as(usize, 2), count);
+                const bytes = try std.fs.cwd().readFileAlloc(backing, state.attachment_paths[1], 1024);
+                defer backing.free(bytes);
+                try std.testing.expectEqualStrings("unchanged source", bytes);
+            } else |err| {
+                try std.testing.expectEqual(@as(usize, 1), state.attachment_count);
+                try std.testing.expectEqual(@as(usize, 1), count);
+                return err;
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "attachment staging failures retain explicit user-facing reasons" {
+    try std.testing.expectEqualStrings(
+        "An attachment already uses that storage path. No file was replaced.",
+        attachmentErrorReason(error.DestinationExists),
+    );
+    try std.testing.expectEqualStrings(
+        "Unable to save the attachment or remove its incomplete copy.",
+        attachmentErrorReason(error.DestinationWriteAndCleanupFailed),
+    );
+    try std.testing.expectEqualStrings(
+        "Out of memory while attaching the file.",
+        attachmentErrorReason(error.OutOfMemory),
+    );
 }
 
 test "conditional graph fields and validation follow selected types" {
