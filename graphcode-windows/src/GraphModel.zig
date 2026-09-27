@@ -3661,3 +3661,43 @@ test "decoder ownership attention eviction lifecycle removal discards obsolete l
 test "decoder ownership attention eviction restore reconciliation discards obsolete lists on allocation failure" {
     try checkAttentionEvictionFailures(true);
 }
+
+fn checkNestedEdgeFallbackOwnership(allocator: std.mem.Allocator, summary: *const GraphSummary) !void {
+    var model = Model.init(allocator);
+    defer model.deinit();
+    model.open_composite_id = try allocator.dupe(u8, summary.nodes.items[0].id);
+    var snapshot = try model.prepareLegacySnapshot(summary, 0, "child");
+    defer snapshot.deinit(allocator);
+    // No allocation follows the catch boundary, so a later OOM cannot mask
+    // an allocation failure swallowed by the malformed-data fallback.
+    try std.testing.expect(snapshot.clear_composite);
+    try std.testing.expect(snapshot.composite_title == null);
+    try expectGraphDataEqual(summary.*, snapshot.graph orelse return error.TestExpectedGraph);
+}
+
+test "decoder ownership nested edge fallback propagates its own OutOfMemory" {
+    const allocator = std.testing.allocator;
+    const errors = [_]anyerror{ error.SyntaxError, error.MalformedEdge, error.DuplicateField };
+    for (ownershipMalformedCompositeEdgeFrames, errors) |frame, expected| {
+        var graph = try decodeSubgraph(allocator, .{
+            .path = @constCast("C:\\owned\\graph"),
+            .name = @constCast("Owned \"graph\""),
+        }, frame);
+        defer freeGraph(allocator, &graph);
+        try std.testing.expectEqual(@as(usize, 1), graph.nodes.items.len);
+        try checkMalformedSubgraphOwnership(allocator, graph.nodes.items[0].subgraph_json, expected);
+        const summary = GraphSummary{ .project = graph.project, .nodes = graph.nodes, .edges = graph.edges };
+
+        var counting = std.testing.FailingAllocator.init(allocator, .{});
+        try checkNestedEdgeFallbackOwnership(counting.allocator(), &summary);
+        try std.testing.expect(counting.alloc_index > 0);
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = counting.alloc_index - 1 });
+        try std.testing.expectError(error.OutOfMemory, checkNestedEdgeFallbackOwnership(failing.allocator(), &summary));
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        std.debug.print("nested edge fallback {s}: final allocation {d}/{d} -> OutOfMemory\n", .{
+            @errorName(expected), counting.alloc_index - 1, counting.alloc_index,
+        });
+        try checkOwnershipAllocationFailures(checkNestedEdgeFallbackOwnership, .{&summary});
+    }
+}
