@@ -4,6 +4,10 @@
       "beta": 100,
       "stable": 100
     },
+    "codespaceMultiplex": {
+      "beta": 100,
+      "stable": 0
+    },
     "mailroom": {
       "beta": 100,
       "stable": 100

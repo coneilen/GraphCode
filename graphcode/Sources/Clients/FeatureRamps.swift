@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import GraphcodeKit
 
 /// Staged rollouts ("ramps") with no backend: one static JSON on the site,
 /// `https://graphcode.app/ramps.json`, shaped
@@ -24,13 +25,17 @@ enum FeatureRamps {
   enum Feature: String {
     case codespaces
     case mailroom
+    /// Codespace dials reusing one connection (issue #480). Beta-only until it has run
+    /// against a live codespace; `graphcoded` reads it through
+    /// `publishCodespaceMultiplexFlag`, having no ramps of its own.
+    case codespaceMultiplex
 
     /// The key this feature shipped under before it was renamed. ramps.json is fetched
     /// from graphcode.app, so a build that knew only the new spelling would stop seeing
     /// the kill switch the moment it shipped ahead of the deployed file.
     var legacyRawValue: String? {
       switch self {
-      case .codespaces: return nil
+      case .codespaces, .codespaceMultiplex: return nil
       case .mailroom: return "artifactory"
       }
     }
@@ -43,6 +48,7 @@ enum FeatureRamps {
       switch self {
       case .codespaces: return ["beta": 100, "stable": 100]
       case .mailroom: return ["beta": 100, "stable": 100]
+      case .codespaceMultiplex: return ["beta": 100, "stable": 0]
       }
     }
   }
@@ -88,6 +94,7 @@ enum FeatureRamps {
   /// change is seen next launch, not whenever the cache expires; failures keep the
   /// last good configuration.
   static func refresh() async {
+    defer { publishCodespaceMultiplexFlag(enabled: isEnabled(.codespaceMultiplex)) }
     var request = URLRequest(url: rampsURL)
     request.cachePolicy = .reloadIgnoringLocalCacheData
     request.timeoutInterval = 10
@@ -96,6 +103,21 @@ enum FeatureRamps {
       (try? JSONDecoder().decode(Configuration.self, from: data)) != nil
     else { return }
     UserDefaults.standard.set(data, forKey: configurationDefaultsKey)
+  }
+
+  /// Mirrors the ramp into the file `graphcoded` checks before reusing a codespace
+  /// connection. The daemon reads it on every dial, so turning the ramp off takes effect
+  /// the next time the app launches, without a daemon restart.
+  static func publishCodespaceMultiplexFlag(
+    enabled: Bool, flag: URL = RemoteProjectLocation.codespaceMultiplexFlag
+  ) {
+    if enabled {
+      try? FileManager.default.createDirectory(
+        at: flag.deletingLastPathComponent(), withIntermediateDirectories: true)
+      FileManager.default.createFile(atPath: flag.path, contents: nil)
+    } else {
+      try? FileManager.default.removeItem(at: flag)
+    }
   }
 
   static func cachedConfiguration() -> Configuration? {
