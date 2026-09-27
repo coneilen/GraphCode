@@ -136,6 +136,10 @@ pub const Surface = struct {
     terminal_buffer: [16 * 1024]u8 = undefined,
     terminal_buffer_len: usize = 0,
     cells: []c.winghostty_terminal_cell = &.{},
+    last_redraw_failure: ?struct {
+        surface: *c.winghostty_surface,
+        failure: RedrawFailure,
+    } = null,
     terminal_x: usize = 0,
     terminal_y: usize = 0,
     parser: ParserState = .normal,
@@ -925,6 +929,10 @@ pub const Workspace = struct {
     }
 
     pub fn focus(self: *Workspace, index: usize) void {
+        self.focusWith(index, c.winghostty_surface_set_focus);
+    }
+
+    fn focusWith(self: *Workspace, index: usize, comptime set_focus: anytype) void {
         if (index >= self.surfaces.len) return;
         if (self.syncing_focus or self.syncing_topology) return;
         self.syncing_focus = true;
@@ -932,11 +940,33 @@ pub const Workspace = struct {
         self.active_surface = index;
         for (&self.surfaces, 0..) |*slot, other_index| {
             if (slot.surface) |surface| {
-                _ = c.winghostty_surface_set_focus(surface, if (index == other_index) 1 else 0);
+                _ = set_focus(surface, if (index == other_index) 1 else 0);
             }
 
         }
         self.persistFocusedSurface(index);
+    }
+
+    pub fn focusRestoredPane(self: *Workspace) !void {
+        try self.focusRestoredPaneWith(c.winghostty_surface_set_focus);
+    }
+
+    fn focusRestoredPaneWith(self: *Workspace, comptime set_focus: anytype) !void {
+        if (self.collapsed or self.layout.tabs.items.len == 0) return;
+        const tab = self.layout.selectedConst() orelse return error.InvalidSelectedTab;
+        if (tab.focused_pane >= tab.panes.items.len) return error.InvalidFocusedPane;
+        const id = tab.panes.items[tab.focused_pane].id;
+        var target: ?usize = null;
+        var any_live_surface = false;
+        for (&self.surfaces, 0..) |*slot, index| {
+            if (slot.surface == null or slot.destroying or slot.destroyed) continue;
+            any_live_surface = true;
+            if (!surfaceIdentityMatches(slot, self.project_path, id)) continue;
+            if (target != null) return error.AmbiguousFocusedSurface;
+            target = index;
+        }
+        if (!any_live_surface) return;
+        self.focusWith(target orelse return error.FocusedSurfaceUnavailable, set_focus);
     }
 
     fn persistFocusedSurface(self: *Workspace, index: usize) void {
@@ -1562,12 +1592,364 @@ fn onNotification(user_data: ?*anyopaque, surface: *c.winghostty_surface, notifi
 }
 
 fn onRedraw(user_data: ?*anyopaque, surface: *c.winghostty_surface) callconv(.c) void {
+    redrawWith(NativeRedrawApi, user_data, surface);
+}
+
+const NativeRedrawApi = struct {
+    const makeCurrent = c.winghostty_surface_make_current;
+    const render = c.winghostty_surface_render;
+    const clearCurrent = c.winghostty_surface_clear_current;
+
+    fn reportFailure(index: usize, failure: RedrawFailure) void {
+        std.log.warn("Terminal redraw failed: slot={d} stage={s} result={d} cleanup_result={d}", .{
+            index, @tagName(failure.stage), failure.result, failure.cleanup_result,
+        });
+    }
+};
+
+const RedrawFailure = struct {
+    stage: enum { make_current, render, clear_current },
+    result: c.winghostty_result,
+    cleanup_result: c.winghostty_result = c.WINGHOSTTY_OK,
+};
+
+fn redrawWith(comptime Api: type, user_data: ?*anyopaque, surface: *c.winghostty_surface) void {
     const workspace = workspaceFromUserData(user_data) orelse return;
-    _ = callbackSlot(workspace, surface) orelse return;
-    if (c.winghostty_surface_make_current(surface) != c.WINGHOSTTY_OK) return;
-    _ = c.winghostty_surface_render(surface);
-    _ = c.winghostty_surface_present(surface);
-    _ = c.winghostty_surface_clear_current(surface);
+    const slot = callbackSlot(workspace, surface) orelse return;
+    const index = surfaceIndex(workspace, surface) orelse return;
+    const failure = renderWith(Api, surface);
+    const still_live = callbackSlot(workspace, surface) == slot;
+    if (failure) |value| {
+        if (still_live) {
+            if (slot.last_redraw_failure) |previous| {
+                if (previous.surface == surface and std.meta.eql(previous.failure, value)) return;
+            }
+            slot.last_redraw_failure = .{ .surface = surface, .failure = value };
+        }
+        Api.reportFailure(index, value);
+    } else if (still_live) {
+        slot.last_redraw_failure = null;
+    }
+}
+
+fn renderWith(comptime Api: type, surface: *c.winghostty_surface) ?RedrawFailure {
+    const binding = Api.makeCurrent(surface);
+    if (binding != c.WINGHOSTTY_OK) return .{ .stage = .make_current, .result = binding };
+
+    // Winghostty f5abc059 render already swaps; a separate present would swap again.
+    const rendered = Api.render(surface);
+    const cleared = Api.clearCurrent(surface);
+    if (rendered != c.WINGHOSTTY_OK) return .{
+        .stage = .render,
+        .result = rendered,
+        .cleanup_result = cleared,
+    };
+    if (cleared != c.WINGHOSTTY_OK) return .{ .stage = .clear_current, .result = cleared };
+    return null;
+}
+
+const RedrawTestApi = struct {
+    const Operation = enum { make_current, render, present, clear_current };
+    var calls: [4]Operation = undefined;
+    var call_count: usize = 0;
+    var swap_requests: usize = 0;
+    var target: *c.winghostty_surface = undefined;
+    var bound: ?*c.winghostty_surface = null;
+    var binding_result: c.winghostty_result = c.WINGHOSTTY_OK;
+    var render_result: c.winghostty_result = c.WINGHOSTTY_OK;
+    var clear_result: c.winghostty_result = c.WINGHOSTTY_OK;
+    var reports: usize = 0;
+    var reported_index: usize = 0;
+    var reported_failure: ?RedrawFailure = null;
+    var invalidate_on_render: ?*Surface = null;
+    var replacement_on_render: ?*c.winghostty_surface = null;
+
+    fn reset(surface: *c.winghostty_surface) void {
+        call_count = 0;
+        swap_requests = 0;
+        target = surface;
+        bound = null;
+        binding_result = c.WINGHOSTTY_OK;
+        render_result = c.WINGHOSTTY_OK;
+        clear_result = c.WINGHOSTTY_OK;
+        reports = 0;
+        reported_index = 0;
+        reported_failure = null;
+        invalidate_on_render = null;
+        replacement_on_render = null;
+    }
+
+    fn record(operation: Operation, surface: *c.winghostty_surface) void {
+        std.debug.assert(surface == target);
+        std.debug.assert(call_count < calls.len);
+        calls[call_count] = operation;
+        call_count += 1;
+    }
+
+    fn makeCurrent(surface: *c.winghostty_surface) c.winghostty_result {
+        record(.make_current, surface);
+        if (binding_result == c.WINGHOSTTY_OK) bound = surface;
+        return binding_result;
+    }
+
+    fn render(surface: *c.winghostty_surface) c.winghostty_result {
+        record(.render, surface);
+        std.debug.assert(bound == surface);
+        if (invalidate_on_render) |slot| {
+            if (replacement_on_render) |replacement| {
+                slot.surface = replacement;
+            } else {
+                slot.destroying = true;
+            }
+        }
+        // The exact pinned provider's render already calls SwapBuffers.
+        if (render_result == c.WINGHOSTTY_OK or render_result == c.WINGHOSTTY_PRESENT_ERROR) swap_requests += 1;
+        return render_result;
+    }
+
+    fn present(surface: *c.winghostty_surface) c.winghostty_result {
+        record(.present, surface);
+        swap_requests += 1;
+        return c.WINGHOSTTY_OK;
+    }
+
+    fn clearCurrent(surface: *c.winghostty_surface) c.winghostty_result {
+        record(.clear_current, surface);
+        std.debug.assert(bound == surface);
+        if (clear_result == c.WINGHOSTTY_OK) bound = null;
+        return clear_result;
+    }
+
+    fn reportFailure(index: usize, failure: RedrawFailure) void {
+        reports += 1;
+        reported_index = index;
+        reported_failure = failure;
+    }
+};
+
+test "terminal redraw requests exactly one presentation" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    const surface: *c.winghostty_surface = @ptrFromInt(0x1000);
+    workspace.surfaces[0].surface = surface;
+    RedrawTestApi.reset(surface);
+
+    redrawWith(RedrawTestApi, @ptrCast(&workspace), surface);
+
+    try std.testing.expectEqual(@as(usize, 1), RedrawTestApi.swap_requests);
+    try std.testing.expectEqualSlices(RedrawTestApi.Operation, &.{
+        .make_current, .render, .clear_current,
+    }, RedrawTestApi.calls[0..RedrawTestApi.call_count]);
+    try std.testing.expectEqual(@as(usize, 0), RedrawTestApi.reports);
+    try std.testing.expect(workspace.surfaces[0].last_redraw_failure == null);
+    try std.testing.expect(RedrawTestApi.bound == null);
+}
+
+test "terminal redraw retains operation and cleanup failure matrix" {
+    const Case = struct {
+        binding: c.winghostty_result = c.WINGHOSTTY_OK,
+        render: c.winghostty_result = c.WINGHOSTTY_OK,
+        clear: c.winghostty_result = c.WINGHOSTTY_OK,
+        swaps: usize = 0,
+        failure: RedrawFailure,
+    };
+    const cases = [_]Case{
+        .{
+            .binding = c.WINGHOSTTY_CONTEXT_ERROR,
+            .failure = .{ .stage = .make_current, .result = c.WINGHOSTTY_CONTEXT_ERROR },
+        },
+        .{
+            .binding = c.WINGHOSTTY_WRONG_THREAD,
+            .failure = .{ .stage = .make_current, .result = c.WINGHOSTTY_WRONG_THREAD },
+        },
+        .{
+            .render = c.WINGHOSTTY_RENDERER_ERROR,
+            .failure = .{ .stage = .render, .result = c.WINGHOSTTY_RENDERER_ERROR },
+        },
+        .{
+            .render = c.WINGHOSTTY_PRESENT_ERROR,
+            .swaps = 1,
+            .failure = .{ .stage = .render, .result = c.WINGHOSTTY_PRESENT_ERROR },
+        },
+        .{
+            .clear = c.WINGHOSTTY_CONTEXT_ERROR,
+            .swaps = 1,
+            .failure = .{ .stage = .clear_current, .result = c.WINGHOSTTY_CONTEXT_ERROR },
+        },
+        .{
+            .render = c.WINGHOSTTY_RENDERER_ERROR,
+            .clear = c.WINGHOSTTY_WRONG_THREAD,
+            .failure = .{
+                .stage = .render,
+                .result = c.WINGHOSTTY_RENDERER_ERROR,
+                .cleanup_result = c.WINGHOSTTY_WRONG_THREAD,
+            },
+        },
+        .{
+            .render = c.WINGHOSTTY_SURFACE_INVALIDATED,
+            .clear = c.WINGHOSTTY_SURFACE_INVALIDATED,
+            .failure = .{
+                .stage = .render,
+                .result = c.WINGHOSTTY_SURFACE_INVALIDATED,
+                .cleanup_result = c.WINGHOSTTY_SURFACE_INVALIDATED,
+            },
+        },
+        .{
+            .render = c.WINGHOSTTY_SHUTTING_DOWN,
+            .failure = .{ .stage = .render, .result = c.WINGHOSTTY_SHUTTING_DOWN },
+        },
+    };
+    for (cases) |case| {
+        var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+        defer workspace.layout.deinit();
+        const surface: *c.winghostty_surface = @ptrFromInt(0x1000);
+        const other: *c.winghostty_surface = @ptrFromInt(0x2000);
+        workspace.surfaces[3].surface = surface;
+        RedrawTestApi.reset(surface);
+        RedrawTestApi.bound = other;
+        RedrawTestApi.binding_result = case.binding;
+        RedrawTestApi.render_result = case.render;
+        RedrawTestApi.clear_result = case.clear;
+
+        redrawWith(RedrawTestApi, @ptrCast(&workspace), surface);
+
+        try std.testing.expectEqual(case.swaps, RedrawTestApi.swap_requests);
+        const expected: []const RedrawTestApi.Operation = if (case.binding != c.WINGHOSTTY_OK)
+            &.{.make_current}
+        else
+            &.{ .make_current, .render, .clear_current };
+        try std.testing.expectEqualSlices(RedrawTestApi.Operation, expected, RedrawTestApi.calls[0..RedrawTestApi.call_count]);
+        try std.testing.expectEqualDeep(case.failure, RedrawTestApi.reported_failure.?);
+        try std.testing.expectEqualDeep(case.failure, workspace.surfaces[3].last_redraw_failure.?.failure);
+        try std.testing.expectEqual(@as(usize, 3), RedrawTestApi.reported_index);
+        try std.testing.expectEqual(@as(usize, 1), RedrawTestApi.reports);
+        if (case.binding != c.WINGHOSTTY_OK) {
+            try std.testing.expectEqual(other, RedrawTestApi.bound.?);
+        } else if (case.clear == c.WINGHOSTTY_OK) {
+            try std.testing.expect(RedrawTestApi.bound == null);
+        } else {
+            try std.testing.expectEqual(surface, RedrawTestApi.bound.?);
+        }
+    }
+}
+
+test "terminal redraw lifetime guards reject without native operations" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    const surface: *c.winghostty_surface = @ptrFromInt(0x1000);
+    RedrawTestApi.reset(surface);
+    redrawWith(RedrawTestApi, null, surface);
+    redrawWith(RedrawTestApi, @ptrCast(&workspace), surface);
+    workspace.surfaces[0].surface = surface;
+    workspace.surfaces[0].destroying = true;
+    redrawWith(RedrawTestApi, @ptrCast(&workspace), surface);
+    workspace.surfaces[0].destroying = false;
+    workspace.surfaces[0].destroyed = true;
+    redrawWith(RedrawTestApi, @ptrCast(&workspace), surface);
+    try std.testing.expectEqual(@as(usize, 0), RedrawTestApi.call_count);
+    try std.testing.expectEqual(@as(usize, 0), RedrawTestApi.reports);
+}
+
+test "terminal redraw still clears when the admitted surface starts teardown" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    const surface: *c.winghostty_surface = @ptrFromInt(0x1000);
+    workspace.surfaces[0].surface = surface;
+    RedrawTestApi.reset(surface);
+    RedrawTestApi.invalidate_on_render = &workspace.surfaces[0];
+    RedrawTestApi.render_result = c.WINGHOSTTY_SHUTTING_DOWN;
+
+    redrawWith(RedrawTestApi, @ptrCast(&workspace), surface);
+
+    try std.testing.expectEqualSlices(RedrawTestApi.Operation, &.{
+        .make_current, .render, .clear_current,
+    }, RedrawTestApi.calls[0..RedrawTestApi.call_count]);
+    try std.testing.expect(RedrawTestApi.bound == null);
+    try std.testing.expect(workspace.surfaces[0].last_redraw_failure == null);
+    try std.testing.expectEqual(c.WINGHOSTTY_SHUTTING_DOWN, RedrawTestApi.reported_failure.?.result);
+}
+
+test "terminal redraw diagnostics are bounded per surface and recover independently" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    const first: *c.winghostty_surface = @ptrFromInt(0x1000);
+    const second: *c.winghostty_surface = @ptrFromInt(0x2000);
+    const replacement: *c.winghostty_surface = @ptrFromInt(0x3000);
+    workspace.surfaces[0].surface = first;
+    workspace.surfaces[1].surface = second;
+    workspace.input_error_message = "retained input status";
+    workspace.render_error = c.WINGHOSTTY_OUT_OF_MEMORY;
+    workspace.surfaces[0].output_events = 7;
+    workspace.surfaces[0].terminal_buffer_len = 3;
+    workspace.surfaces[0].parser = .csi;
+
+    for (0..2) |iteration| {
+        RedrawTestApi.reset(first);
+        RedrawTestApi.render_result = c.WINGHOSTTY_RENDERER_ERROR;
+        redrawWith(RedrawTestApi, @ptrCast(&workspace), first);
+        try std.testing.expectEqual(@as(usize, if (iteration == 0) 1 else 0), RedrawTestApi.reports);
+    }
+    RedrawTestApi.reset(second);
+    RedrawTestApi.render_result = c.WINGHOSTTY_RENDERER_ERROR;
+    redrawWith(RedrawTestApi, @ptrCast(&workspace), second);
+    try std.testing.expectEqual(@as(usize, 1), RedrawTestApi.reports);
+    try std.testing.expectEqual(@as(usize, 1), RedrawTestApi.reported_index);
+
+    RedrawTestApi.reset(first);
+    RedrawTestApi.render_result = c.WINGHOSTTY_RENDERER_ERROR;
+    RedrawTestApi.clear_result = c.WINGHOSTTY_WRONG_THREAD;
+    redrawWith(RedrawTestApi, @ptrCast(&workspace), first);
+    try std.testing.expectEqual(@as(usize, 1), RedrawTestApi.reports);
+
+    RedrawTestApi.reset(first);
+    redrawWith(RedrawTestApi, @ptrCast(&workspace), first);
+    try std.testing.expect(workspace.surfaces[0].last_redraw_failure == null);
+    try std.testing.expect(workspace.surfaces[1].last_redraw_failure != null);
+    RedrawTestApi.reset(first);
+    RedrawTestApi.render_result = c.WINGHOSTTY_RENDERER_ERROR;
+    redrawWith(RedrawTestApi, @ptrCast(&workspace), first);
+    try std.testing.expectEqual(@as(usize, 1), RedrawTestApi.reports);
+
+    workspace.surfaces[0].surface = replacement;
+    RedrawTestApi.reset(replacement);
+    RedrawTestApi.render_result = c.WINGHOSTTY_RENDERER_ERROR;
+    redrawWith(RedrawTestApi, @ptrCast(&workspace), replacement);
+    try std.testing.expectEqual(@as(usize, 1), RedrawTestApi.reports);
+    try std.testing.expectEqual(replacement, workspace.surfaces[0].last_redraw_failure.?.surface);
+    try std.testing.expectEqualStrings("retained input status", workspace.input_error_message);
+    try std.testing.expectEqual(c.WINGHOSTTY_OUT_OF_MEMORY, workspace.render_error);
+    try std.testing.expectEqual(@as(usize, 7), workspace.surfaces[0].output_events);
+    try std.testing.expectEqual(@as(usize, 3), workspace.surfaces[0].terminal_buffer_len);
+    try std.testing.expectEqual(ParserState.csi, workspace.surfaces[0].parser);
+}
+
+test "terminal redraw does not overwrite a replacement surface diagnostic" {
+    for ([_]c.winghostty_result{ c.WINGHOSTTY_OK, c.WINGHOSTTY_RENDERER_ERROR }) |result| {
+        var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+        defer workspace.layout.deinit();
+        const surface: *c.winghostty_surface = @ptrFromInt(0x1000);
+        const replacement: *c.winghostty_surface = @ptrFromInt(0x2000);
+        const replacement_failure = RedrawFailure{ .stage = .make_current, .result = c.WINGHOSTTY_CONTEXT_ERROR };
+        workspace.surfaces[0].surface = surface;
+        workspace.surfaces[0].last_redraw_failure = .{
+            .surface = replacement,
+            .failure = replacement_failure,
+        };
+        RedrawTestApi.reset(surface);
+        RedrawTestApi.render_result = result;
+        RedrawTestApi.invalidate_on_render = &workspace.surfaces[0];
+        RedrawTestApi.replacement_on_render = replacement;
+
+        redrawWith(RedrawTestApi, @ptrCast(&workspace), surface);
+
+        try std.testing.expectEqualSlices(RedrawTestApi.Operation, &.{
+            .make_current, .render, .clear_current,
+        }, RedrawTestApi.calls[0..RedrawTestApi.call_count]);
+        try std.testing.expectEqual(replacement, workspace.surfaces[0].surface.?);
+        try std.testing.expectEqualDeep(replacement_failure, workspace.surfaces[0].last_redraw_failure.?.failure);
+        try std.testing.expectEqual(replacement, workspace.surfaces[0].last_redraw_failure.?.surface);
+        try std.testing.expect(RedrawTestApi.bound == null);
+    }
 }
 
 fn onFocus(user_data: ?*anyopaque, surface: *c.winghostty_surface, focused: u8) callconv(.c) void {
@@ -1860,6 +2242,131 @@ fn minimalWorkspaceForOptionsTest(allocator: std.mem.Allocator) !Workspace {
         .layout_path = @constCast(""),
         .project_key = @constCast(""),
     };
+}
+
+test "restored workspace focus follows selected tab and focused pane rather than slot zero" {
+    const NativeFocus = struct {
+        var focused: ?*c.winghostty_surface = null;
+        fn set(surface: ?*c.winghostty_surface, focused_: u8) c.winghostty_result {
+            if (focused_ != 0) focused = surface;
+            return c.WINGHOSTTY_OK;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const path = try std.fs.path.join(allocator, &.{ directory, "layout.json" });
+    defer allocator.free(path);
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+    workspace.layout_path = path;
+    workspace.project_path = @constCast("focus-project");
+    try workspace.layout.addTab("loop", true);
+    try workspace.layout.addTab("left", false);
+    try workspace.layout.splitFocused(.horizontal, "right");
+    try workspace.layout.save(path);
+    const restored = try WorkspaceLayout.Layout.load(allocator, path, workspace.layout.project_key);
+    workspace.layout.deinit();
+    workspace.layout = restored;
+    // Supplied native handles/focus callback: layout selection and restoration are real.
+    for ([_]usize{ 0, 3, 7 }, [_][]const u8{ "loop", "left", "right" }) |index, id| {
+        workspace.surfaces[index] = .{
+            .surface = @ptrFromInt((index + 1) * 0x1000),
+            .session_name = @constCast(id),
+            .project_path = workspace.project_path,
+        };
+    }
+    workspace.active_surface = 0;
+    NativeFocus.focused = null;
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try std.testing.expectEqual(workspace.surfaces[7].surface, NativeFocus.focused);
+    try std.testing.expectEqual(@as(usize, 7), workspace.active_surface);
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.selected_tab);
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.selected().?.focused_pane);
+    try std.testing.expectEqual(@as(usize, 2), workspace.layout.tabs.items.len);
+    try std.testing.expect(workspace.paneIndex("loop") == null);
+
+    var persisted = try WorkspaceLayout.Layout.load(allocator, path, workspace.layout.project_key);
+    defer persisted.deinit();
+    try std.testing.expectEqual(@as(usize, 1), persisted.selected_tab);
+    try std.testing.expectEqual(@as(usize, 1), persisted.selected().?.focused_pane);
+    try std.testing.expectEqualStrings("right", persisted.selected().?.panes.items[1].id);
+    workspace.active_surface = 3;
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try std.testing.expectEqual(workspace.surfaces[7].surface, NativeFocus.focused);
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.selected().?.focused_pane);
+
+    workspace.layout.selected().?.focused_pane = 0;
+    workspace.active_surface = 7;
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try std.testing.expectEqual(workspace.surfaces[3].surface, NativeFocus.focused);
+    try std.testing.expectEqual(@as(usize, 3), workspace.active_surface);
+    try workspace.layout.selectTab(0);
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try std.testing.expectEqual(workspace.surfaces[0].surface, NativeFocus.focused);
+    try std.testing.expectEqual(@as(usize, 0), workspace.active_surface);
+    try workspace.layout.selectTab(1);
+    workspace.focusWith(0, NativeFocus.set);
+    try std.testing.expectEqual(workspace.surfaces[0].surface, NativeFocus.focused);
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.selected_tab);
+    try std.testing.expectEqual(@as(usize, 0), workspace.layout.selected().?.focused_pane);
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try std.testing.expectEqual(workspace.surfaces[3].surface, NativeFocus.focused);
+}
+
+test "restored workspace focus refuses unavailable foreign or ambiguous selected surfaces" {
+    const NativeFocus = struct {
+        var calls: usize = 0;
+        fn set(_: ?*c.winghostty_surface, _: u8) c.winghostty_result {
+            calls += 1;
+            return c.WINGHOSTTY_OK;
+        }
+    };
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    workspace.project_path = @constCast("selected-project");
+    workspace.persisting_layout = true;
+    NativeFocus.calls = 0;
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try workspace.layout.addTab("first", true);
+    try workspace.layout.addTab("selected", false);
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    workspace.layout.selected_tab = 2;
+    try std.testing.expectError(error.InvalidSelectedTab, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.layout.selected_tab = 1;
+    workspace.surfaces[0] = .{
+        .surface = @ptrFromInt(0x1000),
+        .session_name = @constCast("first"),
+        .project_path = workspace.project_path,
+    };
+    try std.testing.expectError(error.FocusedSurfaceUnavailable, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.surfaces[5] = .{
+        .surface = @ptrFromInt(0x6000),
+        .session_name = @constCast("selected"),
+        .project_path = @constCast("foreign-project"),
+    };
+    try std.testing.expectError(error.FocusedSurfaceUnavailable, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.surfaces[5].project_path = workspace.project_path;
+    workspace.surfaces[5].destroying = true;
+    try std.testing.expectError(error.FocusedSurfaceUnavailable, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.surfaces[5].destroying = false;
+    workspace.surfaces[5].destroyed = true;
+    try std.testing.expectError(error.FocusedSurfaceUnavailable, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.surfaces[5].destroyed = false;
+    workspace.surfaces[6] = workspace.surfaces[5];
+    try std.testing.expectError(error.AmbiguousFocusedSurface, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.surfaces[6] = .{};
+    workspace.layout.selected().?.focused_pane = 1;
+    try std.testing.expectError(error.InvalidFocusedPane, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.layout.selected().?.focused_pane = 0;
+    workspace.collapsed = true;
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try std.testing.expectEqual(@as(usize, 0), NativeFocus.calls);
+    try std.testing.expectEqual(@as(usize, 0), workspace.active_surface);
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.selected_tab);
+    try std.testing.expectEqual(@as(usize, 0), workspace.layout.selected().?.focused_pane);
 }
 
 test "onDpiChanged callback adopts the surface's real reported dpi and font scale" {
