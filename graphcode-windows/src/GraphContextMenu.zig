@@ -168,7 +168,7 @@ pub const NodeMenuPlan = struct {
 
 pub fn nodeMenuPlan(node: NodeTarget) NodeMenuPlan {
     var plan = NodeMenuPlan{};
-    plan.add(.{ .id = ids.open_terminal, .text = "Open Terminal\tEnter" });
+    plan.add(.{ .id = ids.open_terminal, .text = "Open Terminal" });
     if (newChildNodeMenuItem(node)) |item| plan.add(item);
     if (node.unwired) {
         plan.add(.{ .id = ids.wire_node, .text = "Wire it up" });
@@ -181,7 +181,7 @@ pub fn nodeMenuPlan(node: NodeTarget) NodeMenuPlan {
         plan.add(.{ .id = ids.arm_composite, .text = "Arm Schedule", .enabled = node.can_arm });
         plan.add(.{});
     }
-    plan.add(.{ .id = ids.edit_node, .text = "Edit Details...\tCtrl+E" });
+    plan.add(.{ .id = ids.edit_node, .text = "Edit Details..." });
     plan.add(.{ .id = ids.save_node_template, .text = "Save as Template..." });
     if (node.follows_template) plan.add(.{ .id = ids.detach_template, .text = "Detach from Template" });
     plan.add(.{ .id = ids.rename_node, .text = "Rename...\tF2" });
@@ -372,7 +372,7 @@ test "custody child node menu plan preserves existing items when creation is una
             try std.testing.expectEqual(id, item.id);
             try std.testing.expectEqual(id != 5119 and id != 5108, item.enabled);
         }
-        try std.testing.expectEqualStrings("Open Terminal\tEnter", plan.items[0].text);
+        try std.testing.expectEqualStrings("Open Terminal", plan.items[0].text);
         try std.testing.expectEqualStrings("Delete Loop...\tDelete", plan.items[plan.len - 1].text);
     }
 }
@@ -402,6 +402,56 @@ test "resolved node menu hides Stop but retains rename and edit details" {
     try std.testing.expectEqual(@as(c.UINT, c.MF_ENABLED), c.GetMenuState(menu, ids.edit_node, c.MF_BYCOMMAND));
     try std.testing.expectEqual(std.math.maxInt(c.UINT), c.GetMenuState(menu, ids.message_node, c.MF_BYCOMMAND));
     try std.testing.expectEqual(std.math.maxInt(c.UINT), c.GetMenuState(menu, ids.memo_node, c.MF_BYCOMMAND));
+}
+
+test "node shortcut captions keep Open Terminal without a standalone Enter binding" {
+    const InputRouter = @import("InputRouter.zig");
+    try std.testing.expectEqual(InputRouter.Action.none, InputRouter.keyAction(c.VK_RETURN, false, false));
+    try std.testing.expectEqual(InputRouter.HeaderKey.none, InputRouter.headerKey(c.VK_RETURN, false, false, false, false));
+    try std.testing.expectEqual(InputRouter.HeaderKey.activate, InputRouter.headerKey(c.VK_RETURN, false, false, false, true));
+    try std.testing.expectEqual(Action.open_terminal, actionForCommand(ids.open_terminal));
+
+    const targets = [_]NodeTarget{
+        .{ .project_path = "C:\\fixture", .id = "ordinary" },
+        .{ .project_path = "C:\\fixture", .id = "resolved", .resolved = true },
+        .{ .project_path = "C:\\fixture", .id = "composite", .composite = true },
+        .{ .project_path = "C:\\fixture", .id = "unwired", .unwired = true },
+    };
+    for (targets) |target| {
+        const menu = buildMenu(.{ .node = target }) orelse return error.MenuCreationFailed;
+        defer _ = c.DestroyMenu(menu);
+        try std.testing.expectEqual(@as(c.UINT, ids.open_terminal), c.GetMenuItemID(menu, 0));
+        try std.testing.expectEqual(@as(c.UINT, c.MF_ENABLED), c.GetMenuState(menu, ids.open_terminal, c.MF_BYCOMMAND));
+        var caption: [128]u16 = undefined;
+        const length = c.GetMenuStringW(menu, ids.open_terminal, &caption, caption.len, c.MF_BYCOMMAND);
+        try std.testing.expect(length > 0 and length < caption.len - 1);
+        try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("Open Terminal"), caption[0..@intCast(length)]);
+    }
+}
+
+test "node shortcut captions keep Edit Details without the rename Ctrl E hint" {
+    const InputRouter = @import("InputRouter.zig");
+    try std.testing.expectEqual(InputRouter.Action.edit_node, InputRouter.keyAction('E', true, false));
+    try std.testing.expectEqual(InputRouter.Action.rename_selected, InputRouter.keyAction(c.VK_F2, false, false));
+    try std.testing.expectEqual(Action.edit_node, actionForCommand(ids.edit_node));
+    try std.testing.expectEqual(Action.rename_node, actionForCommand(ids.rename_node));
+
+    const targets = [_]struct { node: NodeTarget, edit_position: c_int }{
+        .{ .node = .{ .project_path = "C:\\fixture", .id = "ordinary" }, .edit_position = 1 },
+        .{ .node = .{ .project_path = "C:\\fixture", .id = "resolved", .resolved = true }, .edit_position = 1 },
+        .{ .node = .{ .project_path = "C:\\fixture", .id = "composite", .composite = true }, .edit_position = 5 },
+        .{ .node = .{ .project_path = "C:\\fixture", .id = "unwired", .unwired = true }, .edit_position = 4 },
+    };
+    for (targets) |target| {
+        const menu = buildMenu(.{ .node = target.node }) orelse return error.MenuCreationFailed;
+        defer _ = c.DestroyMenu(menu);
+        try std.testing.expectEqual(@as(c.UINT, ids.edit_node), c.GetMenuItemID(menu, target.edit_position));
+        try std.testing.expectEqual(@as(c.UINT, c.MF_ENABLED), c.GetMenuState(menu, ids.edit_node, c.MF_BYCOMMAND));
+        var caption: [128]u16 = undefined;
+        const length = c.GetMenuStringW(menu, ids.edit_node, &caption, caption.len, c.MF_BYCOMMAND);
+        try std.testing.expect(length > 0 and length < caption.len - 1);
+        try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("Edit Details..."), caption[0..@intCast(length)]);
+    }
 }
 
 test "background menu disables unavailable folder actions and omits them for global scope" {

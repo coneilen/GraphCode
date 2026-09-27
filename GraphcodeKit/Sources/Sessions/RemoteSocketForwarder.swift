@@ -62,6 +62,9 @@ public actor RemoteSocketForwarder {
         + " \"$HOME/.graphcode/bridge-state.json.lock\""
         + " && printf %s \"$HOME\"")
     let forward = forwardCommandLine(for: location, localSocketPath: localSocketPath)
+    if location.isCodespace {
+      return codespaceForwardScript(prepare: prepare, forward: forward)
+    }
     return """
       while kill -0 $PPID 2>/dev/null; do \
       H=$(\(prepare)) || { sleep 5; continue; }; \
@@ -69,6 +72,34 @@ public actor RemoteSocketForwarder {
       sleep 5; \
       done
       """
+  }
+
+  /// A codespace's loop backs off instead of redialing every five seconds, and gives up
+  /// once the codespace has been down for `schedule.pauseAfter` — each attempt is two gh
+  /// runs against the human's Codespaces rate limit (issue #480). `ensureForwarding`
+  /// starts a fresh one on the next ensure, which `CodespaceDialBreaker` lets through only
+  /// on its schedule.
+  ///
+  /// Only a forward that stayed up past `upAfter` proves the codespace was reachable: a
+  /// pre-dial can spend up to five minutes inside gh waiting for a codespace to start and
+  /// still fail.
+  static func codespaceForwardScript(
+    prepare: String, forward: String,
+    schedule: CodespaceDialSchedule = .standard, upAfter: Int = 60, maxWait: Int = 60
+  ) -> String {
+    """
+    gc_down=; gc_wait=5; \
+    while kill -0 $PPID 2>/dev/null; do \
+    if H=$(\(prepare)); then \
+    gc_t=$(date +%s); \(forward); \
+    [ $(($(date +%s) - gc_t)) -ge \(upAfter) ] && { gc_down=; gc_wait=5; }; \
+    fi; \
+    gc_now=$(date +%s); gc_down=${gc_down:-$gc_now}; \
+    [ $((gc_now - gc_down)) -ge \(schedule.pauseAfter) ] && exit 0; \
+    sleep $gc_wait; gc_wait=$((gc_wait * 2)); \
+    [ $gc_wait -gt \(maxWait) ] && gc_wait=\(maxWait); \
+    done
+    """
   }
 
   /// The `ssh -N -R` line itself, with the remote socket path assembled around the

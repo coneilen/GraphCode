@@ -345,6 +345,17 @@ pub const RenderBounds = struct { left: i32, top: i32, right: i32, bottom: i32 }
 pub const Surface = enum { project, overview, quick_chats, workspace };
 pub const OverviewHit = struct { graph_index: usize, node_index: usize };
 pub const OverviewLaneAction = enum { open_project, inspect_worktrees };
+pub const overview_worktree_notice_kind = "overview-worktree-notice";
+
+pub fn overviewWorktreeNotice(graph: *const GraphModel.GraphSummary) ?WorktreeStatus.NoticePresentation {
+    if (!graph.project.isLocalFilesystem()) return null;
+    return WorktreeStatus.NoticePresentation.fromRecord(graph.worktree_notice);
+}
+
+pub fn overviewWorktreeNoticeIdentity(allocator: std.mem.Allocator, project_path: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}:{s}", .{ overview_worktree_notice_kind, project_path });
+}
+
 pub const ZoomControl = enum { out, actual, in, fit };
 pub const HeaderAction = enum { review_attention, inspect_worktrees, jump, toggle_panel };
 pub const header_actions = [_]HeaderAction{ .review_attention, .inspect_worktrees, .jump, .toggle_panel };
@@ -461,10 +472,7 @@ pub fn loopPanelHasContent(model: *const GraphModel.Model, surface: Surface, qui
 pub fn headerWorktreeNotice(model: *const GraphModel.Model, inspection: *const WorktreeStatus.Inspection, policy: WorktreeStatus.Policy) bool {
     const graph = model.currentGraph() orelse return false;
     if (!graph.project.isLocalFilesystem() or !std.mem.eql(u8, graph.project.path, inspection.project_path)) return false;
-    const summary = WorktreeStatus.summarize(inspection.entries.items);
-    var bytes: u64 = 0;
-    for (inspection.entries.items) |entry| bytes +|= entry.size_bytes;
-    return summary.total >= policy.notice_count or bytes >= @as(u64, policy.notice_size_gb) * 1024 * 1024 * 1024;
+    return WorktreeStatus.noticeState(inspection.entries.items, policy) == .notice;
 }
 pub const AttentionAction = enum { reply, inspect };
 pub const ReclaimAction = enum { reclaim, keep };
@@ -677,13 +685,27 @@ fn drawOverview(
     for (model.graphs.items, 0..) |graph, graph_index| {
         const lane = overviewLaneBounds(model, graph_index, bounds, state);
         roundedCard(hdc, lane, Tokens.workspace_rail, false);
-        drawText(hdc, allocator, graph.project.name, lane.left + scaledValue(18, state.zoom), lane.top + scaledValue(16, state.zoom), scaledValue(14, state.zoom), 0x00E8E8E8);
-        const open = rect(lane.right - scaledValue(132, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(76, state.zoom), lane.top + scaledValue(30, state.zoom));
-        const worktrees = rect(lane.right - scaledValue(72, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(18, state.zoom), lane.top + scaledValue(30, state.zoom));
+        const caption = overviewLaneCaption(model, graph_index, bounds, state);
+        drawTextRect(hdc, allocator, graph.project.name, caption.title, scaledValue(14, state.zoom), 0x00E8E8E8, c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER | c.DT_END_ELLIPSIS);
+        const open = caption.open;
+        const worktrees = caption.worktrees;
         fill(hdc, open, 0x002D2418);
         fill(hdc, worktrees, 0x00352B1C);
         drawTextRect(hdc, allocator, "Open", open, scaledValue(9, state.zoom), 0x00E6E6E6, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
         drawTextRect(hdc, allocator, "Worktrees", worktrees, scaledValue(8, state.zoom), 0x00FFCD7A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+        if (caption.notice) |notice_bounds| {
+            const presentation = overviewWorktreeNotice(&graph).?;
+            const label = presentation.label(allocator) catch null;
+            if (label) |text| {
+                defer allocator.free(text);
+                const is_notice = presentation.state == .notice;
+                fill(hdc, notice_bounds, if (is_notice) @as(c.COLORREF, 0x00352B1C) else 0x00303035);
+                const text_bounds = rect(notice_bounds.left + scaledValue(6, state.zoom), notice_bounds.top, notice_bounds.right - scaledValue(6, state.zoom), notice_bounds.bottom);
+                drawTextRect(hdc, allocator, text, text_bounds, scaledValue(9, state.zoom), if (is_notice) @as(c.COLORREF, 0x00FFCD7A) else 0x00B8B8BE, c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER | c.DT_END_ELLIPSIS);
+            } else {
+                drawTextRect(hdc, allocator, "Worktree notice unavailable", notice_bounds, scaledValue(9, state.zoom), 0x00B8B8BE, c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER);
+            }
+        }
         var index: usize = 0;
         while (index < graph.nodes.items.len) : (index += 1) {
             const card = overviewCardBounds(model, graph_index, index, bounds, state);
@@ -759,13 +781,37 @@ pub fn overviewCardBounds(
     );
 }
 
-pub fn overviewLaneActionAt(model: *const GraphModel.Model, graph_index: usize, x: i32, y: i32, bounds: c.RECT, state: *const CanvasState) ?OverviewLaneAction {
-    if (graph_index >= model.graphs.items.len) return null;
+pub const OverviewLaneCaption = struct {
+    title: c.RECT,
+    open: c.RECT,
+    worktrees: c.RECT,
+    notice: ?c.RECT,
+};
+
+pub fn overviewLaneCaption(model: *const GraphModel.Model, graph_index: usize, bounds: c.RECT, state: *const CanvasState) OverviewLaneCaption {
     const lane = overviewLaneBounds(model, graph_index, bounds, state);
     const open = rect(lane.right - scaledValue(132, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(76, state.zoom), lane.top + scaledValue(30, state.zoom));
     const worktrees = rect(lane.right - scaledValue(72, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(18, state.zoom), lane.top + scaledValue(30, state.zoom));
-    if (insideGraph(x, y, open)) return .open_project;
-    if (insideGraph(x, y, worktrees)) return .inspect_worktrees;
+    const notice = if (graph_index < model.graphs.items.len and overviewWorktreeNotice(&model.graphs.items[graph_index]) != null)
+        rect(open.left - scaledValue(294, state.zoom), open.top, open.left - scaledValue(8, state.zoom), open.bottom)
+    else
+        null;
+    return .{
+        .title = rect(lane.left + scaledValue(18, state.zoom), open.top, (if (notice) |value| value.left else open.left) - scaledValue(10, state.zoom), open.bottom),
+        .open = open,
+        .worktrees = worktrees,
+        .notice = notice,
+    };
+}
+
+pub fn overviewLaneActionAt(model: *const GraphModel.Model, graph_index: usize, x: i32, y: i32, bounds: c.RECT, state: *const CanvasState) ?OverviewLaneAction {
+    if (graph_index >= model.graphs.items.len) return null;
+    const caption = overviewLaneCaption(model, graph_index, bounds, state);
+    if (insideGraph(x, y, caption.open)) return .open_project;
+    if (insideGraph(x, y, caption.worktrees)) return .inspect_worktrees;
+    if (caption.notice) |notice| {
+        if (insideGraph(x, y, bounds) and insideGraph(x, y, notice)) return .inspect_worktrees;
+    }
     return null;
 }
 
@@ -1040,17 +1086,142 @@ test "header notice threshold and owner gating exclude invisible actions" {
         .default_branch = @constCast("main"),
     };
     defer inspection.entries.deinit();
-    try inspection.entries.append(.{ .path = @constCast("C:\\tree"), .branch = @constCast("topic"), .size_bytes = 1024 * 1024 * 1024 - 1 });
+    try inspection.entries.append(.{ .path = @constCast("C:\\tree"), .branch = @constCast("topic"), .size_bytes = 1024 * 1024 * 1024 - 1, .size_complete = true });
     const policy = WorktreeStatus.Policy{ .notice_count = 2, .notice_size_gb = 1 };
     try std.testing.expect(!headerWorktreeNotice(&model, &inspection, policy));
     inspection.entries.items[0].size_bytes += 1;
     try std.testing.expect(headerWorktreeNotice(&model, &inspection, policy));
+    inspection.entries.items[0].size_bytes += 1;
+    try std.testing.expect(headerWorktreeNotice(&model, &inspection, policy));
     inspection.entries.items[0].size_bytes = 0;
+    try std.testing.expect(!headerWorktreeNotice(&model, &inspection, policy));
     try inspection.entries.append(inspection.entries.items[0]);
+    try std.testing.expect(headerWorktreeNotice(&model, &inspection, policy));
+    try inspection.entries.append(inspection.entries.items[0]);
+    try std.testing.expect(headerWorktreeNotice(&model, &inspection, policy));
+    inspection.entries.shrinkRetainingCapacity(1);
+    inspection.entries.items[0].size_complete = false;
+    inspection.entries.items[0].size_error = error.AccessDenied;
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, WorktreeStatus.noticeState(inspection.entries.items, policy));
+    try std.testing.expect(!headerWorktreeNotice(&model, &inspection, policy));
+    inspection.entries.items[0].size_bytes = 1024 * 1024 * 1024;
     try std.testing.expect(headerWorktreeNotice(&model, &inspection, policy));
     inspection.project_path = @constCast("C:\\foreign");
     try std.testing.expect(!headerWorktreeNotice(&model, &inspection, policy));
 }
+
+test "worktree notice header never treats nonlocal projects as local inspections" {
+    const frames = [_][]const u8{
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"ssh://host/repo","name":"Remote"},"nodes":[],"edges":[]}}}
+        ,
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"codespace://name/repo","name":"Codespace"},"nodes":[],"edges":[]}}}
+        ,
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"graphcode://global","name":"Global"},"nodes":[],"edges":[]}}}
+        ,
+    };
+    for (frames) |frame| {
+        var model = GraphModel.Model.init(std.testing.allocator);
+        defer model.deinit();
+        _ = try model.updateFromFrame(frame);
+        var inspection = WorktreeStatus.Inspection{
+            .entries = std.array_list.Managed(WorktreeStatus.Entry).init(std.testing.allocator),
+            .project_path = model.currentGraph().?.project.path,
+            .default_branch = @constCast("main"),
+        };
+        defer inspection.entries.deinit();
+        try inspection.entries.append(.{
+            .path = @constCast("worktree"),
+            .branch = @constCast("topic"),
+            .size_bytes = 2147483648,
+            .size_complete = true,
+        });
+        try std.testing.expect(!headerWorktreeNotice(&model, &inspection, .{}));
+    }
+}
+
+test "worktree notice lane geometry preserves old actions and shares the new chip hit target" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    const frames = [_][]const u8{
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\a","name":"Same"},"nodes":[],"edges":[]}}}
+        ,
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"C:\\b","name":"Same"},"nodes":[],"edges":[]}}}
+        ,
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":"graphcode://global","name":"Global"},"nodes":[],"edges":[]}}}
+        ,
+    };
+    for (frames) |frame| _ = try model.updateFromFrame(frame);
+    const bounds = rect(220, 34, 1200, 900);
+    const state = CanvasState{};
+    const a = overviewLaneCaption(&model, 0, bounds, &state);
+    const b = overviewLaneCaption(&model, 1, bounds, &state);
+    try std.testing.expectEqualDeep(rect(1044, 82, 1100, 102), a.open);
+    try std.testing.expectEqualDeep(rect(1104, 82, 1158, 102), a.worktrees);
+    try std.testing.expectEqualDeep(rect(750, 82, 1036, 102), a.notice.?);
+    try std.testing.expectEqualDeep(rect(750, 198, 1036, 218), b.notice.?);
+    try std.testing.expect(a.title.right < a.notice.?.left);
+    try std.testing.expect(a.notice.?.right < a.open.left);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 760, 92, bounds, &state).?);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 1, 760, 208, bounds, &state).?);
+    try std.testing.expect(overviewLaneActionAt(&model, 0, 760, 208, bounds, &state) == null);
+    try std.testing.expect(overviewLaneActionAt(&model, 0, 740, 92, bounds, &state) == null);
+    try std.testing.expect(overviewLaneCaption(&model, 2, bounds, &state).notice == null);
+    const transformed = CanvasState{ .zoom = 1.5, .pan_x = 17, .pan_y = -9 };
+    try std.testing.expectEqualDeep(rect(1142, 114, 1571, 144), overviewLaneCaption(&model, 0, bounds, &transformed).notice.?);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 1150, 120, bounds, &transformed).?);
+    try std.testing.expect(overviewLaneActionAt(&model, 0, 1300, 120, bounds, &transformed) == null);
+    const identity_a = try overviewWorktreeNoticeIdentity(std.testing.allocator, "C:\\a");
+    defer std.testing.allocator.free(identity_a);
+    const identity_b = try overviewWorktreeNoticeIdentity(std.testing.allocator, "C:\\b");
+    defer std.testing.allocator.free(identity_b);
+    try std.testing.expectEqualStrings("overview-worktree-notice:C:\\a", identity_a);
+    try std.testing.expect(!std.mem.eql(u8, identity_a, identity_b));
+}
+
+test "worktree notice lane uses production observations for exact count and size boundaries" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\a","name":"A"},"nodes":[],"edges":[]}}}
+    );
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"C:\\b","name":"B"},"nodes":[],"edges":[]}}}
+    );
+    var inspection = WorktreeStatus.Inspection{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(std.testing.allocator),
+        .project_path = @constCast("C:\\a"),
+        .default_branch = @constCast("main"),
+    };
+    defer inspection.entries.deinit();
+    for (0..9) |_| try inspection.entries.append(.{
+        .path = @constCast("tree"),
+        .branch = @constCast("topic"),
+        .size_complete = true,
+    });
+    const policy = WorktreeStatus.policyReadOutcome(error.FileNotFound);
+    for ([_]usize{ 7, 8, 9 }, [_]WorktreeStatus.NoticeState{ .below_threshold, .notice, .notice }) |count, expected| {
+        inspection.entries.items.len = count;
+        try model.recordWorktreeInspection(&inspection, policy);
+        const presentation = overviewWorktreeNotice(model.graphFor("C:\\a").?).?;
+        try std.testing.expectEqual(expected, presentation.state);
+        try std.testing.expectEqual(count, presentation.summary.?.total);
+        try std.testing.expectEqual(WorktreeStatus.NoticePhase.uninspected, overviewWorktreeNotice(model.graphFor("C:\\b").?).?.phase);
+    }
+    inspection.entries.items.len = 1;
+    for ([_]u64{ 2147483647, 2147483648, 2147483649 }, [_]WorktreeStatus.NoticeState{ .below_threshold, .notice, .notice }) |bytes, expected| {
+        inspection.entries.items[0].size_bytes = bytes;
+        try model.recordWorktreeInspection(&inspection, policy);
+        try std.testing.expectEqual(expected, overviewWorktreeNotice(model.graphFor("C:\\a").?).?.state);
+    }
+    try model.recordWorktreePolicy("C:\\a", WorktreeStatus.policyReadOutcome(error.AccessDenied));
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, overviewWorktreeNotice(model.graphFor("C:\\a").?).?.state);
+    inspection.entries.clearRetainingCapacity();
+    try model.recordWorktreeInspection(&inspection, policy);
+    try std.testing.expect(overviewWorktreeNotice(model.graphFor("C:\\a").?) == null);
+    try std.testing.expect(overviewLaneCaption(&model, 0, rect(220, 34, 1200, 900), &.{}).notice == null);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 1130, 92, rect(220, 34, 1200, 900), &.{}).?);
+}
+
 fn attentionRail(
     hdc: c.HDC,
     allocator: std.mem.Allocator,
@@ -1143,7 +1314,7 @@ fn drawEdges(hdc: c.HDC, graph: GraphModel.Graph, state: *const CanvasState) voi
             state.selected_edge == index;
         const color = if (selected)
             Tokens.rgb(Tokens.canvas_selection)
-        else if (edge.fired or edge.fire_count != 0)
+        else if (edge.fired or edge.fire_count > 0)
             0x006BD58D
         else
             edgeKindColor(edge.kind);
@@ -1170,12 +1341,16 @@ fn drawEdgeLabels(hdc: c.HDC, allocator: std.mem.Allocator, graph: GraphModel.Gr
             state.selected_edge == index;
         const color = if (selected)
             Tokens.rgb(Tokens.canvas_selection)
-        else if (edge.fired or edge.fire_count != 0)
+        else if (edge.fired or edge.fire_count > 0)
             0x006BD58D
         else
             edgeKindColor(edge.kind);
-        var label_buffer: [128]u8 = undefined;
-        const label = edgeLabel(&label_buffer, edge);
+        const label_result = edgeLabel(allocator, edge);
+        defer if (label_result) |owned| allocator.free(owned) else |_| {};
+        const label = if (label_result) |text| text else |err| switch (err) {
+            error.OutOfMemory => "Edge label unavailable (out of memory)",
+            error.InvalidUtf8 => "Edge label unavailable (invalid text)",
+        };
         const center_x = @divTrunc(from.x + to.x, 2);
         var label_y = if (@abs(to.y - from.y) < 40)
             @min(from.y, to.y) - 76
@@ -1217,13 +1392,67 @@ fn edgeKindColor(kind: []const u8) u32 {
     return Tokens.rgb(Tokens.canvas_edge);
 }
 
-fn edgeLabel(buffer: []u8, edge: GraphModel.Edge) []const u8 {
+fn edgeLabel(allocator: std.mem.Allocator, edge: GraphModel.Edge) ![]u8 {
+    var output = std.array_list.Managed(u8).init(allocator);
+    errdefer output.deinit();
+    const writer = output.writer();
     const kind = if (edge.kind.len == 0) "handoff" else edge.kind;
-    if (edge.fire_count != 0)
-        return std.fmt.bufPrint(buffer, "{s} · {s} · fired {d}", .{ kind, edge.condition, edge.fire_count }) catch kind;
-    if (!std.mem.eql(u8, edge.condition, "always"))
-        return std.fmt.bufPrint(buffer, "{s} · {s}", .{ kind, edge.condition }) catch kind;
-    return kind;
+    try writer.writeAll(kind);
+    if (edge.fire_count > 0 or !std.mem.eql(u8, edge.condition, "always"))
+        try writer.print(" · {s}", .{edge.condition});
+    if (edge.cycle_guard) |guard| {
+        try writer.print(" · loop {d}/", .{edge.fire_count});
+        try writeCycleGuard(writer, guard);
+    } else if (edge.fire_count > 0) {
+        try writer.print(" · fired {d}", .{edge.fire_count});
+    }
+    return output.toOwnedSlice();
+}
+
+fn writeCycleGuard(writer: anytype, guard: GraphModel.CycleGuard) !void {
+    var has_part = false;
+    if (guard.max_iterations) |maximum| {
+        try writer.print("≤{d}×", .{maximum});
+        has_part = true;
+    }
+    if (guard.until) |raw| {
+        const until = try effectiveEdgeUntil(raw);
+        if (until.len != 0) {
+            if (has_part) try writer.writeAll(" or ");
+            try writer.print("until `{s}`", .{until});
+            has_part = true;
+        }
+    }
+    if (guard.stop_after_passes_without_improvement) |passes| {
+        if (passes > 0) {
+            if (has_part) try writer.writeAll(" or ");
+            try writer.print("{d} flat passes", .{passes});
+            has_part = true;
+        }
+    }
+    if (!has_part) try writer.writeAll("unbounded");
+}
+
+fn effectiveEdgeUntil(text: []const u8) error{InvalidUtf8}![]const u8 {
+    const view = std.unicode.Utf8View.init(text) catch return error.InvalidUtf8;
+    var iterator = view.iterator();
+    var start = text.len;
+    var end: usize = 0;
+    var offset: usize = 0;
+    while (iterator.nextCodepointSlice()) |bytes| {
+        const codepoint = std.unicode.utf8Decode(bytes) catch return error.InvalidUtf8;
+        // Foundation .whitespaces: Unicode space separators plus horizontal tab, not newlines.
+        const whitespace = switch (codepoint) {
+            0x09, 0x20, 0xa0, 0x1680, 0x2000...0x200a, 0x202f, 0x205f, 0x3000 => true,
+            else => false,
+        };
+        if (!whitespace) {
+            start = @min(start, offset);
+            end = offset + bytes.len;
+        }
+        offset += bytes.len;
+    }
+    return text[@min(start, end)..end];
 }
 
 fn drawBezier(hdc: c.HDC, from: Connector, to: Connector, color: u32, style: c_int) void {
@@ -2215,38 +2444,68 @@ test "cross-project overview stacks every open folder as its own lane" {
     var model = GraphModel.Model.init(allocator);
     defer model.deinit();
     const frameA =
-        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"a1","title":"Loop A1","state":"running"},{"id":"a2","title":"Loop A2","state":"running"}],"edges":[]}}}
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"a1","title":"Alpha 1","state":"idle"},{"id":"a2","title":"Alpha 2","state":"idle"},{"id":"a3","title":"Alpha 3","state":"idle"},{"id":"a4","title":"Alpha 4","state":"idle"}],"edges":[]}}}
     ;
     const frameB =
-        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"Beta"},"nodes":[{"id":"b1","title":"Loop B1","state":"running"}],"edges":[]}}}
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"Beta"},"nodes":[{"id":"b1","title":"Beta 1","state":"idle"},{"id":"b2","title":"Beta 2","state":"idle"}],"edges":[]}}}
     ;
     _ = try model.updateFromFrame(frameA);
     _ = try model.updateFromFrame(frameB);
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"recentProjectsListed":[{"path":"C","name":"Recent only"}]}}
+    );
     try std.testing.expectEqual(@as(usize, 2), model.graphs.items.len);
-    var state = CanvasState{};
-    const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 1200, 800);
-    const laneA = overviewLaneBounds(&model, 0, bounds, &state);
-    const laneB = overviewLaneBounds(&model, 1, bounds, &state);
-    // Every open folder renders as its own lane on the shared canvas: the second
-    // project's lane must start strictly below the first project's lane (not
-    // overlap it), by at least that lane's rendered height plus the inter-lane gap.
-    try std.testing.expect(laneB.top >= laneA.bottom + 20);
-    try std.testing.expectEqual(laneA.left, laneB.left);
-    try std.testing.expectEqual(laneA.right, laneB.right);
-    // Hit testing must resolve a click in the second lane to the second project's
-    // graph index, proving the lanes are independently addressable, not just
-    // visually stacked.
-    const cardB = overviewCardBounds(&model, 1, 0, bounds, &state);
-    const hit = hitTestOverview(&model, cardB.left + 4, cardB.top + 4, &state, bounds) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), hit.graph_index);
-    try std.testing.expectEqual(@as(usize, 0), hit.node_index);
-    // Each lane exposes its own Open/Worktrees action targets, independently
-    // positioned per-lane rather than a single shared control.
-    const laneAOpen = overviewLaneActionAt(&model, 0, laneA.right - 100, laneA.top + 20, bounds, &state);
-    const laneBOpen = overviewLaneActionAt(&model, 1, laneB.right - 100, laneB.top + 20, bounds, &state);
-    try std.testing.expectEqual(OverviewLaneAction.open_project, laneAOpen orelse return error.TestUnexpectedResult);
-    try std.testing.expectEqual(OverviewLaneAction.open_project, laneBOpen orelse return error.TestUnexpectedResult);
+    try std.testing.expect(model.graphFor("C") == null);
+    const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 1200, 900);
+    const identity = CanvasState{};
+    try std.testing.expectEqualDeep(rect(244, 72, 1176, 376), overviewLaneBounds(&model, 0, bounds, &identity));
+    try std.testing.expectEqualDeep(rect(244, 396, 1176, 572), overviewLaneBounds(&model, 1, bounds, &identity));
+    try std.testing.expectEqualDeep(rect(262, 240, 482, 326), overviewCardBounds(&model, 0, 3, bounds, &identity));
+    try std.testing.expectEqualDeep(rect(262, 442, 482, 528), overviewCardBounds(&model, 1, 0, bounds, &identity));
+
+    for ([_]CanvasState{
+        .{},
+        .{ .zoom = 0.75, .pan_x = 100, .pan_y = 17 },
+        .{ .zoom = 1.25, .pan_x = -30, .pan_y = -12 },
+    }) |state| {
+        const lane_a = overviewLaneBounds(&model, 0, bounds, &state);
+        const lane_b = overviewLaneBounds(&model, 1, bounds, &state);
+        try std.testing.expect(lane_a.bottom < lane_b.top);
+        try std.testing.expectEqual(lane_a.left, lane_b.left);
+        try std.testing.expectEqual(lane_a.right, lane_b.right);
+        for (model.graphs.items, 0..) |graph, graph_index| {
+            const lane = overviewLaneBounds(&model, graph_index, bounds, &state);
+            for (graph.nodes.items, 0..) |_, node_index| {
+                const card = overviewCardBounds(&model, graph_index, node_index, bounds, &state);
+                try std.testing.expect(card.left >= lane.left and card.right <= lane.right);
+                try std.testing.expect(card.top > lane.top and card.bottom < lane.bottom);
+                try std.testing.expectEqual(
+                    @as(?OverviewHit, .{ .graph_index = graph_index, .node_index = node_index }),
+                    hitTestOverview(&model, card.left + 2, card.top + 2, &state, bounds),
+                );
+            }
+            for ([_]struct { offset: i32, action: OverviewLaneAction }{
+                .{ .offset = 104, .action = .open_project },
+                .{ .offset = 45, .action = .inspect_worktrees },
+            }) |target| {
+                const x = lane.right - scaledValue(target.offset, state.zoom);
+                const y = lane.top + scaledValue(20, state.zoom);
+                try std.testing.expectEqual(target.action, overviewLaneActionAt(&model, graph_index, x, y, bounds, &state).?);
+                try std.testing.expect(overviewLaneActionAt(&model, 1 - graph_index, x, y, bounds, &state) == null);
+                try std.testing.expect(hitTestOverview(&model, x, y, &state, bounds) == null);
+            }
+        }
+        try std.testing.expect(overviewLaneActionAt(&model, 2, lane_b.right - 40, lane_b.top + 20, bounds, &state) == null);
+    }
+
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":4,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"Beta"},"nodes":[],"edges":[]}}}
+    );
+    const empty_lane = overviewLaneBounds(&model, 1, bounds, &identity);
+    try std.testing.expectEqualDeep(rect(244, 396, 1176, 492), empty_lane);
+    try std.testing.expectEqual(OverviewLaneAction.open_project, overviewLaneActionAt(&model, 1, 1072, 416, bounds, &identity).?);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 1, 1131, 416, bounds, &identity).?);
+    try std.testing.expect(hitTestOverview(&model, 264, 444, &identity, bounds) == null);
 }
 
 test "overview and quick chat geometry applies pan and zoom consistently" {
@@ -2480,7 +2739,6 @@ test "edge drag state cancels without leaving a selection" {
 }
 
 test "edge presentation distinguishes kind condition and fired state" {
-    var buffer: [128]u8 = undefined;
     const message = GraphModel.Edge{
         .id = @constCast("edge"),
         .from = @constCast("a"),
@@ -2490,8 +2748,148 @@ test "edge presentation distinguishes kind condition and fired state" {
         .fire_count = 2,
     };
     try std.testing.expectEqual(c.PS_DOT, edgeKindPenStyle(message.kind));
-    try std.testing.expectEqualStrings("message · onSuccess · fired 2", edgeLabel(&buffer, message));
+    const label = try edgeLabel(std.testing.allocator, message);
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqualStrings("message · onSuccess · fired 2", label);
     try std.testing.expect(edgeKindColor("message") != edgeKindColor("spawn"));
+}
+
+test "edge guard JSON reaches the production label" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"00000000-0000-4000-8000-000000000001","project":{"path":"edge-fixture","name":"Edge fixture"},"nodes":[],"edges":[{"id":"00000000-0000-4000-8000-000000000002","from":"00000000-0000-4000-8000-000000000003","to":"00000000-0000-4000-8000-000000000004","kind":"handoff","condition":"always","payloadTransform":{"none":{}},"cycleGuard":{"maxIterations":3,"until":"  test -f done  ","stopAfterPassesWithoutImprovement":2},"fireCount":2}]}}}
+    );
+    const label = try edgeLabel(std.testing.allocator, model.graph.?.edges.items[0]);
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqualStrings(
+        "handoff · always · loop 2/≤3× or until `test -f done` or 2 flat passes",
+        label,
+    );
+}
+
+fn edgeGuardLabelTestModel(allocator: std.mem.Allocator, edge_json: []const u8) !GraphModel.Model {
+    const frame = try std.mem.concat(allocator, u8, &.{
+        "{\"version\":2,\"kind\":\"event\",\"sequence\":1,\"event\":{\"graphChanged\":{\"project\":{\"path\":\"edge-fixture\",\"name\":\"Edge fixture\"},\"nodes\":[],\"edges\":[",
+        edge_json,
+        "]}}}",
+    });
+    defer allocator.free(frame);
+    var model = GraphModel.Model.init(allocator);
+    errdefer model.deinit();
+    _ = try model.updateFromFrame(frame);
+    return model;
+}
+
+test "edge guard JSON labels match domain summary variants and legacy counts" {
+    const Case = struct { json: []const u8, label: []const u8 };
+    const cases = [_]Case{
+        .{ .json = "{}", .label = "handoff" },
+        .{ .json = "{\"cycleGuard\":null}", .label = "handoff" },
+        .{ .json = "{\"fired\":true}", .label = "handoff · always · fired 1" },
+        .{ .json = "{\"fireCount\":null,\"fired\":true}", .label = "handoff · always · fired 1" },
+        .{ .json = "{\"fireCount\":0,\"fired\":true}", .label = "handoff" },
+        .{ .json = "{\"fireCount\":-1,\"fired\":true}", .label = "handoff" },
+        .{ .json = "{\"kind\":\"message\",\"condition\":\"onSuccess\",\"fireCount\":2}", .label = "message · onSuccess · fired 2" },
+        .{ .json = "{\"cycleGuard\":{}}", .label = "handoff · loop 0/unbounded" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":null,\"until\":null,\"stopAfterPassesWithoutImprovement\":null}}", .label = "handoff · loop 0/unbounded" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":3}}", .label = "handoff · loop 0/≤3×" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":3},\"fireCount\":2}", .label = "handoff · always · loop 2/≤3×" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":3},\"fireCount\":0,\"fired\":true}", .label = "handoff · loop 0/≤3×" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":3},\"fireCount\":null,\"fired\":true}", .label = "handoff · always · loop 1/≤3×" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":0,\"stopAfterPassesWithoutImprovement\":-1}}", .label = "handoff · loop 0/≤0×" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":-3},\"fireCount\":-2}", .label = "handoff · loop -2/≤-3×" },
+        .{ .json = "{\"cycleGuard\":{\"until\":\"  test -f done  \"}}", .label = "handoff · loop 0/until `test -f done`" },
+        .{ .json = "{\"cycleGuard\":{\"until\":\"\"}}", .label = "handoff · loop 0/unbounded" },
+        .{ .json = "{\"cycleGuard\":{\"until\":\" \\t\\u00a0\\u2003\\u3000 \"}}", .label = "handoff · loop 0/unbounded" },
+        .{ .json = "{\"cycleGuard\":{\"until\":\"\\u00a0\\t echo \\\"yes\\\" \\\\ \\u2603\\u2003\"}}", .label = "handoff · loop 0/until `echo \"yes\" \\ ☃`" },
+        .{ .json = "{\"cycleGuard\":{\"until\":\" \\ncommand\\r\\n \"}}", .label = "handoff · loop 0/until `\ncommand\r\n`" },
+        .{ .json = "{\"cycleGuard\":{\"stopAfterPassesWithoutImprovement\":1}}", .label = "handoff · loop 0/1 flat passes" },
+        .{ .json = "{\"cycleGuard\":{\"stopAfterPassesWithoutImprovement\":0}}", .label = "handoff · loop 0/unbounded" },
+        .{ .json = "{\"cycleGuard\":{\"stopAfterPassesWithoutImprovement\":-1}}", .label = "handoff · loop 0/unbounded" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":3,\"stopAfterPassesWithoutImprovement\":2}}", .label = "handoff · loop 0/≤3× or 2 flat passes" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":3,\"until\":\"done\"}}", .label = "handoff · loop 0/≤3× or until `done`" },
+        .{ .json = "{\"condition\":\"onFailure\",\"cycleGuard\":{\"until\":\"done\",\"stopAfterPassesWithoutImprovement\":2}}", .label = "handoff · onFailure · loop 0/until `done` or 2 flat passes" },
+        .{ .json = "{\"kind\":\"futureKind\",\"condition\":\"futureCondition\",\"cycleGuard\":{\"budget\":3},\"future\":{\"maxIterations\":7}}", .label = "futureKind · futureCondition · loop 0/unbounded" },
+        .{ .json = "{\"fireCount\":9223372036854775807,\"cycleGuard\":{\"maxIterations\":-9223372036854775808,\"stopAfterPassesWithoutImprovement\":9223372036854775807}}", .label = "handoff · always · loop 9223372036854775807/≤-9223372036854775808× or 9223372036854775807 flat passes" },
+    };
+    for (cases) |case| {
+        var model = try edgeGuardLabelTestModel(std.testing.allocator, case.json);
+        defer model.deinit();
+        for ([_]GraphModel.Edge{ model.graph.?.edges.items[0], model.currentGraph().?.edges.items[0] }) |edge| {
+            const label = try edgeLabel(std.testing.allocator, edge);
+            defer std.testing.allocator.free(label);
+            try std.testing.expectEqualStrings(case.label, label);
+        }
+    }
+}
+
+test "edge guard long Unicode labels remain complete and allocation failures unwind" {
+    const allocator = std.testing.allocator;
+    const command = "☃" ** 100;
+    const json = try std.fmt.allocPrint(allocator, "{{\"cycleGuard\":{{\"until\":\"{s}\"}},\"fireCount\":2}}", .{command});
+    defer allocator.free(json);
+    var model = try edgeGuardLabelTestModel(allocator, json);
+    defer model.deinit();
+    const expected = "handoff · always · loop 2/until `" ++ command ++ "`";
+    const label = try edgeLabel(allocator, model.graph.?.edges.items[0]);
+    defer allocator.free(label);
+    try std.testing.expect(label.len > 128);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(label));
+    try std.testing.expectEqualStrings(expected, label);
+    const Exercise = struct {
+        fn run(test_allocator: std.mem.Allocator, edge: GraphModel.Edge) !void {
+            const text = try edgeLabel(test_allocator, edge);
+            defer test_allocator.free(text);
+            try std.testing.expectEqualStrings(expected, text);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Exercise.run, .{model.graph.?.edges.items[0]});
+    try std.testing.expectError(error.InvalidUtf8, edgeLabel(allocator, .{
+        .from = &.{},
+        .to = &.{},
+        .cycle_guard = .{ .until = @constCast("\xff") },
+    }));
+}
+
+test "edge guard malformed refresh keeps the previous production label" {
+    const allocator = std.testing.allocator;
+    var model = try edgeGuardLabelTestModel(allocator,
+        \\{"id":"kept","from":"a","to":"b","cycleGuard":{"maxIterations":3,"until":"done"},"fireCount":2}
+    );
+    defer model.deinit();
+    try std.testing.expectError(error.MalformedEdge, model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"edge-fixture","name":"Edge fixture"},"nodes":[],"edges":[{"id":"kept","cycleGuard":{"maxIterations":"invalid"}}]}}}
+    ));
+    const label = try edgeLabel(allocator, model.graph.?.edges.items[0]);
+    defer allocator.free(label);
+    try std.testing.expectEqualStrings("handoff · always · loop 2/≤3× or until `done`", label);
+}
+
+test "edge guard production label follows composite refresh and guard removal" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"edge-fixture","name":"Edge fixture"},"edges":[],"nodes":[{"id":"parent","title":"Group","loopType":"proactive","subGraph":{"nodes":[],"edges":[{"id":"nested","from":"a","to":"b","cycleGuard":{"until":"first"},"fireCount":1}]}}]}}}
+    );
+    try std.testing.expect(model.openComposite("parent"));
+    const first = try edgeLabel(allocator, model.graph.?.edges.items[0]);
+    defer allocator.free(first);
+    try std.testing.expectEqualStrings("handoff · always · loop 1/until `first`", first);
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"edge-fixture","name":"Edge fixture"},"edges":[],"nodes":[{"id":"parent","title":"Group","loopType":"proactive","subGraph":{"nodes":[],"edges":[{"id":"nested","from":"a","to":"b","cycleGuard":{"maxIterations":4},"fireCount":2}]}}]}}}
+    );
+    try std.testing.expectEqualStrings("nested", model.graph.?.edges.items[0].id);
+    const refreshed = try edgeLabel(allocator, model.graph.?.edges.items[0]);
+    defer allocator.free(refreshed);
+    try std.testing.expectEqualStrings("handoff · always · loop 2/≤4×", refreshed);
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"edge-fixture","name":"Edge fixture"},"edges":[],"nodes":[{"id":"parent","title":"Group","loopType":"proactive","subGraph":{"nodes":[],"edges":[{"id":"nested","from":"a","to":"b","cycleGuard":null,"fireCount":0,"fired":true}]}}]}}}
+    );
+    const removed = try edgeLabel(allocator, model.graph.?.edges.items[0]);
+    defer allocator.free(removed);
+    try std.testing.expectEqualStrings("handoff", removed);
 }
 
 test "capture loss cancels both pan and edge drag state" {
