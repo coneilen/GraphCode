@@ -57,13 +57,12 @@ enum RemoteTranscriptProbe {
     ].joined(separator: "; ")
   }
 
-  static func run(_ invocation: [String]) async -> Reply {
-    RemoteProjectLocation.prepareControlSocketDirectory()
-    guard
-      let session = try? PTYProcessSession(
-        executable: invocation[0], arguments: Array(invocation.dropFirst()))
-    else { return .nothing }
-    let (succeeded, output) = await session.waitCollectingOutput()
+  static func run(
+    _ invocation: [String], at location: RemoteProjectLocation? = nil,
+    timeout: Duration = ZmxSessionLauncher.remoteReadTimeout
+  ) async -> Reply {
+    let (succeeded, output) = await ZmxSessionLauncher.collectRemoteOutput(
+      invocation, timeout: timeout, location: location)
     return parse(succeeded: succeeded, output: output)
   }
 
