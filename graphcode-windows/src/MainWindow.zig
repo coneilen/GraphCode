@@ -99,7 +99,13 @@ pub const MenuState = struct {
     /// At least one reclaimable worktree row is currently selected, either in
     /// the Worktrees dialog or via the sidebar's single-selection shortcut.
     worktree_row_selected: bool,
+    has_jump_target: bool,
+    can_navigate_loops: bool,
+    can_create_edge: bool,
+    has_selected_loop: bool,
     has_workspace: bool,
+    can_cycle_tabs: bool,
+    can_cycle_panes: bool,
     has_attention: bool,
     can_close_tab: bool,
     sidebar_visible: bool,
@@ -608,22 +614,22 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState, refresh: MenuRefresh) void {
     setEnabled(hwnd, .reveal_worktree, state.can_worktrees and state.worktree_row_selected);
     setEnabled(hwnd, .edit_worktree_policy, state.can_worktrees);
     setEnabled(hwnd, .save_worktree_policy, state.can_worktrees and state.worktree_dialog_open);
-    setEnabled(hwnd, .jump_loop, state.has_project);
+    setEnabled(hwnd, .jump_loop, state.has_jump_target);
     setEnabled(hwnd, .review_attention, state.has_attention);
-    setEnabled(hwnd, .next_loop, state.has_project);
-    setEnabled(hwnd, .previous_loop, state.has_project);
+    setEnabled(hwnd, .next_loop, state.can_navigate_loops);
+    setEnabled(hwnd, .previous_loop, state.can_navigate_loops);
     setEnabled(hwnd, .create_node, state.has_project);
-    setEnabled(hwnd, .create_edge, state.has_project);
-    setEnabled(hwnd, .stop_loop, state.has_project);
+    setEnabled(hwnd, .create_edge, state.can_create_edge);
+    setEnabled(hwnd, .stop_loop, state.has_selected_loop);
     setEnabled(hwnd, .show_graph, state.has_workspace);
     setEnabled(hwnd, .new_tab, state.has_workspace);
     setEnabled(hwnd, .close_tab, state.can_close_tab);
     setEnabled(hwnd, .split_right, state.has_workspace);
     setEnabled(hwnd, .split_down, state.has_workspace);
-    setEnabled(hwnd, .next_tab, state.has_workspace);
-    setEnabled(hwnd, .previous_tab, state.has_workspace);
-    setEnabled(hwnd, .focus_next_pane, state.has_workspace);
-    setEnabled(hwnd, .focus_previous_pane, state.has_workspace);
+    setEnabled(hwnd, .next_tab, state.can_cycle_tabs);
+    setEnabled(hwnd, .previous_tab, state.can_cycle_tabs);
+    setEnabled(hwnd, .focus_next_pane, state.can_cycle_panes);
+    setEnabled(hwnd, .focus_previous_pane, state.can_cycle_panes);
     setEnabled(hwnd, .settings, true);
     setEnabled(hwnd, .product_settings, true);
     setEnabled(hwnd, .reconnect, true);
@@ -635,6 +641,10 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState, refresh: MenuRefresh) void {
     setChecked(hwnd, .toggle_workspace, state.workspace_visible);
     setChecked(hwnd, .toggle_activity, state.activity_visible);
     if (redrawsMenuBar(refresh)) _ = c.DrawMenuBar(hwnd);
+}
+
+pub fn loopNavigationAvailable(loop_count: usize, selected_index: ?usize) bool {
+    return loop_count > 1 or (loop_count == 1 and selected_index == null);
 }
 
 fn workspaceCycleAvailable(workspaces: []const WorkspaceItem) bool {
@@ -1944,6 +1954,92 @@ fn expectDisabledWorkspaceCommand(menu: c.HMENU, command: Command) !void {
     const state = c.GetMenuState(menu, @intFromEnum(command), c.MF_BYCOMMAND);
     try std.testing.expect(state != std.math.maxInt(c.UINT));
     try std.testing.expect(state & c.MF_GRAYED != 0);
+}
+
+fn expectEnabledNativeMenuCommand(menu: c.HMENU, command: Command) !void {
+    const state = c.GetMenuState(menu, @intFromEnum(command), c.MF_BYCOMMAND);
+    try std.testing.expect(state != std.math.maxInt(c.UINT));
+    try std.testing.expect(state & c.MF_GRAYED == 0);
+}
+
+test "updateMenu applies loop and terminal capabilities to a real HMENU" {
+    const hwnd = try hiddenWorkspaceTestWindow();
+    defer _ = c.DestroyWindow(hwnd);
+    try installMenu(hwnd);
+    const menu = c.GetMenu(hwnd);
+    var state = MenuState{
+        .has_project = true,
+        .can_worktrees = false,
+        .worktree_dialog_open = false,
+        .worktree_row_selected = false,
+        .has_jump_target = false,
+        .can_navigate_loops = false,
+        .can_create_edge = false,
+        .has_selected_loop = false,
+        .has_workspace = true,
+        .can_cycle_tabs = false,
+        .can_cycle_panes = false,
+        .has_attention = false,
+        .can_close_tab = false,
+        .sidebar_visible = false,
+        .workspace_visible = false,
+        .activity_visible = false,
+        .update_checking = false,
+    };
+
+    updateMenu(hwnd, state, .state_change);
+    for ([_]Command{
+        .jump_loop,
+        .next_loop,
+        .previous_loop,
+        .create_edge,
+        .stop_loop,
+        .next_tab,
+        .previous_tab,
+        .focus_next_pane,
+        .focus_previous_pane,
+    }) |command| try expectDisabledWorkspaceCommand(menu, command);
+
+    state.has_jump_target = true;
+    state.can_create_edge = true;
+    state.has_selected_loop = true;
+    state.can_cycle_tabs = true;
+    state.can_cycle_panes = true;
+    for ([_]Command{
+        .jump_loop,
+        .create_edge,
+        .stop_loop,
+        .next_tab,
+        .previous_tab,
+        .focus_next_pane,
+        .focus_previous_pane,
+    }) |command| {
+        updateMenu(hwnd, state, .state_change);
+        try expectEnabledNativeMenuCommand(menu, command);
+    }
+
+    const navigation_cases = [_]struct {
+        loop_count: usize,
+        selected_index: ?usize,
+        enabled: bool,
+    }{
+        .{ .loop_count = 0, .selected_index = null, .enabled = false },
+        .{ .loop_count = 1, .selected_index = null, .enabled = true },
+        .{ .loop_count = 1, .selected_index = 0, .enabled = false },
+        .{ .loop_count = 2, .selected_index = null, .enabled = true },
+        .{ .loop_count = 2, .selected_index = 1, .enabled = true },
+    };
+    for (navigation_cases) |case| {
+        state.can_navigate_loops = loopNavigationAvailable(case.loop_count, case.selected_index);
+        updateMenu(hwnd, state, .state_change);
+        for ([_]Command{ .next_loop, .previous_loop }) |command| {
+            if (case.enabled) {
+                try expectEnabledNativeMenuCommand(menu, command);
+            } else {
+                try expectDisabledWorkspaceCommand(menu, command);
+            }
+        }
+    }
 }
 
 test "workspace menu checks the exact command and retains target labels and enablement" {
