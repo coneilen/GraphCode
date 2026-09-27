@@ -7,6 +7,7 @@ const CanvasInput = @import("CanvasInput.zig");
 const CanvasLayoutStore = @import("CanvasLayoutStore.zig");
 const GraphContextMenu = @import("GraphContextMenu.zig");
 const Forms = @import("Forms.zig");
+const EdgeEditing = @import("EdgeEditing.zig");
 const NativeForms = @import("NativeForms.zig");
 const TemplateLibrary = @import("TemplateLibrary.zig");
 const Diagnostics = @import("Diagnostics.zig");
@@ -2506,58 +2507,17 @@ pub const App = struct {
     }
 
     fn editSelectedEdge(self: *App, index: usize) void {
-        const graph = self.model.graph orelse return;
-        if (index >= graph.edges.items.len) return;
-        const edge = graph.edges.items[index];
-        if (!GraphContextMenu.canEditEdge(edge.id)) {
-            self.setStatus("Cannot edit an edge without a stable identifier");
-            return;
-        }
-        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
-        defer self.allocator.free(project_path);
-        const edge_id = self.allocator.dupe(u8, edge.id) catch return;
-        defer self.allocator.free(edge_id);
-        const initial_from = self.allocator.dupe(u8, edge.from) catch return;
-        defer self.allocator.free(initial_from);
-        const initial_to = self.allocator.dupe(u8, edge.to) catch return;
-        defer self.allocator.free(initial_to);
-        const initial_kind = self.allocator.dupe(u8, edge.kind) catch return;
-        defer self.allocator.free(initial_kind);
-        const draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
-            .from = initial_from,
-            .to = initial_to,
-            .kind = initial_kind,
-        }) catch {
-            self.setStatus("Unable to open edge form");
-            return;
-        } orelse return;
-        defer self.allocator.free(draft.from);
-        defer self.allocator.free(draft.to);
-        defer self.allocator.free(draft.kind);
-        Forms.validateEdge(draft) catch {
-            self.setStatus("Invalid edge form");
+        const result = EdgeEditing.edit(self.allocator, &self.model, &self.client, index, .{ .context = self, .show = showEdgeEditor }) catch |err| {
+            var message: [160]u8 = undefined;
+            self.setStatus(std.fmt.bufPrint(&message, "Unable to edit edge: {s}", .{@errorName(err)}) catch "Unable to edit edge");
             return;
         };
-        const updated_graph = self.model.graph orelse return;
-        const updated_index = GraphModel.findEdgeIndexByID(updated_graph.edges.items, edge_id) orelse {
-            self.setStatus("Edge changed while editing");
-            return;
-        };
-        const from_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, draft.from) orelse {
-            self.setStatus("Source loop changed while editing edge");
-            return;
-        };
-        const to_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, draft.to) orelse {
-            self.setStatus("Target loop changed while editing edge");
-            return;
-        };
-        self.client.sendDeleteEdge(project_path, updated_graph.edges.items[updated_index].id);
-        self.client.sendCreateEdge(
-            project_path,
-            updated_graph.nodes.items[from_index].id,
-            updated_graph.nodes.items[to_index].id,
-            draft.kind,
-        );
+        if (result == .queued) self.setStatus("Edge update queued; waiting for daemon");
+    }
+
+    fn showEdgeEditor(context: ?*anyopaque, allocator: std.mem.Allocator, initial: Forms.EdgeDraft) !?Forms.EdgeDraft {
+        const self: *App = @ptrCast(@alignCast(context.?));
+        return NativeForms.editEdge(self.window.hwnd, allocator, initial);
     }
 
     fn deleteEdge(self: *App, index: usize) void {

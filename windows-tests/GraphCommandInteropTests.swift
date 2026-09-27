@@ -5,6 +5,25 @@ import IdentifiedCollections
 @testable import GraphcodeKit
 
 final class GraphCommandInteropTests: XCTestCase {
+  func testUpdateEdgeInMemoryWirePayloadPreservesTypedOptionalState() throws {
+    let payload = Data(#"""
+      {"graphCommand":{"projectPath":"A","command":{"updateEdge":{"id":"33333333-3333-4333-8333-333333333333","from":"11111111-1111-4111-8111-111111111111","to":"22222222-2222-4222-8222-222222222222","expectedSpec":{"kind":"handoff","condition":"onFailure","payloadTransform":{"template":{"_0":"quoted \"payload\" \u2603"}},"cycleGuard":{},"spawnTargetProjectPath":""},"spec":{"kind":"message","condition":"onFailure","payloadTransform":{"template":{"_0":"quoted \"payload\" \u2603"}},"cycleGuard":{},"spawnTargetProjectPath":""}}}}}
+      """#.utf8)
+    let decoded = try JSONDecoder().decode(DaemonCommand.self, from: payload)
+    guard case .graphCommand(let project, .updateEdge(let id, let from, let to, let expected, let spec)) = decoded else {
+      return XCTFail("Expected checked edge update")
+    }
+    XCTAssertEqual(project, "A")
+    XCTAssertEqual(id.uuidString.lowercased(), "33333333-3333-4333-8333-333333333333")
+    XCTAssertNotEqual(from, to)
+    XCTAssertEqual(expected.kind, .handoff)
+    XCTAssertEqual(spec.kind, .message)
+    XCTAssertEqual(spec.payloadTransform, .template("quoted \"payload\" \u{2603}"))
+    XCTAssertEqual(spec.cycleGuard, CycleGuard())
+    XCTAssertEqual(spec.spawnTargetProjectPath, "")
+    XCTAssertEqual(try JSONDecoder().decode(DaemonCommand.self, from: JSONEncoder().encode(decoded)), decoded)
+  }
+
   func testCreateEdgeWirePayloadDecodesToSwiftGraphCommand() throws {
     let data = try fixture("daemon-v2-create-edge.json")
     let envelope = try JSONDecoder().decode(RequestEnvelope.self, from: data)
