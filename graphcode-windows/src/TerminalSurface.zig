@@ -2851,17 +2851,39 @@ fn onImeStart(user_data: ?*anyopaque, surface: *c.winghostty_surface) callconv(.
     _ = surface;
 }
 
-fn onImeUpdate(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]const u8, length: u32, cursor: u32) callconv(.c) void {
-    _ = user_data;
-    _ = surface;
-    _ = text;
-    _ = length;
-    _ = cursor;
+fn onImeUpdate(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]const u8, length: u32, committed: u8) callconv(.c) void {
+    if (committed == 0) return;
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    _ = callbackSlot(workspace, surface) orelse return;
+    const index = surfaceIndex(workspace, surface) orelse return;
+    workspace.enqueueInput(index, text[0..length]);
 }
 
 fn onImeEnd(user_data: ?*anyopaque, surface: *c.winghostty_surface) callconv(.c) void {
     _ = user_data;
     _ = surface;
+}
+
+test "committed IME composition enters the terminal input queue" {
+    const allocator = std.testing.allocator;
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+
+    const fake_surface: *c.winghostty_surface = @ptrFromInt(0x1000);
+    workspace.surfaces[3].surface = fake_surface;
+
+    const preedit = "kana";
+    onImeUpdate(@ptrCast(&workspace), fake_surface, preedit, preedit.len, 0);
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+
+    const committed = "日本";
+    onImeUpdate(@ptrCast(&workspace), fake_surface, committed, committed.len, 1);
+    try std.testing.expectEqual(@as(usize, 1), workspace.input_queue.count);
+    const item = workspace.input_queue.dequeue().?;
+    defer allocator.free(item.bytes);
+    try std.testing.expectEqual(@as(usize, 3), item.surface);
+    try std.testing.expectEqualStrings(committed, item.bytes);
 }
 
 fn onMouse(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_mouse_event) callconv(.c) void {

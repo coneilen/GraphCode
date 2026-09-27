@@ -1624,6 +1624,185 @@ test "workspace cycle keyboard actual accelerator descriptors provide both direc
     }
 }
 
+test "production dispatch delivers IME composition lifecycle to a native EDIT control" {
+    const Probe = struct {
+        var original: c.WNDPROC = null;
+        var messages: [3]c.UINT = undefined;
+        var count: usize = 0;
+
+        fn editProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.c) c.LRESULT {
+            if (message == c.WM_IME_STARTCOMPOSITION or
+                message == c.WM_IME_COMPOSITION or
+                message == c.WM_IME_ENDCOMPOSITION)
+            {
+                messages[count] = message;
+                count += 1;
+            }
+            return c.CallWindowProcW(original, hwnd, message, wparam, lparam);
+        }
+    };
+    Probe.count = 0;
+    const parent = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+        std.unicode.utf8ToUtf16LeStringLiteral("IME dispatch test"),
+        c.WS_OVERLAPPED,
+        0,
+        0,
+        320,
+        120,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(parent);
+    const edit = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("EDIT"),
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        c.WS_CHILD | c.ES_AUTOHSCROLL,
+        0,
+        0,
+        280,
+        24,
+        parent,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.EditCreationFailed;
+    const previous = c.SetWindowLongPtrW(
+        edit,
+        c.GWLP_WNDPROC,
+        @bitCast(@intFromPtr(&Probe.editProc)),
+    );
+    if (previous == 0) return error.EditSubclassFailed;
+    Probe.original = @ptrFromInt(@as(usize, @bitCast(previous)));
+
+    var window = Window{ .hwnd = parent };
+    var message = std.mem.zeroes(c.MSG);
+    message.hwnd = edit;
+    for ([_]struct { kind: c.UINT, lparam: c.LPARAM }{
+        .{ .kind = c.WM_IME_STARTCOMPOSITION, .lparam = 0 },
+        .{ .kind = c.WM_IME_COMPOSITION, .lparam = 0x0008 },
+        .{ .kind = c.WM_IME_ENDCOMPOSITION, .lparam = 0 },
+    }) |expected| {
+        message.message = expected.kind;
+        message.lParam = expected.lparam;
+        window.dispatchMessage(&message, .{}, edit);
+    }
+    try std.testing.expectEqualSlices(c.UINT, &.{
+        c.WM_IME_STARTCOMPOSITION,
+        c.WM_IME_COMPOSITION,
+        c.WM_IME_ENDCOMPOSITION,
+    }, Probe.messages[0..Probe.count]);
+}
+
+test "production dispatch preserves dead-key composition and non-US physical-key mapping" {
+    const Probe = struct {
+        var dead_chars: [4]u16 = undefined;
+        var dead_count: usize = 0;
+        var chars: [8]u16 = undefined;
+        var char_count: usize = 0;
+
+        fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.c) c.LRESULT {
+            switch (message) {
+                c.WM_DEADCHAR => {
+                    dead_chars[dead_count] = @truncate(wparam);
+                    dead_count += 1;
+                    return 0;
+                },
+                c.WM_CHAR => {
+                    chars[char_count] = @truncate(wparam);
+                    char_count += 1;
+                    return 0;
+                },
+                else => return c.DefWindowProcW(hwnd, message, wparam, lparam),
+            }
+        }
+
+        fn reset() void {
+            dead_count = 0;
+            char_count = 0;
+        }
+    };
+    const test_class = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeKeyboardLayoutDispatchTest");
+    var window_class = std.mem.zeroes(c.WNDCLASSW);
+    window_class.hInstance = c.GetModuleHandleW(null);
+    window_class.lpszClassName = test_class;
+    window_class.lpfnWndProc = &Probe.windowProc;
+    if (c.RegisterClassW(&window_class) == 0) return error.WindowClassRegistrationFailed;
+    defer _ = c.UnregisterClassW(test_class, window_class.hInstance);
+    const hwnd = c.CreateWindowExW(
+        0,
+        test_class,
+        std.unicode.utf8ToUtf16LeStringLiteral("Keyboard layout dispatch test"),
+        c.WS_OVERLAPPED,
+        0,
+        0,
+        320,
+        120,
+        null,
+        null,
+        window_class.hInstance,
+        null,
+    ) orelse return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+
+    const original_layout = c.GetKeyboardLayout(0);
+    defer _ = c.ActivateKeyboardLayout(original_layout, 0);
+    var original_keyboard_state: [256]u8 = undefined;
+    if (c.GetKeyboardState(&original_keyboard_state) == 0) return error.KeyboardStateUnavailable;
+    defer _ = c.SetKeyboardState(&original_keyboard_state);
+    var clear_keyboard_state = [_]u8{0} ** 256;
+    if (c.SetKeyboardState(&clear_keyboard_state) == 0) return error.KeyboardStateUnavailable;
+
+    var window = Window{ .hwnd = hwnd };
+    const Dispatch = struct {
+        fn key(target: *Window, target_hwnd: c.HWND, layout: c.HKL, scan_code: u32) !void {
+            const virtual_key = c.MapVirtualKeyExW(scan_code, c.MAPVK_VSC_TO_VK_EX, layout);
+            if (virtual_key == 0) return error.VirtualKeyMappingUnavailable;
+            var message = std.mem.zeroes(c.MSG);
+            message.hwnd = target_hwnd;
+            message.message = c.WM_KEYDOWN;
+            message.wParam = virtual_key;
+            message.lParam = @intCast(1 | (scan_code << 16));
+            target.dispatchMessage(&message, .{}, target_hwnd);
+            while (c.PeekMessageW(&message, target_hwnd, c.WM_KEYFIRST, c.WM_KEYLAST, c.PM_REMOVE) != 0) {
+                target.dispatchMessage(&message, .{}, target_hwnd);
+            }
+        }
+    };
+
+    const international = c.LoadKeyboardLayoutW(
+        std.unicode.utf8ToUtf16LeStringLiteral("00020409"),
+        c.KLF_NOTELLSHELL,
+    ) orelse {
+        std.log.warn("skipping keyboard composition test: US-International layout is unavailable", .{});
+        return error.SkipZigTest;
+    };
+    defer _ = c.UnloadKeyboardLayout(international);
+    if (c.ActivateKeyboardLayout(international, 0) == null) return error.KeyboardLayoutActivationFailed;
+    Probe.reset();
+    try Dispatch.key(&window, hwnd, international, 0x28);
+    try std.testing.expectEqual(@as(usize, 1), Probe.dead_count);
+    try Dispatch.key(&window, hwnd, international, 0x12);
+    try std.testing.expectEqualSlices(u16, &.{0x00e9}, Probe.chars[0..Probe.char_count]);
+
+    const french = c.LoadKeyboardLayoutW(
+        std.unicode.utf8ToUtf16LeStringLiteral("0000040c"),
+        c.KLF_NOTELLSHELL,
+    ) orelse {
+        std.log.warn("skipping keyboard composition test: French layout is unavailable", .{});
+        return error.SkipZigTest;
+    };
+    defer _ = c.UnloadKeyboardLayout(french);
+    if (c.ActivateKeyboardLayout(french, 0) == null) return error.KeyboardLayoutActivationFailed;
+    Probe.reset();
+    try Dispatch.key(&window, hwnd, french, 0x10);
+    try std.testing.expectEqualSlices(u16, &.{'a'}, Probe.chars[0..Probe.char_count]);
+}
+
 test "workspace cycle keyboard pretranslation consumes owned normal and system keys before child dispatch" {
     const Probe = struct {
         direction: ?isize = null,
