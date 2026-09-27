@@ -277,7 +277,8 @@ public enum CodexSessionLog {
     let stamp = await TranscriptFreshness.shared.remoteStamp(forNode: node.id)
     let reply = await RemoteTranscriptProbe.run(
       remoteSummaryInvocation(
-        forNode: node, at: location, workingDirectory: workingDirectory, since: stamp))
+        forNode: node, at: location, workingDirectory: workingDirectory, since: stamp),
+      at: location)
     guard case .lines(let newStamp, let lines) = reply else { return nil }
     await TranscriptFreshness.shared.recordRemoteStamp(newStamp, forNode: node.id)
     var builder = builder(forLines: lines)

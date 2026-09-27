@@ -27,6 +27,7 @@ let package = Package(
       exclude: [
         "BackendCommand.swift",
         "RemoteProjectLocation.swift",
+        "RemoteProjectLocation+Codespace.swift",
         "SessionBriefing.swift",
       ]),
     .testTarget(
