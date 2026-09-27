@@ -38,7 +38,8 @@ conformance, and end-to-end accessibility parity remain unverified or incomplete
 The graph surface also provides native Win32 create/edit forms for nodes and
 edges, a settings dialog, context menus, and keyboard-accessible actions:
 `Ctrl+N` creates a node, `Ctrl+J` opens the jump palette, and `Ctrl+,` opens
-advanced connection settings. With the graph canvas owning the keyboard,
+Advanced Connection Settings. `Ctrl+Shift+,` opens product Settings.
+With the graph canvas owning the keyboard,
 `F2` or `Ctrl+E` renames the selected loop; `Ctrl+E` edits the selected edge
 instead when an edge is selected. Full **Edit Details...** remains a node
 context-menu action, not the `Ctrl+E` action. **Open Terminal** is also in that
@@ -90,6 +91,19 @@ changing the old project/composite/node selection; later legacy snapshot
 rebuilding is unchanged and is not covered by that preparation guarantee.
 Parity remains **Partial**: overview right-click, shown native-menu/form behavior,
 and real-daemon acceptance/persistence are not established by these queue tests.
+
+Sketch loop context menus on the project canvas and in the sidebar offer
+**Promote to... > Goal / Turn / Timed**. Each native form asks only for its
+target's decision: a done check, where to pause, or a cadence. Timed promotion
+uses the captured sketch's first instruction, with the same fallback and
+interval choices as macOS. Promotion uses the existing daemon command; it does
+not recreate the node or replace its session, history, worktree, or edges.
+The clicked project can differ from the observation subscription. Popup and
+form contexts are owned and rechecked; stale project/composite, selection,
+deleted-node, or changed-type results do not send or retarget a command.
+"Queued" reports local queue insertion, not daemon acceptance or persistence.
+Pure production-adapter tests and Swift fixture decoding cover this path;
+native keyboard/UIA and real-daemon promotion remain unverified.
 
 The shell exposes a native File/Loop/Terminal/View/Help menu bar. Menu items
 share the same application action router as keyboard shortcuts, and project
@@ -198,9 +212,116 @@ existing destination and preserves the directory's saved files.
 Executable coverage includes production helpers, allocation failures, disposable
 filesystem mutations, exact launch/restore routing, and never-shown native
 controls/windows/menus. This is not a live multi-instance, keyboard, UIA, or
-real-daemon walkthrough. The lifecycle parity row remains Partial: macOS also
-provides a structured Manage view, content summaries, creation-order/running-only
-cycling, and recoverable deletion with daemon/session teardown.
+real-daemon walkthrough. The lifecycle parity row remains Partial, including
+running-only cycling and recoverable deletion with daemon/session teardown.
+
+Manage Workspaces now opens a native list with owned workspace names, full paths,
+saved-summary states, and current/default/open-elsewhere or uncertain-window
+refusals. Its discovery order follows macOS: Default first, named directories by
+creation time (ordinal name ties, unreadable dates last), then the current
+workspace outside the home directory if its lexical identity is not already
+listed. This manager-only order does not change the menu or next/previous
+cycling policy above. Manage remains available with zero or one old-menu rows,
+so New and the current-outside-home row stay reachable. Open and targeted Rename
+capture an owned identity, not a row index; New uses the existing guarded
+creation flow. The manager releases
+its modal lease and destroys its controls before any follow-up name dialog.
+Identity, default/current, directory, window ownership, and applicable canonical
+and legacy reservation checks run again before acting. Done is the default;
+Done/Escape cancels any pending handoff without changing the current workspace.
+
+The manager's Delete button is disabled with an explicit explanation: recoverable
+deletion and owned daemon/session teardown are still separate work. This does not
+change the existing Workspace menu's permanent-delete behavior.
+
+Saved summaries are a conservative read-only projection of the existing
+`projects\*.json` graph headers and top-level node arrays, not a new graph decoder.
+Like macOS `Workspace.contents`, they count top-level nodes, not descendants.
+They are labelled **saved top-level loops**, not live totals; this window's live
+total is unavailable because the shell has no reliable workspace-wide inventory.
+Documented `*.mailroom.json` arrays are sidecars; a graph object with that suffix
+is still counted. A missing projects directory is unavailable, while a readable
+empty projects directory has a genuine saved zero count. Invalid consumed fields,
+unreadable files, duplicate exact project paths, or exceeded limits make the whole
+summary unavailable rather than presenting partial counts. Unconsumed graph
+fields are not validated, and a saved summary is not evidence of graph validity.
+
+One App-owned, joinable worker reads only fixed local-drive paths, refusing
+network/device paths and reparse points at each opened component and entry.
+It does not start a daemon, connect to a backend, inspect terminal layouts, or
+activate windows. Limits are 256 directory entries, 1 MiB/file, 8 MiB/workspace,
+32 MiB/dialog, 8 MiB JSON parser scratch, and nesting depth 128; exceeding depth
+is an availability limit, not a claim that a graph is corrupt. Results are cached
+for the dialog. Polling observes completion before copying the final snapshot,
+then joins the worker before stopping updates; a completion racing an earlier
+copy is collected on the next poll, not discarded. Done/Escape cancels without
+waiting for the reader; App retains the job, and reopening cannot start another
+until it has been joined. A requested
+Open/New/Rename waits in the responsive modal until cancellation finishes and
+the reader is joined, then revalidates the captured target. Shutdown cancels and
+joins before App/allocator teardown. A stalled local disk can delay shutdown:
+synchronous reads have no finite cancellation-time guarantee.
+
+Manager coverage is pure owned-data/fixture testing, controlled memory-only
+joined-worker tests, and a Windows ReleaseSafe build, without launching the app
+or exercising native controls, actual user windows, UIA, or real workspaces.
+The parity row remains **Partial**: shown-dialog accessibility/keyboard/layout
+and multi-instance behavior, complete live totals, running-only cycling, and
+recoverable deletion still need their own evidence or implementation.
+
+## Local worktree Git processes
+
+`WorktreeStatus` runs local Git with explicit `-C` paths and a child-only copy of
+the environment. Windows environment names are matched case-insensitively.
+The following inherited overrides are removed:
+
+| Variables | Reason |
+|---|---|
+| `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_IMPLICIT_WORK_TREE` | Repository/worktree location |
+| `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` | Index and object storage routing |
+| `GIT_SHALLOW_FILE`, `GIT_GRAFT_FILE`, `GIT_REPLACE_REF_BASE`, `GIT_NO_REPLACE_OBJECTS`, `GIT_NAMESPACE` | Alternate history/ref interpretation |
+| `GIT_PREFIX`, `GIT_INTERNAL_SUPER_PREFIX`, `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM` | Inherited repository-discovery context |
+| `GIT_CONFIG`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS` | Config target and invocation-local injected settings, which can override repository settings |
+
+Invocation-local injected configuration is intentionally not preserved.
+Numbered `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` entries are inert without
+`GIT_CONFIG_COUNT`. Ordinary config locations (`GIT_CONFIG_GLOBAL`,
+`GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM`, HOME/profile/XDG paths), PATH,
+`GIT_EXEC_PATH`, askpass, SSH and authentication settings remain inherited.
+This is not a sandbox against trusted Git configuration or executables, and it
+does not change reclaim safety, selection, or confirmation policy.
+
+The helper starts no console window, ignores stdin, and uses Zig 0.15.2
+`Child.collectOutput` to drain both pipes with a 1 MiB limit per stream.
+Oversized output reports `StdoutStreamTooLong` or `StderrStreamTooLong`; nonzero
+exit still reports `GitFailed`. Capture/allocation failures terminate and reap
+the owned child; cleanup failures log both error names without command output
+or environment values. Output transfers only after wait succeeds. Removal
+callers free successful output and the complete inspection.
+There is **no production wall-clock timeout or descendant-process-tree guarantee**.
+
+`Tools\windows\Tests\WindowsShell.Tests.ps1` invokes the dedicated regression
+script after the pure WorktreeStatus tests. To run only this no-UI suite:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\Tests\WorktreeGitProcess.Tests.ps1 `
+  -Zig <path-to-zig-0.15.2.exe> -EvidenceDirectory <new-owned-directory>
+```
+
+The script creates its own target/outside-control repositories, isolates fixture
+configuration before the first Git command, and gates each test process until
+it belongs to a kill-on-close Windows job. Every case has a 60-second external
+deadline; missing setup and native/test/cleanup failures fail the script.
+Evidence directories must be new and are retained, including failed RED logs.
+Explicit case selections must contain at least one of the exact, case-sensitive
+17 supported names; invalid/empty selections fail during parameter binding
+before setup. The suite also checks that raw Zig invalid selectors return
+`UnknownFixtureScenario` before creating or running repository fixtures.
+Real Git scope/index/object/config and selected-removal coverage is distinct
+from synthetic stream/output-ownership cases. Allocation-failure coverage
+checks allocations and process-handle balance. Standalone module tests remain
+no-spawn; invoking the dedicated test executable without its harness fails.
+These checks are not a GUI, live-provider, or full worktree-parity walkthrough.
 
 ## Graph decoder ownership
 
@@ -221,6 +342,55 @@ with Zig 0.15.2 for direct test-allocator, exhaustive allocation-fault, malforme
 input, and temporary-JSON-lifetime coverage. Run `zig test src\GraphModel.zig`
 for the existing semantic root as well. These are offline allocation simulations,
 not evidence of true OS memory exhaustion or live UI behavior.
+
+Graph decoding resolves immediate JSON object fields, not the first occurrence
+of a key anywhere in a frame. The v2 `event.graphChanged` (or legacy root
+`graphChanged`) supplies the graph; only that graph's `project`, `nodes`, and
+`edges` are used. Nested graphs retain their own arrays and inherit the parent
+project when opened. Metadata, nested children, and key-like string contents
+cannot supply parent fields. The nonfallible subgraph display count remains
+allocation-free and counts only immediate node objects.
+
+Node goal, usage, presence, and worktree fields use their explicit containing
+objects. Canonical goal metric/poll/stall fields take precedence over the
+existing direct-node legacy fields; a missing field in a goal object can use
+that legacy fallback, but an explicit null/wrong-type goal or canonical field
+cannot. Goal summary/predicate come only from `goal`. A present `usage` owns its
+token fields even when empty, null, or the wrong type; only absent usage uses
+direct-node token fields. Within a worktree binding, a string `path` precedes
+`worktreePath`, with the existing alias fallback for absent/nonstring `path`.
+Scalar presence strings and same-object token-count aliases remain supported.
+Scoped graph/node lookups retain first-field precedence. Their
+missing/null/wrong-type fields keep existing defaults, including the existing
+unsigned numeric-prefix conversion. Once the owning graph's edge array is
+selected, the independent typed edge decoder retains its stricter contract:
+duplicate fields and invalid edge elements are errors, `fireCount` is a signed
+integer, and cycle guards, transforms, and spawn configuration remain owned.
+
+Temporary field indexes/decoded keys and mixed-delimiter stacks use the caller's
+allocator and propagate allocation errors. Values borrow input only during
+decoding; all retained model strings, including raw `subGraph`, are owned.
+Object/array punctuation, key escapes, and primitive tokens are checked using
+scoped traversal and standard JSON lexing. Structural validation advances one
+cursor through nested containers, rather than scanning descendants again at each
+level; work is linear in input size, with stack storage proportional to depth.
+Bounded depth/width tests count actual span-scan byte visits and validator
+iterations, not elapsed time, and exhaustively exercise stack allocation failure.
+Stored `subGraph` contents remain
+opaque until opened (apart from balanced string/container boundaries), preserving
+the malformed-child-string fallback. Other string payloads retain the existing
+`Wire.decodeJsonString` validation when consumed; ignored strings are not newly
+schema-validated. Malformed decoded graph structure reports `MalformedGraph` or
+`MalformedSubgraph`, and invalid decoded string escapes report
+`MalformedJsonString`. The typed edge decoder preserves `SyntaxError`,
+`MalformedEdge`, and `DuplicateField`; the nested fallback explicitly propagates
+`OutOfMemory` before handling malformed data. Unrelated recursive Wire envelope
+queries are unchanged.
+
+Run `zig test src\GraphModel.zig --test-filter "field scope"` for key-order,
+root/child identity, escaped-key/string, defaults/precedence, malformed-input,
+temporary-lifetime, and exhaustive allocation-failure regressions. This is pure
+decoder evidence, not live graph rendering or a parity-status promotion.
 
 ## Build
 

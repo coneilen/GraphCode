@@ -38,7 +38,7 @@ try {
       @{ Root = "src\GraphContextMenu.zig"; Filter = "custody child"; Count = 2; Extra = @() },
       @{ Root = "src\NativeForms.zig"; Filter = "custody child"; Count = 4; Extra = @() },
       @{ Root = "src\GraphModel.zig"; Filter = "custody selection"; Count = 2; Extra = @() },
-      @{ Root = "src\App.zig"; Filter = "custody child"; Count = 27; Extra = @("src\AccessibilityProvider.cpp", "-lgdi32", "-ladvapi32", "-loleaut32", "-luiautomationcore", "-lwinhttp") }
+      @{ Root = "src\App.zig"; Filter = "custody child"; Count = 30; Extra = @("src\AccessibilityProvider.cpp", "-lgdi32", "-ladvapi32", "-loleaut32", "-luiautomationcore", "-lwinhttp") }
     )
     foreach ($case in $cases) {
       $arguments = @("test", $case.Root, "-target", "x86_64-windows-msvc", "-lc", "-luser32", "-I$include", "--test-filter", $case.Filter) + $case.Extra
