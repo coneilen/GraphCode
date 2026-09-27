@@ -38,6 +38,8 @@ const DialogState = struct {
     policy: WorktreeStatus.Policy = .{},
     edge_endpoints: []const EdgeEndpoint = &.{},
     lock_edge_endpoints: bool = true,
+    edge_initial: ?Forms.EdgeDraft = null,
+    edge_read_errors: [10]?anyerror = .{null} ** 10,
     immediate_policy_path: []const u8 = "",
     confirmation_armed: bool = false,
     tile_field_index: ?usize = null,
@@ -457,6 +459,21 @@ pub fn edgeWithEndpoints(
     endpoints: []const EdgeEndpoint,
     lock_endpoints: bool,
 ) !?Forms.EdgeDraft {
+    return edgeDialog(parent, allocator, initial, endpoints, lock_endpoints, false);
+}
+
+pub fn editEdge(parent: c.HWND, allocator: std.mem.Allocator, initial: Forms.EdgeDraft) !?Forms.EdgeDraft {
+    return edgeDialog(parent, allocator, initial, &.{}, true, true);
+}
+
+fn edgeDialog(
+    parent: c.HWND,
+    allocator: std.mem.Allocator,
+    initial: Forms.EdgeDraft,
+    endpoints: []const EdgeEndpoint,
+    lock_endpoints: bool,
+    editing: bool,
+) !?Forms.EdgeDraft {
     const state = try allocator.create(DialogState);
     state.* = .{
         .allocator = allocator,
@@ -470,6 +487,14 @@ pub fn edgeWithEndpoints(
         allocator.destroy(state);
     }
 
+    if (editing) state.edge_initial = try initial.clone(allocator);
+    try initializeEdge(state, initial);
+    if (!(try show(state, if (editing) "Edit edge" else "Create or edit edge", &.{}))) return null;
+    return try buildEdgeDraftWithInitial(allocator, &state.values, state.edge_initial);
+}
+
+fn initializeEdge(state: *DialogState, initial: Forms.EdgeDraft) !void {
+    const allocator = state.allocator;
     state.values[0] = try allocator.dupe(u8, initial.from);
     state.values[1] = try allocator.dupe(u8, initial.to);
     state.values[2] = try allocator.dupe(u8, initial.kind);
@@ -480,11 +505,13 @@ pub fn edgeWithEndpoints(
     state.values[7] = try dupOptionalIntText(allocator, initial.cycle_max_iterations);
     state.values[8] = try dupOptionalIntText(allocator, initial.cycle_stop_after_passes);
     state.values[9] = try allocator.dupe(u8, initial.spawn_target_project_path);
-    if (!(try show(state, "Create or edit edge", &.{}))) return null;
-    return try buildEdgeDraft(allocator, &state.values);
 }
 
 fn buildEdgeDraft(allocator: std.mem.Allocator, values: []const []u8) !Forms.EdgeDraft {
+    return buildEdgeDraftWithInitial(allocator, values, null);
+}
+
+fn buildEdgeDraftWithInitial(allocator: std.mem.Allocator, values: []const []u8, initial: ?Forms.EdgeDraft) !Forms.EdgeDraft {
     const cycle_max = parseOptionalInt(values[7]) catch return error.InvalidNumericInput;
     const cycle_stop = parseOptionalInt(values[8]) catch return error.InvalidNumericInput;
     var result = Forms.EdgeDraft{ .from = &.{}, .to = &.{}, .kind = &.{}, .condition = &.{}, .transform_kind = &.{}, .transform_value = &.{}, .cycle_until = &.{}, .spawn_target_project_path = &.{} };
@@ -499,8 +526,74 @@ fn buildEdgeDraft(allocator: std.mem.Allocator, values: []const []u8) !Forms.Edg
     result.cycle_max_iterations = cycle_max;
     result.cycle_stop_after_passes = cycle_stop;
     result.spawn_target_project_path = try allocator.dupe(u8, values[9]);
-    try Forms.validateEdge(result);
+    if (initial) |original| try Forms.validateEdgeEdit(original, result) else try Forms.validateEdge(result);
     return result;
+}
+
+test "edge editing native: actual initializer and builder retain all owned fields" {
+    const allocator = std.testing.allocator;
+    const state = try allocator.create(DialogState);
+    defer allocator.destroy(state);
+    state.* = .{ .allocator = allocator, .kind = .edge, .parent = null };
+    defer freeValues(state);
+    const initial = Forms.EdgeDraft{
+        .from = "source", .to = "target", .kind = "spawn", .condition = "onFailure",
+        .transform_kind = "script", .transform_value = "  say \"\xe2\x98\x83\"  ",
+        .cycle_max_iterations = -7, .cycle_until = "", .cycle_stop_after_passes = 0,
+        .spawn_target_project_path = "C:\\quoted \"project\"\\\xe2\x98\x83",
+    };
+    state.edge_initial = try initial.clone(allocator);
+    try initializeEdge(state, initial);
+    try std.testing.expectEqualStrings("-7", state.values[7]);
+    try std.testing.expectEqualStrings("0", state.values[8]);
+    var result = try buildEdgeDraftWithInitial(allocator, &state.values, state.edge_initial);
+    defer result.deinit(allocator);
+    try std.testing.expectEqualStrings(initial.condition, result.condition);
+    try std.testing.expectEqualStrings(initial.transform_value, result.transform_value);
+    try std.testing.expectEqualStrings(initial.spawn_target_project_path, result.spawn_target_project_path);
+    try std.testing.expectEqual(initial.cycle_max_iterations, result.cycle_max_iterations);
+    try std.testing.expectEqual(initial.cycle_stop_after_passes, result.cycle_stop_after_passes);
+    try std.testing.expectError(error.InvalidCycleGuard, buildEdgeDraft(allocator, &state.values));
+}
+
+test "edge editing native: intentional numeric changes validate against owned baseline" {
+    const allocator = std.testing.allocator;
+    const state = try allocator.create(DialogState);
+    defer allocator.destroy(state);
+    state.* = .{ .allocator = allocator, .kind = .edge, .parent = null };
+    defer freeValues(state);
+    state.edge_initial = try (Forms.EdgeDraft{ .from = "a", .to = "b", .cycle_max_iterations = -7 }).clone(allocator);
+    try initializeEdge(state, state.edge_initial.?);
+    allocator.free(state.values[7]);
+    state.values[7] = try allocator.dupe(u8, "-8");
+    try std.testing.expectError(error.InvalidCycleGuard, buildEdgeDraftWithInitial(allocator, &state.values, state.edge_initial));
+    allocator.free(state.values[7]);
+    state.values[7] = &.{};
+    var cleared = try buildEdgeDraftWithInitial(allocator, &state.values, state.edge_initial);
+    defer cleared.deinit(allocator);
+    try std.testing.expect(cleared.cycle_max_iterations == null);
+}
+
+test "edge editing native: initializer baseline and returned draft allocations unwind" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const state = try allocator.create(DialogState);
+            defer allocator.destroy(state);
+            state.* = .{ .allocator = allocator, .kind = .edge, .parent = null };
+            defer freeValues(state);
+            const initial = Forms.EdgeDraft{
+                .from = "source", .to = "target", .condition = "onSuccess",
+                .transform_kind = "template", .transform_value = "payload",
+                .cycle_max_iterations = -3, .cycle_until = "  quoted \"until\"  ",
+                .spawn_target_project_path = "target",
+            };
+            state.edge_initial = try initial.clone(allocator);
+            try initializeEdge(state, initial);
+            var result = try buildEdgeDraftWithInitial(allocator, &state.values, state.edge_initial);
+            defer result.deinit(allocator);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 pub fn update(
@@ -1199,14 +1292,14 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             if (notification == c.CBN_SELCHANGE and command >= 9100 and command < 9120) {
                 readValue(value, command - 9100);
                 updateConditionalVisibility(value);
-                setStaticText(value, value.validation, "");
+                setStaticText(value, value.validation, edgeCaptureFailureReason(value) orelse "");
                 refreshRecap(value);
                 layoutForm(safe_hwnd, value);
                 return 0;
             }
             if ((notification == c.EN_CHANGE or notification == c.BN_CLICKED) and command >= 9100 and command < 9120) {
                 readValue(value, command - 9100);
-                setStaticText(value, value.validation, "");
+                setStaticText(value, value.validation, edgeCaptureFailureReason(value) orelse "");
                 refreshRecap(value);
             }
             if (value.kind == .worktree_policy and
@@ -2036,7 +2129,226 @@ fn readValues(state: *DialogState) void {
     for (0..state.field_count) |index| readValue(state, index);
 }
 
+const NativeEdgeReader = struct {
+    hwnd: c.HWND,
+
+    fn textLength(self: @This()) !usize {
+        if (c.IsWindow(self.hwnd) == 0) return error.EdgeFieldReadFailed;
+        c.SetLastError(0);
+        const length = c.GetWindowTextLengthW(self.hwnd);
+        if (length < 0 or (length == 0 and c.GetLastError() != 0)) return error.EdgeFieldReadFailed;
+        return @intCast(length);
+    }
+
+    fn readText(self: @This(), buffer: []u16) !usize {
+        if (c.IsWindow(self.hwnd) == 0) return error.EdgeFieldReadFailed;
+        c.SetLastError(0);
+        const length = c.GetWindowTextW(self.hwnd, buffer.ptr, @intCast(buffer.len));
+        if (length < 0 or (length == 0 and c.GetLastError() != 0)) return error.EdgeFieldReadFailed;
+        return @intCast(length);
+    }
+
+    fn selected(self: @This()) !usize {
+        if (c.IsWindow(self.hwnd) == 0) return error.EdgeFieldReadFailed;
+        const index = c.SendMessageW(self.hwnd, c.CB_GETCURSEL, 0, 0);
+        if (index < 0) return error.EdgeFieldReadFailed;
+        return @intCast(index);
+    }
+};
+
+fn captureEdgeField(state: *DialogState, index: usize, reader: anytype) !void {
+    const value = switch (state.input_kinds[index]) {
+        .edit, .readonly => blk: {
+            const expected = try reader.textLength();
+            if (expected >= std.math.maxInt(c_int)) return error.EdgeFieldTooLong;
+            const buffer = try state.allocator.alloc(u16, expected + 1);
+            defer state.allocator.free(buffer);
+            const length = try reader.readText(buffer);
+            if (length != expected or try reader.textLength() != expected) return error.EdgeFieldChangedDuringRead;
+            break :blk try std.unicode.utf16LeToUtf8Alloc(state.allocator, buffer[0..length]);
+        },
+        .combo => blk: {
+            const selected = try reader.selected();
+            const options = choices(state.choice_groups[index]);
+            if (selected >= options.len) return error.EdgeFieldReadFailed;
+            break :blk try state.allocator.dupe(u8, options[selected].value);
+        },
+        else => return error.EdgeFieldReadFailed,
+    };
+    state.allocator.free(state.values[index]);
+    state.values[index] = value;
+}
+
+fn refreshEdgeField(state: *DialogState, index: usize, reader: anytype) void {
+    captureEdgeField(state, index, reader) catch |err| {
+        state.edge_read_errors[index] = err;
+        return;
+    };
+    state.edge_read_errors[index] = null;
+}
+
+fn edgeCaptureFailureReason(state: *const DialogState) ?[]const u8 {
+    if (state.edge_initial == null) return null;
+    for (state.edge_read_errors) |failure| {
+        if (failure) |err| return switch (err) {
+            error.OutOfMemory => "Out of memory reading edge fields; retry or cancel.",
+            error.EdgeFieldTooLong => "This edge field is too long to read safely.",
+            else => "Unable to read an edge field completely; retry or cancel.",
+        };
+    }
+    return null;
+}
+
+const EdgeCaptureProbe = struct {
+    text: []const u16,
+    length_override: ?usize = null,
+    read_error: bool = false,
+    selection: ?usize = 0,
+
+    fn textLength(self: @This()) !usize {
+        return self.length_override orelse self.text.len;
+    }
+    fn readText(self: @This(), buffer: []u16) !usize {
+        if (self.read_error) return error.EdgeFieldReadFailed;
+        const count = @min(self.text.len, buffer.len - 1);
+        @memcpy(buffer[0..count], self.text[0..count]);
+        buffer[count] = 0;
+        return count;
+    }
+    fn selected(self: @This()) !usize {
+        return self.selection orelse error.EdgeFieldReadFailed;
+    }
+};
+
+fn edgeCaptureTestState(allocator: std.mem.Allocator) !*DialogState {
+    const state = try allocator.create(DialogState);
+    errdefer allocator.destroy(state);
+    state.* = .{ .allocator = allocator, .kind = .edge, .parent = null, .field_count = 10 };
+    errdefer freeValues(state);
+    const initial = Forms.EdgeDraft{ .from = "a", .to = "b", .transform_kind = "template", .transform_value = "old" };
+    state.edge_initial = try initial.clone(allocator);
+    try initializeEdge(state, initial);
+    return state;
+}
+
+test "edge editing capture: live long Unicode field is never truncated" {
+    const allocator = std.testing.allocator;
+    const state = try edgeCaptureTestState(allocator);
+    defer allocator.destroy(state);
+    defer freeValues(state);
+    var text = [_]u16{'x'} ** 5000;
+    text[4998] = 0xd83d;
+    text[4999] = 0xde00;
+    const expected = try std.unicode.utf16LeToUtf8Alloc(allocator, &text);
+    defer allocator.free(expected);
+    refreshEdgeField(state, 5, EdgeCaptureProbe{ .text = &text });
+    try std.testing.expectEqual(expected.len, state.values[5].len);
+    try std.testing.expectEqualStrings(expected, state.values[5]);
+    try std.testing.expect(state.edge_read_errors[5] == null);
+}
+
+test "edge editing capture: allocation failure cannot accept an old value as success" {
+    const allocator = std.testing.allocator;
+    const state = try edgeCaptureTestState(allocator);
+    defer allocator.destroy(state);
+    defer freeValues(state);
+    var failure = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    state.allocator = failure.allocator();
+    refreshEdgeField(state, 5, EdgeCaptureProbe{ .text = std.unicode.utf8ToUtf16LeStringLiteral("new") });
+    try std.testing.expect(state.edge_read_errors[5] != null);
+    try std.testing.expectEqual(error.OutOfMemory, state.edge_read_errors[5].?);
+    try std.testing.expectEqualStrings("old", state.values[5]);
+    try std.testing.expect(validationReason(state) != null);
+}
+
+test "edge editing capture: read failures mismatched lengths and invalid Unicode refuse stale data" {
+    const allocator = std.testing.allocator;
+    const state = try edgeCaptureTestState(allocator);
+    defer allocator.destroy(state);
+    defer freeValues(state);
+    const text = std.unicode.utf8ToUtf16LeStringLiteral("new");
+    const invalid = [_]u16{0xd83d};
+    for ([_]EdgeCaptureProbe{
+        .{ .text = text, .read_error = true },
+        .{ .text = text, .length_override = 4 },
+        .{ .text = text, .length_override = std.math.maxInt(c_int) },
+        .{ .text = &invalid },
+    }) |reader| {
+        refreshEdgeField(state, 5, reader);
+        try std.testing.expect(state.edge_read_errors[5] != null);
+        try std.testing.expect(validationReason(state) != null);
+        try std.testing.expectEqualStrings("old", state.values[5]);
+    }
+    refreshEdgeField(state, 5, EdgeCaptureProbe{ .text = &.{} });
+    try std.testing.expect(state.edge_read_errors[5] == null);
+    try std.testing.expectEqualStrings("", state.values[5]);
+    // A completed read clears its capture error, not normal form validation.
+    try std.testing.expect(validationReason(state) != null);
+}
+
+test "edge editing capture: one field recovery cannot clear another unreadable field" {
+    const allocator = std.testing.allocator;
+    const state = try edgeCaptureTestState(allocator);
+    defer allocator.destroy(state);
+    defer freeValues(state);
+    const failed = EdgeCaptureProbe{ .text = &.{}, .read_error = true };
+    refreshEdgeField(state, 5, failed);
+    refreshEdgeField(state, 6, failed);
+    refreshEdgeField(state, 5, EdgeCaptureProbe{ .text = std.unicode.utf8ToUtf16LeStringLiteral("new") });
+    try std.testing.expect(state.edge_read_errors[5] == null);
+    try std.testing.expect(state.edge_read_errors[6] != null);
+    try std.testing.expect(validationReason(state) != null);
+    refreshEdgeField(state, 6, EdgeCaptureProbe{ .text = &.{} });
+    try std.testing.expect(validationReason(state) == null);
+    var accepted = try buildEdgeDraftWithInitial(allocator, &state.values, state.edge_initial);
+    defer accepted.deinit(allocator);
+    try std.testing.expectEqualStrings("new", accepted.transform_value);
+}
+
+test "edge editing capture: enum selection and allocation are checked" {
+    const allocator = std.testing.allocator;
+    const state = try edgeCaptureTestState(allocator);
+    defer allocator.destroy(state);
+    defer freeValues(state);
+    state.input_kinds[2] = .combo;
+    state.choice_groups[2] = .edge_kind;
+    for ([_]?usize{ null, 99 }) |selection| {
+        refreshEdgeField(state, 2, EdgeCaptureProbe{ .text = &.{}, .selection = selection });
+        try std.testing.expect(validationReason(state) != null);
+        try std.testing.expectEqualStrings("handoff", state.values[2]);
+    }
+    var failure = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    state.allocator = failure.allocator();
+    refreshEdgeField(state, 2, EdgeCaptureProbe{ .text = &.{}, .selection = 1 });
+    try std.testing.expectEqual(error.OutOfMemory, state.edge_read_errors[2].?);
+    try std.testing.expectEqualStrings("handoff", state.values[2]);
+    state.allocator = allocator;
+    refreshEdgeField(state, 2, EdgeCaptureProbe{ .text = &.{}, .selection = 1 });
+    try std.testing.expect(validationReason(state) == null);
+    try std.testing.expectEqualStrings("message", state.values[2]);
+}
+
+test "edge editing capture: dynamic buffers conversions and accepted results unwind on allocation failure" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const state = try edgeCaptureTestState(allocator);
+            defer allocator.destroy(state);
+            defer freeValues(state);
+            try captureEdgeField(state, 5, EdgeCaptureProbe{ .text = std.unicode.utf8ToUtf16LeStringLiteral("quoted \"\u{1f600}\" text") });
+            var accepted = try buildEdgeDraftWithInitial(allocator, &state.values, state.edge_initial);
+            defer accepted.deinit(allocator);
+            try std.testing.expectEqualStrings("quoted \"\xf0\x9f\x98\x80\" text", accepted.transform_value);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
 fn readValue(state: *DialogState, index: usize) void {
+    if (state.edge_initial != null) {
+        if (index >= state.edge_read_errors.len) return;
+        refreshEdgeField(state, index, NativeEdgeReader{ .hwnd = state.edits[index] });
+        return;
+    }
     if (state.edits[index] == null) return;
     switch (state.input_kinds[index]) {
         .tiles => {},
@@ -2110,6 +2422,7 @@ fn hasDestructiveSelection(state: *const DialogState) bool {
 }
 
 fn validationReason(state: *DialogState) ?[]const u8 {
+    if (edgeCaptureFailureReason(state)) |reason| return reason;
     switch (state.kind) {
         .node => {
             const goal_based = std.mem.eql(u8, state.values[1], "goalBased");
@@ -2146,7 +2459,7 @@ fn validationReason(state: *DialogState) ?[]const u8 {
         .edge => {
             const cycle_max = parseOptionalInt(state.values[7]) catch return "Maximum passes must be a whole number.";
             const cycle_stop = parseOptionalInt(state.values[8]) catch return "Flat metric passes must be a whole number.";
-            Forms.validateEdge(.{
+            const draft = Forms.EdgeDraft{
                 .from = state.values[0],
                 .to = state.values[1],
                 .kind = state.values[2],
@@ -2157,7 +2470,12 @@ fn validationReason(state: *DialogState) ?[]const u8 {
                 .cycle_max_iterations = cycle_max,
                 .cycle_stop_after_passes = cycle_stop,
                 .spawn_target_project_path = state.values[9],
-            }) catch |err| return formErrorReason(err);
+            };
+            if (state.edge_initial) |initial| {
+                Forms.validateEdgeEdit(initial, draft) catch |err| return formErrorReason(err);
+            } else {
+                Forms.validateEdge(draft) catch |err| return formErrorReason(err);
+            }
         },
         .update => {
             if (parseOptionalFloat(state.values[2])) |value| {
@@ -2215,6 +2533,7 @@ fn formErrorReason(err: anyerror) []const u8 {
         error.UnsupportedTransform => "Enter the template or script that should carry context.",
         error.InvalidCycleGuard => "Cycle limits must be positive whole numbers.",
         error.SameEndpoint => "Source and target must be different loops.",
+        error.ChangedEdgeEndpoints => "Editing cannot change the connection's endpoints.",
         error.MissingSource, error.MissingTarget => "This connection needs both endpoint identities.",
         error.UnsupportedBackend => "Choose a supported agent.",
         error.UnsupportedModelTier => "Choose a supported model tier.",
@@ -2223,6 +2542,7 @@ fn formErrorReason(err: anyerror) []const u8 {
 }
 
 fn freeValues(state: *DialogState) void {
+    if (state.edge_initial) |*initial| initial.deinit(state.allocator);
     for (&state.values) |value| if (value.len != 0) state.allocator.free(value);
     for (&state.initial_values) |value| if (value.len != 0) state.allocator.free(value);
     for (&state.display_labels) |value| if (value.len != 0) state.allocator.free(value);

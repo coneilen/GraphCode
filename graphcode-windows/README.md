@@ -27,6 +27,31 @@ menu; Enter is not a standalone shortcut for it. Mutations are sent as
 correlated v2 daemon requests; daemon refusals remain visible as explicit status
 errors.
 
+Edge editing queues one checked `updateEdge` command, never delete/recreate.
+The existing edge ID and endpoints stay fixed, and the daemon retains its current
+fire count. The editor owns the complete initial configuration across the modal,
+then rechecks the displayed project, cached graph, composite address and edge
+configuration before queueing. A configuration conflict is refused; a runtime
+count advance alone is not a conflict. An observation subscription to a different
+cached project does not prohibit editing the selected project.
+
+Unchanged legacy values are retained, including an absent versus present-empty
+cycle guard and nil versus empty text. Changed guards use the existing daemon
+creation rule; clearing changed guard controls removes the guard. Only root and
+one directly addressed composite are supported by this new command; deeper edit
+wrappers are explicitly refused without changing existing non-edit commands.
+The command requires a supporting daemon and has no destructive compatibility
+fallback. "Queued" is not daemon acceptance or persistence. Native interaction,
+real daemon persistence and macOS runtime behavior remain unverified by the
+data-only regression coverage.
+
+Edge edits use length-aware text capture for both live changes and submission.
+Unreadable text, invalid selections and allocation failures block submission
+until that field is read successfully; recovering one field does not clear
+another field's error. This checked reader is edit-only. Creation, node and
+settings forms retain their existing bounded reader and are outside this
+capture validation.
+
 The shell exposes a native File/Loop/Terminal/View/Help menu bar. Menu items
 share the same application action router as keyboard shortcuts, and project
 actions use the Windows `IFileOpenDialog` folder picker. The no-project state

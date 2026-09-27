@@ -115,6 +115,10 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// defaults reproduce the plain always-firing `.handoff` every edge was before the
   /// editor existed.
   case createEdge(from: UUID, to: UUID, spec: EdgeSpec)
+  /// Compare configuration before editing the same edge in place. Runtime fireCount
+  /// is deliberately not a precondition or a client-writable field. Endpoints stay
+  /// fixed. Supports the root or one explicit direct composite, not deeper wrappers.
+  case updateEdge(id: UUID, from: UUID, to: UUID, expectedSpec: EdgeSpec, spec: EdgeSpec)
   case nodeCheckApproved(UUID)
   case nodeCheckRejected(UUID)
   /// Give a loop a new title. Only the title — a loop's identity is its `id` (which is

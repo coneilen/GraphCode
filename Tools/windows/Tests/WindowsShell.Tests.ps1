@@ -376,6 +376,27 @@ Invoke-Native "Forms and navigation executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Forms.zig } finally { Pop-Location }
 }
+Invoke-Native "Edge editing data-only executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  if (-not (Test-Path -LiteralPath $include -PathType Container)) {
+    throw "Winghostty headers are required for edge editing tests."
+  }
+  Push-Location $shellRoot
+  try {
+    $output = @(& $zig test src\EdgeEditing.zig -target x86_64-windows-msvc `
+      -lc -ladvapi32 "-I$include" --test-filter "edge editing:" 2>&1)
+    $exitCode = $LASTEXITCODE
+    $output | ForEach-Object { Write-Host $_ }
+    if ($exitCode -ne 0) { throw "Edge editing tests failed with exit code $exitCode" }
+    Assert-Contract (($output -join "`n") -match 'All [1-9][0-9]* tests passed\.') `
+      "edge editing filter must execute a positive test count"
+  } finally { Pop-Location }
+}
 Invoke-Native "Win32 pointer conversion executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")

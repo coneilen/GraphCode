@@ -54,6 +54,12 @@ pub const CycleGuard = struct {
     stop_after_passes_without_improvement: ?i64 = null,
 };
 
+pub const PayloadTransform = union(enum) {
+    none,
+    template: []const u8,
+    script: []const u8,
+};
+
 pub const Edge = struct {
     id: []u8 = &.{},
     from: []u8,
@@ -64,6 +70,9 @@ pub const Edge = struct {
     fired: bool = false,
     fire_count: i64 = 0,
     cycle_guard: ?CycleGuard = null,
+    payload_transform: PayloadTransform = .none,
+    spawn_target_project_path: ?[]const u8 = null,
+    editable_configuration: bool = true,
 };
 
 pub const Project = struct {
@@ -1298,7 +1307,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
     };
 }
 
-fn cloneEdge(allocator: std.mem.Allocator, edge: Edge) !Edge {
+pub fn cloneEdge(allocator: std.mem.Allocator, edge: Edge) !Edge {
     var copy = Edge{
         .from = &.{},
         .to = &.{},
@@ -1306,6 +1315,7 @@ fn cloneEdge(allocator: std.mem.Allocator, edge: Edge) !Edge {
         .blocks_target = edge.blocks_target,
         .fired = edge.fired,
         .fire_count = edge.fire_count,
+        .editable_configuration = edge.editable_configuration,
     };
     errdefer freeEdge(allocator, copy);
     copy.id = try allocator.dupe(u8, edge.id);
@@ -1313,6 +1323,12 @@ fn cloneEdge(allocator: std.mem.Allocator, edge: Edge) !Edge {
     copy.to = try allocator.dupe(u8, edge.to);
     copy.kind = try allocator.dupe(u8, edge.kind);
     copy.condition = try allocator.dupe(u8, edge.condition);
+    copy.payload_transform = switch (edge.payload_transform) {
+        .none => .none,
+        .template => |text| .{ .template = try allocator.dupe(u8, text) },
+        .script => |text| .{ .script = try allocator.dupe(u8, text) },
+    };
+    if (edge.spawn_target_project_path) |path| copy.spawn_target_project_path = try allocator.dupe(u8, path);
     if (edge.cycle_guard) |guard| {
         copy.cycle_guard = .{
             .max_iterations = guard.max_iterations,
@@ -1339,12 +1355,17 @@ fn freeEdges(allocator: std.mem.Allocator, edges: *std.array_list.Managed(Edge))
     edges.deinit();
 }
 
-fn freeEdge(allocator: std.mem.Allocator, edge: Edge) void {
+pub fn freeEdge(allocator: std.mem.Allocator, edge: Edge) void {
     allocator.free(edge.id);
     allocator.free(edge.from);
     allocator.free(edge.to);
     allocator.free(edge.kind);
     allocator.free(edge.condition);
+    switch (edge.payload_transform) {
+        .none => {},
+        .template, .script => |text| allocator.free(text),
+    }
+    if (edge.spawn_target_project_path) |path| allocator.free(path);
     if (edge.cycle_guard) |guard| {
         if (guard.until) |until| allocator.free(until);
     }
@@ -1452,7 +1473,110 @@ fn decodeEdge(allocator: std.mem.Allocator, value: std.json.Value) !Edge {
     edge.condition = try allocator.dupe(u8, edgeString(object, "condition", "always"));
     edge.blocks_target = !std.mem.eql(u8, edge.kind, "message");
     edge.cycle_guard = try decodeCycleGuard(allocator, object.get("cycleGuard"));
+    edge.payload_transform = decodePayloadTransform(allocator, object) catch |err| switch (err) {
+        error.UnsupportedEdgeConfiguration => blk: {
+            edge.editable_configuration = false;
+            break :blk .none;
+        },
+        else => return err,
+    };
+    if (object.get("spawnTargetProjectPath")) |path| switch (path) {
+        .null => {},
+        .string => |text| edge.spawn_target_project_path = try allocator.dupe(u8, text),
+        else => edge.editable_configuration = false,
+    };
     return edge;
+}
+
+fn decodePayloadTransform(allocator: std.mem.Allocator, object: std.json.ObjectMap) !PayloadTransform {
+    if (object.get("payloadTransform")) |value| {
+        if (value != .null) {
+            if (value != .object or value.object.count() != 1) return error.UnsupportedEdgeConfiguration;
+            var iterator = value.object.iterator();
+            const entry = iterator.next().?;
+            if (entry.value_ptr.* != .object) return error.UnsupportedEdgeConfiguration;
+            if (std.mem.eql(u8, entry.key_ptr.*, "none")) return .none;
+            const text = entry.value_ptr.object.get("_0") orelse return error.UnsupportedEdgeConfiguration;
+            if (text != .string) return error.UnsupportedEdgeConfiguration;
+            if (std.mem.eql(u8, entry.key_ptr.*, "template")) return .{ .template = try allocator.dupe(u8, text.string) };
+            if (std.mem.eql(u8, entry.key_ptr.*, "script")) return .{ .script = try allocator.dupe(u8, text.string) };
+            return error.UnsupportedEdgeConfiguration;
+        }
+    }
+    if (object.get("payloadNote")) |note| switch (note) {
+        .null => {},
+        .string => |text| return .{ .template = try allocator.dupe(u8, text) },
+        else => return error.UnsupportedEdgeConfiguration,
+    };
+    return .none;
+}
+
+test "edge editing model: lossless transform spawn legacy and unsupported fields" {
+    const allocator = std.testing.allocator;
+    var edges = try decodeEdges(allocator,
+        \\[{"payloadTransform":{"template":{"_0":" \u2603 \"text\" "}},"spawnTargetProjectPath":""},{"payloadNote":"legacy","spawnTargetProjectPath":null},{"payloadTransform":{"script":{"_0":""}}},{"payloadTransform":{"future":{"_0":"x"}}},{"spawnTargetProjectPath":3}]
+    );
+    defer freeEdges(allocator, &edges);
+    try std.testing.expectEqualStrings(" \xe2\x98\x83 \"text\" ", edges.items[0].payload_transform.template);
+    try std.testing.expectEqualStrings("", edges.items[0].spawn_target_project_path.?);
+    try std.testing.expectEqualStrings("legacy", edges.items[1].payload_transform.template);
+    try std.testing.expect(edges.items[1].spawn_target_project_path == null);
+    try std.testing.expectEqualStrings("", edges.items[2].payload_transform.script);
+    try std.testing.expect(!edges.items[3].editable_configuration and !edges.items[4].editable_configuration);
+    var copies = try cloneEdges(allocator, edges.items);
+    defer freeEdges(allocator, &copies);
+    try std.testing.expect(copies.items[0].payload_transform.template.ptr != edges.items[0].payload_transform.template.ptr);
+    try std.testing.expect(!copies.items[3].editable_configuration);
+}
+
+test "edge editing model: added configuration allocations unwind" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var edges = try decodeEdges(allocator,
+                \\[{"payloadTransform":{"script":{"_0":"command"}},"spawnTargetProjectPath":"project","cycleGuard":{"until":"until"}},{"payloadNote":"legacy"}]
+            );
+            defer freeEdges(allocator, &edges);
+            var copies = try cloneEdges(allocator, edges.items);
+            defer freeEdges(allocator, &copies);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+/// Resolve from the cache, not the separately cloned display projection.
+pub fn copyCachedEdgeForEditing(allocator: std.mem.Allocator, model: *const Model, id: []const u8) !Edge {
+    const root = model.currentGraph() orelse return error.StaleScope;
+    if (model.open_composite_id) |parent_id| {
+        const parent_index = findNodeIndexByID(root.nodes.items, parent_id) orelse return error.StaleScope;
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, root.nodes.items[parent_index].subgraph_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.StaleScope;
+        const edges = parsed.value.object.get("edges") orelse return error.StaleEdge;
+        const nodes = parsed.value.object.get("nodes") orelse return error.StaleScope;
+        if (edges != .array or nodes != .array) return error.StaleScope;
+        for (edges.array.items) |value| {
+            if (value != .object or !std.mem.eql(u8, edgeString(value.object, "id", ""), id)) continue;
+            const edge = try decodeEdge(allocator, value);
+            errdefer freeEdge(allocator, edge);
+            var source = false;
+            var target = false;
+            for (nodes.array.items) |node| {
+                if (node != .object) return error.StaleScope;
+                const node_id = edgeString(node.object, "id", "");
+                source = source or std.mem.eql(u8, node_id, edge.from);
+                target = target or std.mem.eql(u8, node_id, edge.to);
+            }
+            if (!source) return error.MissingSource;
+            if (!target) return error.MissingTarget;
+            return edge;
+        }
+        return error.StaleEdge;
+    }
+    const index = findEdgeIndexByID(root.edges.items, id) orelse return error.StaleEdge;
+    const edge = root.edges.items[index];
+    if (findNodeIndexByID(root.nodes.items, edge.from) == null) return error.MissingSource;
+    if (findNodeIndexByID(root.nodes.items, edge.to) == null) return error.MissingTarget;
+    return cloneEdge(allocator, edge);
 }
 
 fn edgeString(object: std.json.ObjectMap, key: []const u8, fallback: []const u8) []const u8 {
