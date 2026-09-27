@@ -50,6 +50,7 @@ extension AppFeature {
     switch visit {
     case .loop(let projectPath, let nodeID):
       openLoopWithoutRecording(&state, projectPath: projectPath, nodeID: nodeID)
+      return resumeCodespace(projectPath)
     case .quickChat(let id):
       guard let chat = state.quickChats[id: id] else { return .none }
       openQuickChat(chat, &state)

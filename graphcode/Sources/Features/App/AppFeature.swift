@@ -553,7 +553,7 @@ struct AppFeature {
           .projects(.element(id: path, action: .addNodeButtonTapped(parentBackend: parentBackend))))
 
       case .projects(.element(id: let path, action: .nodeTapped(let nodeID))):
-        return openNode(nodeID, in: path, &state)
+        return .merge(resumeCodespace(path), openNode(nodeID, in: path, &state))
 
       case .blockedLoopNoticeDismissed:
         state.blockedLoopNotice = nil
