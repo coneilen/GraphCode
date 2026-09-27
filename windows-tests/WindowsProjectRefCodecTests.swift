@@ -1,0 +1,50 @@
+import Foundation
+import XCTest
+
+@testable import GraphcodeKit
+
+final class WindowsProjectRefCodecTests: XCTestCase {
+  func testGraphCodecPreservesProjectRefsAcrossRepeatedRoundTrips() throws {
+    let rootDate = Date(timeIntervalSinceReferenceDate: 812133256.5609074)
+    let nestedDate = Date(timeIntervalSinceReferenceDate: 812133256.5608349)
+    let nodeDate = Date(timeIntervalSinceReferenceDate: 812133256.5604343)
+    let rootRef = ProjectRef(path: "C:\\synthetic\\source project", name: "source", lastOpenedAt: rootDate)
+    let nestedRef = ProjectRef(path: rootRef.path, name: "nested", lastOpenedAt: nestedDate)
+    let child = LoopNode(
+      id: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,
+      title: "Nested fixture", loopType: .turnBased, checkDescription: "Keep these notes",
+      firstInstruction: "Nested configuration\nand notes", state: .succeeded, createdAt: nodeDate)
+    let nested = LoopGraph(
+      id: UUID(uuidString: "22222222-2222-4222-8222-222222222222")!,
+      scope: .project(nestedRef), nodes: [child])
+    let parent = LoopNode(
+      id: UUID(uuidString: "33333333-3333-4333-8333-333333333333")!,
+      title: "Composite fixture", loopType: .composite, subGraph: nested,
+      state: .succeeded, createdAt: nodeDate)
+    let peer = LoopNode(
+      id: UUID(uuidString: "44444444-4444-4444-8444-444444444444")!,
+      title: "Conversation fixture", loopType: .turnBased, firstInstruction: "Preserve me",
+      backend: .copilotCLI, state: .succeeded, createdAt: nodeDate)
+    let edge = LoopEdge(
+      id: UUID(uuidString: "55555555-5555-4555-8555-555555555555")!,
+      from: parent.id, to: peer.id, payloadTransform: .template("notes {{output}}"))
+    let expected = LoopGraph(
+      id: UUID(uuidString: "66666666-6666-4666-8666-666666666666")!,
+      scope: .project(rootRef), nodes: [parent, peer], edges: [edge])
+    var current = expected
+    for iteration in 1...3 {
+      current = try JSONDecoder().decode(LoopGraph.self, from: JSONEncoder().encode(current))
+      XCTAssertTrue(current == expected, "Full graph value changed on round trip \(iteration)")
+      XCTAssertEqual(current.project.lastOpenedAt, rootDate)
+      XCTAssertEqual(current.nodes[id: parent.id]?.subGraph?.project.lastOpenedAt, nestedDate)
+      XCTAssertEqual(current.nodes[id: parent.id]?.subGraph?.nodes[id: child.id], child)
+      XCTAssertEqual(current.nodes[id: peer.id], peer)
+      XCTAssertEqual(current.edges[id: edge.id], edge)
+    }
+    let global = LoopGraph(
+      id: UUID(uuidString: "77777777-7777-4777-8777-777777777777")!, scope: .global)
+    let decodedGlobal = try JSONDecoder().decode(LoopGraph.self, from: JSONEncoder().encode(global))
+    XCTAssertEqual(decodedGlobal.scope, .global)
+    XCTAssertEqual(decodedGlobal, global)
+  }
+}

@@ -308,7 +308,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     id = try container.decode(UUID.self, forKey: .id)
     let ref = try container.decode(ProjectRef.self, forKey: .project)
-    scope = LoopGraphScope(projectPath: ref.path, name: ref.name)
+    scope = ref.path == LoopGraphScope.globalPath ? .global : .project(ref)
     nodes = try container.decodeIfPresent(IdentifiedArrayOf<LoopNode>.self, forKey: .nodes) ?? []
     edges = try container.decodeIfPresent(IdentifiedArrayOf<LoopEdge>.self, forKey: .edges) ?? []
     mailroom =
