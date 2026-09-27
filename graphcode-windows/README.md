@@ -72,6 +72,19 @@ another field's error. This checked reader is edit-only. Creation, node and
 settings forms retain their existing bounded reader and are outside this
 capture validation.
 
+Sketch loop context menus on the project canvas and in the sidebar offer
+**Promote to... > Goal / Turn / Timed**. Each native form asks only for its
+target's decision: a done check, where to pause, or a cadence. Timed promotion
+uses the captured sketch's first instruction, with the same fallback and
+interval choices as macOS. Promotion uses the existing daemon command; it does
+not recreate the node or replace its session, history, worktree, or edges.
+The clicked project can differ from the observation subscription. Popup and
+form contexts are owned and rechecked; stale project/composite, selection,
+deleted-node, or changed-type results do not send or retarget a command.
+"Queued" reports local queue insertion, not daemon acceptance or persistence.
+Pure production-adapter tests and Swift fixture decoding cover this path;
+native keyboard/UIA and real-daemon promotion remain unverified.
+
 The shell exposes a native File/Loop/Terminal/View/Help menu bar. Menu items
 share the same application action router as keyboard shortcuts, and project
 actions use the Windows `IFileOpenDialog` folder picker. The no-project state

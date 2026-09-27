@@ -17,6 +17,7 @@ pub const Node = struct {
     metric_command: []u8 = &.{},
     metric_direction: []u8 = &.{},
     trigger_prompt: []u8 = &.{},
+    first_instruction: []u8 = &.{},
     check_description: []u8 = &.{},
     model_tier: []u8 = &.{},
     poll_interval_seconds: ?f64 = null,
@@ -1424,6 +1425,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
     copy.metric_command = try allocator.dupe(u8, node.metric_command);
     copy.metric_direction = try allocator.dupe(u8, node.metric_direction);
     copy.trigger_prompt = try allocator.dupe(u8, node.trigger_prompt);
+    copy.first_instruction = try allocator.dupe(u8, node.first_instruction);
     copy.check_description = try allocator.dupe(u8, node.check_description);
     copy.model_tier = try allocator.dupe(u8, node.model_tier);
     copy.worktree_path = try allocator.dupe(u8, node.worktree_path);
@@ -1544,6 +1546,7 @@ fn decodeNodes(
         node.metric_command = try duplicateJsonStringOr(allocator, scalar_object, "metricCommand", "");
         node.metric_direction = try duplicateJsonStringOr(allocator, scalar_object, "metricDirection", "");
         node.trigger_prompt = try duplicateJsonStringOr(allocator, scalar_object, "triggerPrompt", "");
+        node.first_instruction = try duplicateJsonStringOr(allocator, scalar_object, "firstInstruction", "");
         node.check_description = try duplicateJsonStringOr(allocator, scalar_object, "checkDescription", "");
         node.model_tier = try duplicateJsonStringOr(allocator, scalar_object, "modelTier", "");
         node.worktree_path = try duplicateWorktreePath(allocator, scalar_object);
@@ -2016,11 +2019,82 @@ fn freeNode(allocator: std.mem.Allocator, node: Node) void {
     allocator.free(node.metric_command);
     allocator.free(node.metric_direction);
     allocator.free(node.trigger_prompt);
+    allocator.free(node.first_instruction);
     allocator.free(node.check_description);
     allocator.free(node.model_tier);
     allocator.free(node.worktree_path);
     allocator.free(node.worktree_branch);
     allocator.free(node.subgraph_json);
+}
+
+test "sketch promotion first instruction survives decode clones and source replacement" {
+    const allocator = std.testing.allocator;
+    var model = Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"note","title":"Sketch","loopType":"sketch","firstInstruction":"  \u96ea \"note\"  ","triggerPrompt":"not the note","checkDescription":"not the note"},{"id":"empty","title":"Empty","loopType":"sketch"}],"edges":[]}}
+    );
+    const summary = model.graphFor("A").?;
+    try std.testing.expectEqualStrings("  \u{96ea} \"note\"  ", summary.nodes.items[0].first_instruction);
+    try std.testing.expectEqualStrings("", summary.nodes.items[1].first_instruction);
+    try std.testing.expectEqualStrings("  \u{96ea} \"note\"  ", model.graph.?.nodes.items[0].first_instruction);
+    var copy = try cloneNode(allocator, summary.nodes.items[0]);
+    defer freeNode(allocator, copy);
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"note","title":"Sketch","loopType":"sketch","firstInstruction":"new"}],"edges":[]}}
+    );
+    try std.testing.expectEqualStrings("  \u{96ea} \"note\"  ", copy.first_instruction);
+    try std.testing.expectEqualStrings("new", model.graph.?.nodes.items[0].first_instruction);
+    copy.first_instruction[0] = 'x';
+    try std.testing.expectEqualStrings("new", model.graphFor("A").?.nodes.items[0].first_instruction);
+}
+
+test "sketch promotion first instruction single owner cleans every clone and decode allocation failure" {
+    const Probe = struct {
+        fn clone(allocator: std.mem.Allocator) !void {
+            const source = Node{
+                .id = @constCast("id"), .title = @constCast("Sketch"), .loop_type = @constCast("sketch"),
+                .state = @constCast("idle"), .activity = &.{}, .presence = &.{},
+                .first_instruction = @constCast("Owned \"note\" \u{96ea}"),
+                .check_description = @constCast("allocated after the note"),
+            };
+            const copy = try cloneNode(allocator, source);
+            defer freeNode(allocator, copy);
+            try std.testing.expectEqualStrings(source.first_instruction, copy.first_instruction);
+            try std.testing.expectEqualStrings(source.check_description, copy.check_description);
+        }
+
+        fn decode(allocator: std.mem.Allocator) !void {
+            var nodes = std.array_list.Managed(Node).init(allocator);
+            defer {
+                for (nodes.items) |node| freeNode(allocator, node);
+                nodes.deinit();
+            }
+            try decodeNodes(allocator,
+                \\[{"id":"id","firstInstruction":"Owned \"note\" \u96ea","checkDescription":"allocated after the note"},{"id":"second","firstInstruction":"second note"}]
+            , &nodes);
+            try std.testing.expectEqual(@as(usize, 2), nodes.items.len);
+            try std.testing.expectEqualStrings("Owned \"note\" \u{96ea}", nodes.items[0].first_instruction);
+            try std.testing.expectEqualStrings("allocated after the note", nodes.items[0].check_description);
+            try std.testing.expectEqualStrings("second note", nodes.items[1].first_instruction);
+        }
+
+        fn sweep(comptime operation: anytype, name: []const u8) !void {
+            var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+            try operation(counting.allocator());
+            try std.testing.expect(counting.alloc_index > 0);
+            try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+            for (0..counting.alloc_index) |fail_index| {
+                var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+                try std.testing.expectError(error.OutOfMemory, operation(failing.allocator()));
+                try std.testing.expect(failing.has_induced_failure);
+                try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+            }
+            std.debug.print("first instruction {s}: {d} allocation positions -> OutOfMemory, allocated_bytes == freed_bytes at every position\n", .{ name, counting.alloc_index });
+        }
+    };
+    try Probe.sweep(Probe.clone, "cloneNode");
+    try Probe.sweep(Probe.decode, "decodeNodes");
 }
 
 fn freeQuickChat(allocator: std.mem.Allocator, chat: QuickChat) void {
@@ -3137,7 +3211,7 @@ test "composite navigation swaps to nested graph and survives refresh" {
 const ownershipGraphJson =
     \\{"project":{"path":"C:\\owned\\graph","name":"Owned \"graph\""},
     \\"edges":[{"id":"edge-first","from":"first","to":"second","kind":"handoff","condition":"onSuccess","fired":true,"fireCount":2,"cycleGuard":{"maxIterations":5,"until":"done","stopAfterPassesWithoutImprovement":3},"payloadTransform":{"template":{"_0":" \u2603 text "}},"spawnTargetProjectPath":""},{"id":"edge-second","from":"second","to":"first","kind":"message","fireCount":-2,"payloadTransform":{"script":{"_0":"command"}},"spawnTargetProjectPath":"C:\\spawn"}],
-    \\"nodes":[{"id":"first","title":"First \"node\"","loopType":"proactive","state":"running","activity":"editing","presence":{"presence":"busy"},"backend":"copilot","pilotState":"piloted","goal":{"summary":"Ship it","predicate":"done"},"metricCommand":"measure","metricDirection":"decrease","triggerPrompt":"Continue","checkDescription":"Check","modelTier":"high","pollIntervalSeconds":12.5,"stallAfterSeconds":60,"createdAt":123,"metricHistory":[{"value":3},{"value":2}],"inputTokens":11,"outputTokens":7,"worktreeBinding":{"path":"C:\\owned\\branch","branch":"topic"},"subGraph":{"nodes":[{"id":"child","title":"Child","state":"idle"}],"edges":[]},"templateFollow":{"id":"template"}},{"id":"second","title":"Second","state":"idle"}]}
+    \\"nodes":[{"id":"first","title":"First \"node\"","loopType":"proactive","state":"running","activity":"editing","presence":{"presence":"busy"},"backend":"copilot","pilotState":"piloted","goal":{"summary":"Ship it","predicate":"done"},"metricCommand":"measure","metricDirection":"decrease","triggerPrompt":"Continue","firstInstruction":"Owned \"note\" \u96ea","checkDescription":"Check","modelTier":"high","pollIntervalSeconds":12.5,"stallAfterSeconds":60,"createdAt":123,"metricHistory":[{"value":3},{"value":2}],"inputTokens":11,"outputTokens":7,"worktreeBinding":{"path":"C:\\owned\\branch","branch":"topic"},"subGraph":{"nodes":[{"id":"child","title":"Child","state":"idle"}],"edges":[]},"templateFollow":{"id":"template"}},{"id":"second","title":"Second","state":"idle"}]}
 ;
 const ownershipGraphFrame = "{\"graphChanged\":" ++ ownershipGraphJson ++ "}";
 
@@ -3167,6 +3241,7 @@ fn expectOwnershipGraph(graph: anytype) !void {
     try std.testing.expectEqualStrings("measure", node.metric_command);
     try std.testing.expectEqualStrings("decrease", node.metric_direction);
     try std.testing.expectEqualStrings("Continue", node.trigger_prompt);
+    try std.testing.expectEqualStrings("Owned \"note\" \u{96ea}", node.first_instruction);
     try std.testing.expectEqualStrings("Check", node.check_description);
     try std.testing.expectEqualStrings("high", node.model_tier);
     try std.testing.expectEqual(@as(?f64, 12.5), node.poll_interval_seconds);

@@ -5,6 +5,22 @@ import IdentifiedCollections
 @testable import GraphcodeKit
 
 final class GraphCommandInteropTests: XCTestCase {
+  func testSketchPromotionFixturesDecodeWithoutReplacingNodeIdentity() throws {
+    let node = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+    let cases: [(String, SketchPromotion)] = [
+      ("goal", .goal(GoalSpec(summary: "Done \"well\" 雪"))),
+      ("turn", .turn(pausesBeforeWritesOnly: true)),
+      ("timed", .timed(triggerPrompt: "/loop 1h watch \"雪\"")),
+    ]
+    for (target, promotion) in cases {
+      let envelope = try JSONDecoder().decode(
+        RequestEnvelope.self, from: fixture("daemon-v2-promote-\(target).json"))
+      XCTAssertEqual(envelope.command, .graphCommand(
+        projectPath: "C:\\work\\graph",
+        command: .promoteNode(node, promotion: promotion, promotedBy: nil)))
+    }
+  }
+
   func testUpdateEdgeInMemoryWirePayloadPreservesTypedOptionalState() throws {
     let payload = Data(#"""
       {"graphCommand":{"projectPath":"A","command":{"updateEdge":{"id":"33333333-3333-4333-8333-333333333333","from":"11111111-1111-4111-8111-111111111111","to":"22222222-2222-4222-8222-222222222222","expectedSpec":{"kind":"handoff","condition":"onFailure","payloadTransform":{"template":{"_0":"quoted \"payload\" \u2603"}},"cycleGuard":{},"spawnTargetProjectPath":""},"spec":{"kind":"message","condition":"onFailure","payloadTransform":{"template":{"_0":"quoted \"payload\" \u2603"}},"cycleGuard":{},"spawnTargetProjectPath":""}}}}}
