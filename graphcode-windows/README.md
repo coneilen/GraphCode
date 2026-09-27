@@ -15,6 +15,25 @@ window and attaches to the persistent zmx session for its selected node. Surface
 destruction kills only the attach client; zmx owns the session and survives shell
 restarts. The host contract is the accepted two-surface terminal-gate contract,
 not a synthetic terminal proof.
+Workspace reopen and activation restore the selected tab's focused pane rather
+than assuming that terminal slot zero or the last active slot is visible.
+
+The pinned Winghostty child HWND already owns the terminal's UI Automation
+Text/Text2 provider. GraphCode supplies an owned UTF-8 snapshot of its existing
+120x40 rendered-cell grid, with spaces for empty cells, preserved trailing blanks,
+LF row separators, and independent UTF-16 length/cursor offsets. This deliberately
+replaces the recent raw VT byte stream: the accessible document is the current
+grid, not a transcript or scrollback. The ASCII parser and renderer are unchanged;
+Unicode cell-encoding tests do not establish Unicode terminal rendering. Render
+and accessibility updates remain separate, best-effort calls. Failures report
+through the existing status/diagnostic path without empty-text fallbacks; a failed
+accessibility update leaves the provider's last successful snapshot, which must
+not be treated as current renderer state. Producer tests use injected outbound
+calls, not native UIA. Once no input or pane publication error remains, the status
+path replaces only its own exact failure messages with one neutral error-cleared
+notice; it does not overwrite unrelated statuses or imply a reset pane published
+fresh text. Applied selection, visible caret/geometry, provider range
+conformance, and end-to-end accessibility parity remain unverified or incomplete.
 
 The graph surface also provides native Win32 create/edit forms for nodes and
 edges, a settings dialog, context menus, and keyboard-accessible actions:
@@ -57,6 +76,15 @@ share the same application action router as keyboard shortcuts, and project
 actions use the Windows `IFileOpenDialog` folder picker. The no-project state
 also presents accessible native buttons for opening a folder or the global
 overview; recent projects remain selectable in the sidebar.
+
+Pressing and releasing unmodified `F10` enters the native menu bar, including
+while an embedded terminal has focus. The shell passes the original key pair
+to Windows default menu processing only when the release still targets the
+same eligible, app-owned window. Observed focus/activation changes, modal
+disablement, and intervening input cancel the pending pair; modified `F10`
+(including `Shift+F10`) retains its existing input route.
+Both ordinary and system-key plain `F10` messages use this route; an Alt-context
+message is excluded even if the modifier snapshot no longer shows Alt pressed.
 
 `F6` (or View > Focus Window Toolbar) enters the window toolbar; `Shift+F6`
 enters at its last visible control. Within the toolbar, `Tab`/`Shift+Tab` and
