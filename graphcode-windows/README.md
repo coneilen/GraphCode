@@ -141,6 +141,26 @@ another field's error. This checked reader is edit-only. Creation, node and
 settings forms retain their existing bounded reader and are outside this
 capture validation.
 
+Unresolved project-canvas and sidebar node menus expose **New Child Node...**.
+The normal creation form starts with the parent's backend (still editable) and
+keeps its ordinary type/default fields. It sends one `createNode` draft with
+`createdBy`; the daemon owns the already-fired custody link, report-back memo,
+and normal session-start policy. No extra edge or start command is sent.
+The clicked project, root/composite scope, parent, settings, and exact-project
+worktree choices are owned before the popup. Project/scope drift, parent deletion,
+resolution, type changes, or backend changes refuse submission before attachment
+transfer; rename, reorder, and unresolved state progress are allowed. Templates
+preserve custody and the edited backend. Pure coverage runs via
+`Tools\windows\Tests\CustodyChild.Tests.ps1` and the normal Windows shell runner.
+Existing node menu actions keep their owned targets even when child settings or
+snapshot allocation are unavailable; only New Child Node is disabled. Resolved
+nodes omit New Child Node without capturing child settings at all.
+Initial project selection now refuses either identity-allocation failure without
+changing the old project/composite/node selection; later legacy snapshot
+rebuilding is unchanged and is not covered by that preparation guarantee.
+Parity remains **Partial**: overview right-click, shown native-menu/form behavior,
+and real-daemon acceptance/persistence are not established by these queue tests.
+
 Sketch loop context menus on the project canvas and in the sidebar offer
 **Promote to... > Goal / Turn / Timed**. Each native form asks only for its
 target's decision: a done check, where to pause, or a cadence. Timed promotion

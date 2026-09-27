@@ -10,6 +10,7 @@ pub const NodeTarget = struct {
     unwired: bool = false,
     follows_template: bool = false,
     resolved: bool = false,
+    can_create_child: bool = true,
     sketch: bool = false,
     promotion_context: ?*const SketchPromotion.Context = null,
 };
@@ -53,6 +54,7 @@ pub const Action = enum {
     stop_node,
     delete_node,
     open_terminal,
+    new_child_node,
     message_node,
     memo_node,
     open_composite,
@@ -110,6 +112,7 @@ const ids = struct {
     const arm_composite = 5108;
     const save_node_template = 5114;
     const detach_template = 5115;
+    const new_child_node = 5119;
     const promote_goal = 5116;
     const promote_turn = 5117;
     const promote_timed = 5118;
@@ -149,6 +152,51 @@ pub const MoveProjectMenuItem = struct {
 /// separate accessibility contract model.
 pub fn moveProjectMenuItem() MoveProjectMenuItem {
     return .{ .enabled = Wire.supportsProjectRelocation() };
+}
+
+pub const NodeMenuItem = struct {
+    id: usize = 0,
+    text: []const u8 = "",
+    enabled: bool = true,
+};
+
+pub fn newChildNodeMenuItem(node: NodeTarget) ?NodeMenuItem {
+    if (node.resolved) return null;
+    return .{ .id = ids.new_child_node, .text = "New Child Node...", .enabled = node.can_create_child };
+}
+
+pub const NodeMenuPlan = struct {
+    items: [15]NodeMenuItem = undefined,
+    len: usize = 0,
+
+    fn add(self: *NodeMenuPlan, item: NodeMenuItem) void {
+        self.items[self.len] = item;
+        self.len += 1;
+    }
+};
+
+pub fn nodeMenuPlan(node: NodeTarget) NodeMenuPlan {
+    var plan = NodeMenuPlan{};
+    plan.add(.{ .id = ids.open_terminal, .text = "Open Terminal" });
+    if (newChildNodeMenuItem(node)) |item| plan.add(item);
+    if (node.unwired) {
+        plan.add(.{ .id = ids.wire_node, .text = "Wire it up" });
+        plan.add(.{ .id = ids.mark_entry, .text = "Mark as entry" });
+        plan.add(.{});
+    }
+    if (node.composite) {
+        plan.add(.{ .id = ids.open_composite, .text = "Open Group" });
+        plan.add(.{ .id = ids.pilot_composite, .text = "Pilot Once" });
+        plan.add(.{ .id = ids.arm_composite, .text = "Arm Schedule", .enabled = node.can_arm });
+        plan.add(.{});
+    }
+    plan.add(.{ .id = ids.edit_node, .text = "Edit Details..." });
+    plan.add(.{ .id = ids.save_node_template, .text = "Save as Template..." });
+    if (node.follows_template) plan.add(.{ .id = ids.detach_template, .text = "Detach from Template" });
+    plan.add(.{ .id = ids.rename_node, .text = "Rename...\tF2" });
+    if (!node.resolved) plan.add(.{ .id = ids.stop_node, .text = "Stop\tCtrl+S" });
+    plan.add(.{ .id = ids.delete_node, .text = "Delete Loop...\tDelete" });
+    return plan;
 }
 
 pub const PromotionItem = struct { id: usize, text: []const u8, action: Action };
@@ -232,37 +280,25 @@ fn buildMenu(target: Target) c.HMENU {
             append(menu, ids.delete_project_loops, "Delete All Loops...");
         },
         .node => |node| {
-            append(menu, ids.open_terminal, "Open Terminal");
-            if (node.unwired) {
-                append(menu, ids.wire_node, "Wire it up");
-                append(menu, ids.mark_entry, "Mark as entry");
-                separator(menu);
-            }
-            if (node.composite) {
-                append(menu, ids.open_composite, "Open Group");
-                append(menu, ids.pilot_composite, "Pilot Once");
-                appendEnabled(menu, ids.arm_composite, "Arm Schedule", node.can_arm);
-                separator(menu);
-            }
-            append(menu, ids.edit_node, "Edit Details...");
-            const items = promotionItems(node);
-            if (items.len != 0) {
-                const submenu = c.CreatePopupMenu() orelse {
-                    _ = c.DestroyMenu(menu);
-                    return null;
-                };
-                for (items) |item| appendEnabled(submenu, item.id, item.text, promotionEnabled(node));
-                if (c.AppendMenuW(menu, c.MF_POPUP | c.MF_STRING, @intFromPtr(submenu), std.unicode.utf8ToUtf16LeStringLiteral("Promote to...").ptr) == 0) {
-                    _ = c.DestroyMenu(submenu);
-                    _ = c.DestroyMenu(menu);
-                    return null;
+            const plan = nodeMenuPlan(node);
+            for (plan.items[0..plan.len]) |item| {
+                if (item.id == 0) separator(menu) else appendEnabled(menu, item.id, item.text, item.enabled);
+                if (item.id == ids.edit_node) {
+                    const items = promotionItems(node);
+                    if (items.len != 0) {
+                        const submenu = c.CreatePopupMenu() orelse {
+                            _ = c.DestroyMenu(menu);
+                            return null;
+                        };
+                        for (items) |promotion_item| appendEnabled(submenu, promotion_item.id, promotion_item.text, promotionEnabled(node));
+                        if (c.AppendMenuW(menu, c.MF_POPUP | c.MF_STRING, @intFromPtr(submenu), std.unicode.utf8ToUtf16LeStringLiteral("Promote to...").ptr) == 0) {
+                            _ = c.DestroyMenu(submenu);
+                            _ = c.DestroyMenu(menu);
+                            return null;
+                        }
+                    }
                 }
             }
-            append(menu, ids.save_node_template, "Save as Template...");
-            if (node.follows_template) append(menu, ids.detach_template, "Detach from Template");
-            append(menu, ids.rename_node, "Rename...\tF2");
-            if (!node.resolved) append(menu, ids.stop_node, "Stop\tCtrl+S");
-            append(menu, ids.delete_node, "Delete Loop...\tDelete");
         },
         .edge => {
             append(menu, ids.edit_edge, "Edit Edge...");
@@ -291,6 +327,7 @@ fn actionForCommand(command: c_int) Action {
         ids.stop_node => .stop_node,
         ids.delete_node => .delete_node,
         ids.open_terminal => .open_terminal,
+        ids.new_child_node => .new_child_node,
         ids.edit_node => .edit_node,
         ids.promote_goal => .promote_goal,
         ids.promote_turn => .promote_turn,
@@ -353,6 +390,43 @@ fn toWide(text: []const u8) ?[]u16 {
 }
 
 const std = @import("std");
+
+test "custody child menu plan is unresolved-only and uses its reserved command" {
+    const target = NodeTarget{ .project_path = "B", .id = "11111111-1111-4111-8111-111111111111" };
+    const item = newChildNodeMenuItem(target).?;
+    try std.testing.expectEqual(@as(usize, 5119), item.id);
+    try std.testing.expectEqualStrings("New Child Node...", item.text);
+    try std.testing.expect(item.enabled);
+    try std.testing.expectEqual(Action.new_child_node, actionForCommand(@intCast(item.id)));
+    var resolved = target;
+    resolved.resolved = true;
+    try std.testing.expect(newChildNodeMenuItem(resolved) == null);
+    try std.testing.expectEqual(Action.none, actionForCommand(0));
+}
+
+test "custody child node menu plan preserves existing items when creation is unavailable" {
+    const expected_unresolved = [_]usize{ 5104, 5119, 5109, 5112, 0, 5113, 5107, 5108, 0, 5100, 5114, 5115, 5101, 5102, 5103 };
+    const expected_resolved = [_]usize{ 5104, 5109, 5112, 0, 5113, 5107, 5108, 0, 5100, 5114, 5115, 5101, 5103 };
+    for ([_]bool{ false, true }) |resolved| {
+        const plan = nodeMenuPlan(.{
+            .project_path = "B",
+            .id = "parent",
+            .composite = true,
+            .unwired = true,
+            .follows_template = true,
+            .resolved = resolved,
+            .can_create_child = false,
+        });
+        const expected: []const usize = if (resolved) &expected_resolved else &expected_unresolved;
+        try std.testing.expectEqual(expected.len, plan.len);
+        for (plan.items[0..plan.len], expected) |item, id| {
+            try std.testing.expectEqual(id, item.id);
+            try std.testing.expectEqual(id != 5119 and id != 5108, item.enabled);
+        }
+        try std.testing.expectEqualStrings("Open Terminal", plan.items[0].text);
+        try std.testing.expectEqualStrings("Delete Loop...\tDelete", plan.items[plan.len - 1].text);
+    }
+}
 
 test "sketch promotion real menu plan exposes only three eligible target actions" {
     var node = NodeTarget{ .project_path = "B", .id = "id" };
@@ -433,10 +507,10 @@ test "node shortcut captions keep Edit Details without the rename Ctrl E hint" {
     try std.testing.expectEqual(Action.rename_node, actionForCommand(ids.rename_node));
 
     const targets = [_]struct { node: NodeTarget, edit_position: c_int }{
-        .{ .node = .{ .project_path = "C:\\fixture", .id = "ordinary" }, .edit_position = 1 },
+        .{ .node = .{ .project_path = "C:\\fixture", .id = "ordinary" }, .edit_position = 2 },
         .{ .node = .{ .project_path = "C:\\fixture", .id = "resolved", .resolved = true }, .edit_position = 1 },
-        .{ .node = .{ .project_path = "C:\\fixture", .id = "composite", .composite = true }, .edit_position = 5 },
-        .{ .node = .{ .project_path = "C:\\fixture", .id = "unwired", .unwired = true }, .edit_position = 4 },
+        .{ .node = .{ .project_path = "C:\\fixture", .id = "composite", .composite = true }, .edit_position = 6 },
+        .{ .node = .{ .project_path = "C:\\fixture", .id = "unwired", .unwired = true }, .edit_position = 5 },
     };
     for (targets) |target| {
         const menu = buildMenu(.{ .node = target.node }) orelse return error.MenuCreationFailed;
