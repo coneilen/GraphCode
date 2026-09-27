@@ -5,10 +5,11 @@ import Foundation
 /// clock. Plain ssh hosts are never gated — their dials multiplex over one connection and
 /// cost no API calls.
 ///
-/// A paused codespace resumes when a human asks: the terminal pane's "press Enter to
-/// reconnect" touches `reconnectMarker(for:)`, and a marker newer than the outage clears
-/// it. A file rather than a daemon command because the pane is a shell loop in the app's
-/// process, and a `stat` spends nothing.
+/// A human restarts the schedule: pressing Enter at a paused terminal pane, or selecting
+/// any loop of the codespace in the app, touches `reconnectMarker(for:)`, and a marker
+/// newer than the outage clears it — holding or paused alike — so the next read or
+/// ensure dials at once. A file rather than a daemon command because the pane is a shell
+/// loop in the app's process, and a `stat` spends nothing.
 public actor CodespaceDialBreaker {
   static let shared = CodespaceDialBreaker()
 
@@ -34,16 +35,24 @@ public actor CodespaceDialBreaker {
     directory.appendingPathComponent("\(location.host).reconnect")
   }
 
+  /// Asks every dialer of this codespace — the daemon's reads and ensures, and any open
+  /// terminal pane — to restart the schedule and redial now.
+  public static func requestReconnect(
+    for location: RemoteProjectLocation, in directory: URL = defaultMarkerDirectory
+  ) {
+    let marker = reconnectMarker(for: location, in: directory)
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    FileManager.default.createFile(atPath: marker.path, contents: nil)
+    try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: marker.path)
+  }
+
   func permits(_ location: RemoteProjectLocation, now: Date = Date()) -> Bool {
     guard location.isCodespace, let since = downSince[location.host] else { return true }
-    switch schedule.verdict(secondsDown: now.timeIntervalSince(since)) {
-    case .dial: return true
-    case .hold: return false
-    case .paused:
-      guard reconnectRequested(for: location, after: since) else { return false }
+    if reconnectRequested(for: location, after: since) {
       downSince.removeValue(forKey: location.host)
       return true
     }
+    return schedule.verdict(secondsDown: now.timeIntervalSince(since)) == .dial
   }
 
   func record(_ location: RemoteProjectLocation, reached: Bool, now: Date = Date()) {
