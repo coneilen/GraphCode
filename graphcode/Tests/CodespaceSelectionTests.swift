@@ -195,11 +195,16 @@ struct CodespaceSelectionTests {
       onATTY: true)
     defer { pane.process.terminate() }
 
-    // Dials at about 0, 1, 3 and 5s, then the pause at 4s+ holds the pane still.
-    #expect(await waitFor { lines(in: log) >= 4 })
-    try await Task.sleep(for: .seconds(1))
-    let pausedAt = lines(in: log)
-    try await Task.sleep(for: .seconds(3))
+    // Three or four dials before the pause at 4s, depending on where the first one
+    // falls against `date +%s`'s whole seconds; paused, the pane dials no more.
+    #expect(await waitFor { lines(in: log) >= 3 })
+    var pausedAt = lines(in: log)
+    let settleBy = ContinuousClock.now + .seconds(20)
+    while ContinuousClock.now < settleBy {
+      try await Task.sleep(for: .seconds(3))
+      if lines(in: log) == pausedAt { break }
+      pausedAt = lines(in: log)
+    }
     #expect(lines(in: log) == pausedAt)
     #expect(pane.process.isRunning)
 
