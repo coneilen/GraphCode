@@ -1890,7 +1890,9 @@ public actor GraphStore {
         node.loopType == .sketch
           ? "update refused: nothing in it applies to a main loop — give it a shape "
             + "first with `graphcode node promote`"
-          : "update refused: nothing in it applies to a \(node.loopType) loop")
+          : "update refused: nothing in it applies to a \(node.loopType) loop"
+            + (Self.retypeTarget(of: node.loopType) == nil
+              ? "" : " — change its type with `graphcode node promote`"))
       return
     }
     // A new goal on a resolved goal loop reopens it. The met goal stays in its history —
@@ -1941,7 +1943,8 @@ public actor GraphStore {
     }
   }
 
-  /// Gives a sketch a shape — `GraphCommand.promoteNode`.
+  /// Gives a sketch a shape, or swaps a goal loop's stop condition for a cadence and
+  /// back — `GraphCommand.promoteNode`.
   ///
   /// A mutation on the existing node, deliberately not a create + delete: the id is the
   /// zmx session name, the memory key, and every edge's endpoint, so keeping it is what
@@ -1956,11 +1959,28 @@ public actor GraphStore {
       announceError("no loop \(nodeID) in this graph")
       return
     }
-    guard node.loopType == .sketch else {
+    let source = node.loopType
+    let retypes = source != .sketch
+    guard !retypes || Self.retypeTarget(of: source) == promotion.targetType else {
       announceError(
-        "promotion refused: \(node.title) already has a shape — only a main loop can be promoted")
+        "promotion refused: \(node.title) is a \(source) loop — a main loop takes any shape, "
+          + "a goal loop can become time-based, and a time-based loop a goal loop")
       return
     }
+    // Stopped is a human's hand on the loop; a new shape would restart work they paused.
+    if retypes, node.state == .stopped {
+      announceError("promotion refused: \(node.title) is stopped — resume it first")
+      return
+    }
+    // Leaving goal is leaving a stop condition, and the loop under it may not do that:
+    // the same verifier-inside-the-verified rule `updateNode` holds for predicates.
+    if source == .goalBased, promotedBy == nodeID {
+      announceError("promotion refused: \(node.title) may not drop its own goal")
+      recordMemory(nodeID, "promotion refused: a loop may not drop its own goal")
+      return
+    }
+    let reopens = retypes && node.isResolved
+    let formerGoal = node.goal?.summary
 
     let nudge: String
     switch promotion {
@@ -1984,6 +2004,12 @@ public actor GraphStore {
       // What creation gives a goal loop, promotion gives it too: born `.running`,
       // because its session works toward the goal with no human turn in between.
       node.state = .running
+      if retypes {
+        node.triggerPrompt = nil
+        node.heartbeatIntervalSeconds = nil
+        // A loop that was a goal loop before carries its old verdicts in the transcript.
+        node.goalSetAt = Date()
+      }
       nudge = "You are now a goal loop. Work toward this and stop when it's met: \(spec.summary)"
 
     case .turn(let beforeWritesOnly):
@@ -2004,6 +2030,12 @@ public actor GraphStore {
       }
       node.loopType = .timeBased
       node.triggerPrompt = trimmed
+      if retypes {
+        node.goal = nil
+        node.goalSetAt = nil
+        node.pendingCompletion = nil
+        node.state = .idle
+      }
       let capabilities = node.backend.capabilities
       if capabilities.supportsDaemonRecurrence && !capabilities.supportsInSessionRecurrence {
         guard node.effectiveHeartbeatInterval != nil else {
@@ -2020,6 +2052,15 @@ public actor GraphStore {
       }
     }
 
+    if reopens {
+      recordMemory(
+        nodeID,
+        "reopened as a \(promotion.targetType.rawValue) loop — the earlier one stays "
+          + (node.resolution.map { "\(node.state): \($0.displayLine)" } ?? "\(node.state)"))
+      node.resolution = nil
+      node.stallReason = nil
+      resolvedSessionEnders.removeValue(forKey: nodeID)?.cancel()
+    }
     graph.nodes[id: nodeID] = node
     // Attributed the way `updateNode` attributes: the promoter's title when the command
     // came from inside a loop, "a human" otherwise — except a self-promotion, which is
@@ -2027,21 +2068,101 @@ public actor GraphStore {
     let promoter =
       promotedBy == nodeID
       ? "itself" : promotedBy.flatMap { graph.nodes[id: $0]?.title } ?? "a human"
+    let from = retypes ? source.rawValue : "main"
     recordMemory(
-      nodeID, "promoted from main to \(promotion.targetType.rawValue) by \(promoter) — \(nudge)")
-    pendingNudges.append((nodeID, "[graphcode] \(nudge)"))
+      nodeID,
+      "promoted from \(from) to \(promotion.targetType.rawValue) by \(promoter) — \(nudge)")
 
-    // What creation does for the type, promotion does too: an unattended loop's session
-    // must exist whether or not anyone has the app open, and a goal loop's stop
-    // condition needs its poller.
-    if node.runsUnattended {
-      ensureSession(node)
+    if source == .goalBased {
+      cancelGoalPoller(nodeID)
+      goalFollowUps.removeValue(forKey: nodeID)
     }
+    if source == .timeBased { cancelHeartbeat(nodeID) }
     if node.loopType == .goalBased {
       cancelGoalPoller(nodeID)
       armGoalPoller(for: node)
     }
     if node.loopType == .timeBased { armHeartbeat(for: node) }
+
+    guard retypes else {
+      pendingNudges.append((nodeID, "[graphcode] \(nudge)"))
+      // What creation does for the type, promotion does too: an unattended loop's session
+      // must exist whether or not anyone has the app open.
+      if node.runsUnattended { ensureSession(node) }
+      return
+    }
+    Task {
+      await self.deliverRetype(
+        nodeID, messages: Self.retypeMessages(for: node, from: source, formerGoal: formerGoal))
+    }
+  }
+
+  /// The one other shape each committed type can take. Goal and time are each other's
+  /// only destination because they are the two unattended types: the session keeps
+  /// running and only what ends it changes. Turn waits on a human and composite is a
+  /// sub-graph, so neither is one decision away from anything.
+  static func retypeTarget(of source: LoopType) -> LoopType? {
+    switch source {
+    case .goalBased: .timeBased
+    case .timeBased: .goalBased
+    case .sketch, .turnBased, .composite: nil
+    }
+  }
+
+  /// What a retyped session is told, in order: drop the old shape, then the new shape's
+  /// own opening prompt — verbatim, so a `/goal` or `/loop` directive arms the way a fresh
+  /// launch would arm it rather than arriving as prose about one.
+  static func retypeMessages(
+    for node: LoopNode, from source: LoopType, formerGoal: String?
+  ) -> [String] {
+    var messages: [String] = []
+    if source == .goalBased {
+      messages.append(
+        "[graphcode] This loop is no longer a goal loop; stop working toward its goal"
+          + (formerGoal.map { ": \($0)" } ?? "") + ". It is time-based now.")
+      // `clear` is a verified subcommand only where `GoalSpec.directiveSubcommands` read it
+      // off the CLI; elsewhere the line would arm a goal named "clear".
+      if [.claudeCode, .codex].contains(node.backend),
+        let directive = node.backend.capabilities.goalDirective
+      {
+        messages.append("\(directive) clear")
+      }
+    } else {
+      messages.append(
+        "[graphcode] This loop is no longer time-based: turn off any recurring schedule you "
+          + "set up for it — a /loop, a scheduled wakeup, a cron entry — and do not start "
+          + "another pass. Stay in the session: it is a goal loop now.")
+    }
+    if let prompt = node.sessionPrompt { messages.append(prompt) }
+    return messages
+  }
+
+  /// A live session hears the change at once, the way a nudge does. An ended one is
+  /// brought back first; a resumed conversation still needs the messages typed in, while
+  /// a fresh launch already opens with the new shape's prompt.
+  private func deliverRetype(_ nodeID: UUID, messages: [String]) async {
+    guard let node = graph.nodes[id: nodeID] else { return }
+    let path = graph.project.path
+    let stillCurrent = { [self] in graph.nodes[id: nodeID]?.loopType == node.loopType }
+    if await onSessionAlive?(node, path) == true {
+      for message in messages {
+        guard stillCurrent(), let target = graph.nodes[id: nodeID],
+          MessageBus.deliverability(to: target) == nil
+        else { return }
+        _ = await deliverToSession(target, message)
+      }
+      return
+    }
+    guard let onResumeSession else {
+      ensureSession(node)
+      return
+    }
+    guard await onResumeSession(node, path), stillCurrent() else { return }
+    for message in messages {
+      pendingFollowUps.append(
+        PendingFollowUp(id: UUID(), nodeID: nodeID, text: message, watchedPostID: nil))
+    }
+    await drainAndBroadcast()
   }
 
   /// A learned note into a node's memory log — `graphcode node memo`, the agent-written

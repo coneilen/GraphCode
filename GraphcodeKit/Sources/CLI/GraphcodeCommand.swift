@@ -97,7 +97,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node send <project-path> <node-id> [--follow-up] <message…>
       graphcode node update <project-path> <node-id> [options]
       graphcode node promote <project-path> <node-id> --type <goal|turn|time> [options]
-                           give a main loop a shape, keeping its session, edges and memory
+                           give a main loop a shape, or turn a goal loop time-based
+                           and back, keeping its session, edges and memory
       graphcode node memo <project-path> <node-id> <note…>
       graphcode node done <project-path> <node-id> [result…]
       graphcode node refine <project-path> <node-id> <playbook…|--file f|--rollback>
@@ -213,8 +214,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            --predicate through promotion, the same rule update holds.
       --type turn          with --pause <every-turn|before-writes>  (default: every-turn)
       --type time          with --prompt <text> (required); put the cadence in it
-      Promotion is one-way: a main loop gains a shape, never the reverse, and only a
-      main loop can be promoted.
+      A main loop can take any shape and never goes back to main. A goal loop can
+      become time-based (--type time) and a time-based loop a goal loop (--type goal);
+      turn and composite loops keep theirs. A loop may not drop its own goal.
 
     node memo appends a note to the loop's own memory log — what the next pass reads
     before starting. Record dead ends and decisions, not a transcript.
