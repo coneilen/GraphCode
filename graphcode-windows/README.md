@@ -38,7 +38,8 @@ conformance, and end-to-end accessibility parity remain unverified or incomplete
 The graph surface also provides native Win32 create/edit forms for nodes and
 edges, a settings dialog, context menus, and keyboard-accessible actions:
 `Ctrl+N` creates a node, `Ctrl+J` opens the jump palette, and `Ctrl+,` opens
-advanced connection settings. With the graph canvas owning the keyboard,
+Advanced Connection Settings. `Ctrl+Shift+,` opens product Settings.
+With the graph canvas owning the keyboard,
 `F2` or `Ctrl+E` renames the selected loop; `Ctrl+E` edits the selected edge
 instead when an edge is selected. Full **Edit Details...** remains a node
 context-menu action, not the `Ctrl+E` action. **Open Terminal** is also in that
@@ -70,6 +71,19 @@ until that field is read successfully; recovering one field does not clear
 another field's error. This checked reader is edit-only. Creation, node and
 settings forms retain their existing bounded reader and are outside this
 capture validation.
+
+Sketch loop context menus on the project canvas and in the sidebar offer
+**Promote to... > Goal / Turn / Timed**. Each native form asks only for its
+target's decision: a done check, where to pause, or a cadence. Timed promotion
+uses the captured sketch's first instruction, with the same fallback and
+interval choices as macOS. Promotion uses the existing daemon command; it does
+not recreate the node or replace its session, history, worktree, or edges.
+The clicked project can differ from the observation subscription. Popup and
+form contexts are owned and rechecked; stale project/composite, selection,
+deleted-node, or changed-type results do not send or retarget a command.
+"Queued" reports local queue insertion, not daemon acceptance or persistence.
+Pure production-adapter tests and Swift fixture decoding cover this path;
+native keyboard/UIA and real-daemon promotion remain unverified.
 
 The shell exposes a native File/Loop/Terminal/View/Help menu bar. Menu items
 share the same application action router as keyboard shortcuts, and project
@@ -255,6 +269,55 @@ with Zig 0.15.2 for direct test-allocator, exhaustive allocation-fault, malforme
 input, and temporary-JSON-lifetime coverage. Run `zig test src\GraphModel.zig`
 for the existing semantic root as well. These are offline allocation simulations,
 not evidence of true OS memory exhaustion or live UI behavior.
+
+Graph decoding resolves immediate JSON object fields, not the first occurrence
+of a key anywhere in a frame. The v2 `event.graphChanged` (or legacy root
+`graphChanged`) supplies the graph; only that graph's `project`, `nodes`, and
+`edges` are used. Nested graphs retain their own arrays and inherit the parent
+project when opened. Metadata, nested children, and key-like string contents
+cannot supply parent fields. The nonfallible subgraph display count remains
+allocation-free and counts only immediate node objects.
+
+Node goal, usage, presence, and worktree fields use their explicit containing
+objects. Canonical goal metric/poll/stall fields take precedence over the
+existing direct-node legacy fields; a missing field in a goal object can use
+that legacy fallback, but an explicit null/wrong-type goal or canonical field
+cannot. Goal summary/predicate come only from `goal`. A present `usage` owns its
+token fields even when empty, null, or the wrong type; only absent usage uses
+direct-node token fields. Within a worktree binding, a string `path` precedes
+`worktreePath`, with the existing alias fallback for absent/nonstring `path`.
+Scalar presence strings and same-object token-count aliases remain supported.
+Scoped graph/node lookups retain first-field precedence. Their
+missing/null/wrong-type fields keep existing defaults, including the existing
+unsigned numeric-prefix conversion. Once the owning graph's edge array is
+selected, the independent typed edge decoder retains its stricter contract:
+duplicate fields and invalid edge elements are errors, `fireCount` is a signed
+integer, and cycle guards, transforms, and spawn configuration remain owned.
+
+Temporary field indexes/decoded keys and mixed-delimiter stacks use the caller's
+allocator and propagate allocation errors. Values borrow input only during
+decoding; all retained model strings, including raw `subGraph`, are owned.
+Object/array punctuation, key escapes, and primitive tokens are checked using
+scoped traversal and standard JSON lexing. Structural validation advances one
+cursor through nested containers, rather than scanning descendants again at each
+level; work is linear in input size, with stack storage proportional to depth.
+Bounded depth/width tests count actual span-scan byte visits and validator
+iterations, not elapsed time, and exhaustively exercise stack allocation failure.
+Stored `subGraph` contents remain
+opaque until opened (apart from balanced string/container boundaries), preserving
+the malformed-child-string fallback. Other string payloads retain the existing
+`Wire.decodeJsonString` validation when consumed; ignored strings are not newly
+schema-validated. Malformed decoded graph structure reports `MalformedGraph` or
+`MalformedSubgraph`, and invalid decoded string escapes report
+`MalformedJsonString`. The typed edge decoder preserves `SyntaxError`,
+`MalformedEdge`, and `DuplicateField`; the nested fallback explicitly propagates
+`OutOfMemory` before handling malformed data. Unrelated recursive Wire envelope
+queries are unchanged.
+
+Run `zig test src\GraphModel.zig --test-filter "field scope"` for key-order,
+root/child identity, escaped-key/string, defaults/precedence, malformed-input,
+temporary-lifetime, and exhaustive allocation-failure regressions. This is pure
+decoder evidence, not live graph rendering or a parity-status promotion.
 
 ## Build
 
