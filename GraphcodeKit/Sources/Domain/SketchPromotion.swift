@@ -8,6 +8,10 @@ import Foundation
 /// sketch never asked for. Never a re-brief: the transcript so far is the loop's
 /// context, and a promoted goal loop starts already knowing what was found.
 ///
+/// The same cases retype a goal loop as time-based and a time-based loop as a goal loop
+/// (`GraphStore.retypeTarget(of:)`): each is the one decision the other type never asked
+/// for, and the session, edges and memory carry over the same way.
+///
 /// Promotion is one-way by construction. There is no case that lands on `.sketch`, so
 /// demotion — which would silently drop a done check or a cadence — is unrepresentable
 /// rather than merely refused. `.composite` is absent deliberately too, not as an
