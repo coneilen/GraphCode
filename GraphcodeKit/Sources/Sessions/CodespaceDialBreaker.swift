@@ -37,13 +37,24 @@ public actor CodespaceDialBreaker {
 
   /// Asks every dialer of this codespace — the daemon's reads and ensures, and any open
   /// terminal pane — to restart the schedule and redial now.
+  ///
+  /// At most once per `minimumInterval`: every selection of a loop asks, and without a
+  /// floor a human browsing the loops of a codespace that is down would keep restarting
+  /// the schedule, never reaching the pause and spending a dial per pane per click.
   public static func requestReconnect(
-    for location: RemoteProjectLocation, in directory: URL = defaultMarkerDirectory
+    for location: RemoteProjectLocation, in directory: URL = defaultMarkerDirectory,
+    minimumInterval: TimeInterval = 30, now: Date = Date()
   ) {
     let marker = reconnectMarker(for: location, in: directory)
+    if let touched = (try? FileManager.default.attributesOfItem(atPath: marker.path))?[
+      .modificationDate] as? Date,
+      now.timeIntervalSince(touched) < minimumInterval
+    {
+      return
+    }
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     FileManager.default.createFile(atPath: marker.path, contents: nil)
-    try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: marker.path)
+    try? FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: marker.path)
   }
 
   func permits(_ location: RemoteProjectLocation, now: Date = Date()) -> Bool {

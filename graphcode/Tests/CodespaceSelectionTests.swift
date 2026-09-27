@@ -38,6 +38,7 @@ struct CodespaceSelectionTests {
   @Test
   func selectingALoopRestartsTheScheduleWhileHeld() async throws {
     let directory = try scratch()
+    defer { try? FileManager.default.removeItem(at: directory) }
     let breaker = CodespaceDialBreaker(markerDirectory: directory)
     let down = Date(timeIntervalSince1970: 1_000_000)
     let marker = CodespaceDialBreaker.reconnectMarker(for: codespace, in: directory)
@@ -57,6 +58,7 @@ struct CodespaceSelectionTests {
   @Test
   func requestingAReconnectResumesTheDaemonToo() async throws {
     let directory = try scratch()
+    defer { try? FileManager.default.removeItem(at: directory) }
     let breaker = CodespaceDialBreaker(markerDirectory: directory.appendingPathComponent("dials"))
     await breaker.record(codespace, reached: false, now: Date().addingTimeInterval(-90))
     #expect(await !breaker.permits(codespace))
@@ -120,8 +122,47 @@ struct CodespaceSelectionTests {
   }
 
   @Test
+  func aPaneWithoutAStampKeepsToTheSchedule() async throws {
+    // No stamp can be made (mktemp and its fallback both fail), so a selection cannot be
+    // told apart from the click that opened the pane: the pane must neither die nor take
+    // every second as a request.
+    let directory = try scratch()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let log = directory.appendingPathComponent("dials")
+    let marker = directory.appendingPathComponent("space.reconnect")
+    FileManager.default.createFile(atPath: marker.path, contents: nil)
+    let dial = "(echo dial >> \(RemoteProjectLocation.shellQuoted(log.path)); exit 1)"
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = [
+      "-c",
+      SSHReconnectLoop.codespaceScript(
+        connect: dial, reconnect: dial, pauseMarker: marker.path, schedule: tiny),
+    ]
+    // macOS `mktemp` ignores an unusable TMPDIR, so a shim is what makes it fail.
+    let shims = directory.appendingPathComponent("shims", isDirectory: true)
+    try FileManager.default.createDirectory(at: shims, withIntermediateDirectories: true)
+    let mktemp = shims.appendingPathComponent("mktemp")
+    try "#!/bin/sh\nexit 1\n".write(to: mktemp, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mktemp.path)
+    process.environment = [
+      "PATH": "\(shims.path):/usr/bin:/bin", "TMPDIR": "/nonexistent/graphcode",
+    ]
+    process.standardInput = FileHandle.nullDevice
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    defer { process.terminate() }
+
+    #expect(await waitFor(within: .seconds(20)) { !process.isRunning })
+    #expect(process.terminationStatus == 0)
+    #expect((3...5).contains(lines(in: log)))
+  }
+
+  @Test
   func selectingTheLoopRedialsAHeldPaneAtOnce() async throws {
     let directory = try scratch()
+    defer { try? FileManager.default.removeItem(at: directory) }
     let log = directory.appendingPathComponent("dials")
     let marker = directory.appendingPathComponent("space.reconnect")
     let dial = "(echo dial >> \(RemoteProjectLocation.shellQuoted(log.path)); exit 1)"
@@ -144,6 +185,7 @@ struct CodespaceSelectionTests {
   @Test
   func selectingTheLoopResumesAPausedPane() async throws {
     let directory = try scratch()
+    defer { try? FileManager.default.removeItem(at: directory) }
     let log = directory.appendingPathComponent("dials")
     let marker = directory.appendingPathComponent("space.reconnect")
     let dial = "(echo dial >> \(RemoteProjectLocation.shellQuoted(log.path)); exit 1)"
