@@ -849,6 +849,8 @@ test "settings accelerator table preserves existing bindings and product destina
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_PRIOR, .cmd = 4306 },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_OEM_COMMA, .cmd = 4402 },
         .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = c.VK_OEM_COMMA, .cmd = 4403 },
+        .{ .fVirt = c.FCONTROL | c.FALT | c.FVIRTKEY, .key = c.VK_NEXT, .cmd = 4804 },
+        .{ .fVirt = c.FCONTROL | c.FALT | c.FVIRTKEY, .key = c.VK_PRIOR, .cmd = 4805 },
     };
     const accelerators = createAccelerators() orelse return error.AcceleratorCreationFailed;
     defer std.testing.expect(c.DestroyAcceleratorTable(accelerators) != 0) catch
@@ -1587,15 +1589,19 @@ test "workspace cycle keyboard actual accelerator descriptors provide both direc
             }
         }
     }
-    try std.testing.expectEqual(@as(usize, 17), accelerator_entries.len);
+    try std.testing.expectEqual(@as(usize, 18), accelerator_entries.len);
     const previous_commands = [_]Command{
         .open_folder, .worktrees, .jump_loop, .review_attention, .next_loop,
         .previous_loop, .create_node, .stop_loop, .new_tab, .close_tab,
-        .split_right, .split_down, .next_tab, .previous_tab, .settings,
+        .split_right, .split_down, .next_tab, .previous_tab, .settings, .product_settings,
     };
-    for (previous_commands, accelerator_entries[0..15]) |command, entry| {
+    for (previous_commands, accelerator_entries[0..16]) |command, entry| {
         try std.testing.expectEqual(@intFromEnum(command), entry.cmd);
     }
+    try std.testing.expectEqual(c.VK_OEM_COMMA, accelerator_entries[15].key);
+    try std.testing.expectEqual(@as(c.BYTE, c.FCONTROL | c.FSHIFT | c.FVIRTKEY), accelerator_entries[15].fVirt);
+    try std.testing.expect(workspaceCycleDirection(c.VK_OEM_COMMA, true, true, false) == null);
+    try std.testing.expectEqual(@import("InputRouter.zig").Action.product_settings, @import("InputRouter.zig").keyAction(c.VK_OEM_COMMA, true, true));
     try std.testing.expectEqual(c.VK_NEXT, accelerator_entries[12].key);
     try std.testing.expectEqual(c.VK_PRIOR, accelerator_entries[13].key);
     for (accelerator_entries[12..14]) |entry| {
@@ -1728,6 +1734,15 @@ test "workspace cycle keyboard gate leaves F10 pairing and cancellation to nativ
         window.pending_native_f10 = pending;
         try std.testing.expect(!window.consumeRejectedCycleKey(&message, .{ .ctrl = true, .alt = true }));
         try std.testing.expectEqualDeep(pending.down, window.pending_native_f10.?.down);
+    }
+    for ([_]c.UINT{ c.WM_KEYDOWN, c.WM_SYSKEYDOWN }) |message_type| {
+        message.message = message_type;
+        message.wParam = c.VK_OEM_COMMA;
+        for ([_]bool{ false, true }) |shift| {
+            window.pending_native_f10 = pending;
+            try std.testing.expect(!window.consumeRejectedCycleKey(&message, .{ .ctrl = true, .shift = shift }));
+            try std.testing.expectEqualDeep(pending.down, window.pending_native_f10.?.down);
+        }
     }
 }
 
