@@ -376,6 +376,18 @@ Invoke-Native "Forms and navigation executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Forms.zig } finally { Pop-Location }
 }
+Invoke-Native "Edge creation captured draft and scope pure tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\EdgeCreationTests.zig -target x86_64-windows-msvc -lc -ladvapi32 "-I$include" --test-filter "edge creation"
+  } finally { Pop-Location }
+}
 Invoke-Native "Edge editing data-only executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
