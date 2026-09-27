@@ -4939,12 +4939,31 @@ pub const App = struct {
             }
         }
         defer if (workspace_items.len != 0) self.allocator.free(workspace_items);
+        const has_jump_target = for (self.model.graphs.items) |graph| {
+            if (graph.nodes.items.len != 0) break true;
+        } else false;
+        const can_navigate_loops = if (self.model.graph) |graph|
+            MainWindow.loopNavigationAvailable(graph.nodes.items.len, self.model.selectedIndex())
+        else
+            false;
+        const can_create_edge = if (self.model.graph) |graph| graph.nodes.items.len >= 2 else false;
+        const can_cycle_tabs = if (self.workspace) |workspace| workspace.tabCount() > 1 else false;
+        const can_cycle_panes = if (self.workspace) |workspace| blk: {
+            const tab = workspace.layout.selected() orelse break :blk false;
+            break :blk tab.panes.items.len > 1;
+        } else false;
         MainWindow.updateMenu(self.window.hwnd, .{
             .has_project = self.model.graph != null,
             .can_worktrees = if (self.model.graph) |graph| graph.project.isLocalFilesystem() else false,
             .worktree_dialog_open = self.worktree_dialog != null,
             .worktree_row_selected = self.worktreeRowSelected(),
+            .has_jump_target = has_jump_target,
+            .can_navigate_loops = can_navigate_loops,
+            .can_create_edge = can_create_edge,
+            .has_selected_loop = self.model.selected() != null,
             .has_workspace = self.workspace != null and self.model.graph != null,
+            .can_cycle_tabs = can_cycle_tabs,
+            .can_cycle_panes = can_cycle_panes,
             .has_attention = self.model.attentionCount() != 0,
             .can_close_tab = if (self.workspace) |workspace| workspace.tabCount() > 1 else false,
             .sidebar_visible = self.workspace_controls.rail_visible,
