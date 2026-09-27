@@ -207,8 +207,11 @@ hand.** The repository already pins and resolves everything:
 pwsh -NoProfile -File Tools\windows\bootstrap.ps1
 ```
 
-It installs the pinned Swift, downloads both pinned Zig versions, clones and
-builds the pinned providers, and writes `.graphcode-tools\environment.ps1`.
+It installs the pinned Swift, downloads both pinned Zig versions, clones each
+pinned provider and checks it out at its pinned commit, and writes
+`.graphcode-tools\environment.ps1`. Bootstrap does not build the providers —
+they are built later by the build and test tasks, which pass the provider roots
+in (for example `-Dwinghostty-dir`).
 Load that script in each new shell:
 
 ```powershell
