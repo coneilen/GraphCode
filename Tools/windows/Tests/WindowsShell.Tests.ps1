@@ -376,6 +376,27 @@ Invoke-Native "Forms and navigation executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Forms.zig } finally { Pop-Location }
 }
+Invoke-Native "Edge editing data-only executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  if (-not (Test-Path -LiteralPath $include -PathType Container)) {
+    throw "Winghostty headers are required for edge editing tests."
+  }
+  Push-Location $shellRoot
+  try {
+    $output = @(& $zig test src\EdgeEditing.zig -target x86_64-windows-msvc `
+      -lc -ladvapi32 "-I$include" --test-filter "edge editing:" 2>&1)
+    $exitCode = $LASTEXITCODE
+    $output | ForEach-Object { Write-Host $_ }
+    if ($exitCode -ne 0) { throw "Edge editing tests failed with exit code $exitCode" }
+    Assert-Contract (($output -join "`n") -match 'All [1-9][0-9]* tests passed\.') `
+      "edge editing filter must execute a positive test count"
+  } finally { Pop-Location }
+}
 Invoke-Native "Win32 pointer conversion executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
@@ -724,10 +745,15 @@ Invoke-Native "App shell executable tests" {
     $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
   }
   $include = Join-Path $winghosttyRoot "include"
+  $winghosttyLib = Join-Path $winghosttyRoot "zig-out\lib\winghostty-win32-host.lib"
+  Assert-Contract (Test-Path -LiteralPath $winghosttyLib -PathType Leaf) `
+    "Build the pinned Winghostty host library before App shell tests."
   Push-Location $shellRoot
   try {
-    & $zig test src\App.zig src\AccessibilityProvider.cpp `
-      -target x86_64-windows-msvc -lc -luser32 -lgdi32 -ladvapi32 -loleaut32 -luiautomationcore -lwinhttp "-I$include"
+    & $zig test src\App.zig src\AccessibilityProvider.cpp src\FilePicker.c $winghosttyLib `
+      -DUNICODE -D_UNICODE -target x86_64-windows-msvc -lc `
+      -luser32 -lgdi32 -lgdiplus -lmsimg32 -lopengl32 -lkernel32 -limm32 `
+      -lole32 -loleaut32 -luiautomationcore -lshell32 -ladvapi32 -lwinhttp "-I$include"
   } finally { Pop-Location }
 }
 
