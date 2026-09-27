@@ -437,10 +437,10 @@ test "node shortcut captions keep Edit Details without the rename Ctrl E hint" {
     try std.testing.expectEqual(Action.rename_node, actionForCommand(ids.rename_node));
 
     const targets = [_]struct { node: NodeTarget, edit_position: c_int }{
-        .{ .node = .{ .project_path = "C:\\fixture", .id = "ordinary" }, .edit_position = 1 },
+        .{ .node = .{ .project_path = "C:\\fixture", .id = "ordinary" }, .edit_position = 2 },
         .{ .node = .{ .project_path = "C:\\fixture", .id = "resolved", .resolved = true }, .edit_position = 1 },
-        .{ .node = .{ .project_path = "C:\\fixture", .id = "composite", .composite = true }, .edit_position = 5 },
-        .{ .node = .{ .project_path = "C:\\fixture", .id = "unwired", .unwired = true }, .edit_position = 4 },
+        .{ .node = .{ .project_path = "C:\\fixture", .id = "composite", .composite = true }, .edit_position = 6 },
+        .{ .node = .{ .project_path = "C:\\fixture", .id = "unwired", .unwired = true }, .edit_position = 5 },
     };
     for (targets) |target| {
         const menu = buildMenu(.{ .node = target.node }) orelse return error.MenuCreationFailed;
