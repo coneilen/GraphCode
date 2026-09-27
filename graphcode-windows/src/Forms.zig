@@ -100,6 +100,14 @@ pub const EdgeDraft = struct {
     cycle_stop_after_passes: ?i64 = null,
     spawn_target_project_path: []const u8 = "",
 
+    pub fn clone(self: EdgeDraft, allocator: std.mem.Allocator) !EdgeDraft {
+        var copy = self;
+        inline for (.{ "from", "to", "kind", "condition", "transform_kind", "transform_value", "cycle_until", "spawn_target_project_path" }) |field| @field(copy, field) = &.{};
+        errdefer copy.deinit(allocator);
+        inline for (.{ "from", "to", "kind", "condition", "transform_kind", "transform_value", "cycle_until", "spawn_target_project_path" }) |field| @field(copy, field) = try allocator.dupe(u8, @field(self, field));
+        return copy;
+    }
+
     pub fn deinit(self: *EdgeDraft, allocator: std.mem.Allocator) void {
         freeSlice(allocator, self.from);
         freeSlice(allocator, self.to);
@@ -111,6 +119,113 @@ pub const EdgeDraft = struct {
         freeSlice(allocator, self.spawn_target_project_path);
     }
 };
+
+/// Borrowed configuration view; the owning model snapshot and draft outlive encoding.
+pub const EdgeConfiguration = struct {
+    pub const Guard = struct {
+        max_iterations: ?i64,
+        until: ?[]const u8,
+        stop_after_passes: ?i64,
+    };
+    kind: []const u8,
+    condition: []const u8,
+    transform_kind: []const u8,
+    transform_value: []const u8,
+    guard: ?Guard,
+    spawn_target: ?[]const u8,
+
+    pub fn fromEdge(edge: GraphModel.Edge) EdgeConfiguration {
+        return .{
+            .kind = edge.kind,
+            .condition = edge.condition,
+            .transform_kind = @tagName(edge.payload_transform),
+            .transform_value = switch (edge.payload_transform) { .none => "", .template, .script => |text| text },
+            .guard = if (edge.cycle_guard) |guard| .{ .max_iterations = guard.max_iterations, .until = guard.until, .stop_after_passes = guard.stop_after_passes_without_improvement } else null,
+            .spawn_target = edge.spawn_target_project_path,
+        };
+    }
+
+    pub fn draft(self: EdgeConfiguration, from: []const u8, to: []const u8) EdgeDraft {
+        return .{
+            .from = from, .to = to, .kind = self.kind, .condition = self.condition,
+            .transform_kind = self.transform_kind, .transform_value = self.transform_value,
+            .cycle_max_iterations = if (self.guard) |guard| guard.max_iterations else null,
+            .cycle_until = if (self.guard) |guard| guard.until orelse "" else "",
+            .cycle_stop_after_passes = if (self.guard) |guard| guard.stop_after_passes else null,
+            .spawn_target_project_path = self.spawn_target orelse "",
+        };
+    }
+
+    pub fn applying(self: EdgeConfiguration, value: EdgeDraft) EdgeConfiguration {
+        var result = self;
+        result.kind = value.kind;
+        result.condition = value.condition;
+        result.transform_kind = value.transform_kind;
+        result.transform_value = if (std.mem.eql(u8, value.transform_kind, "none")) "" else value.transform_value;
+        if (!sameGuardControls(self.draft(value.from, value.to), value)) {
+            const previous_until: ?[]const u8 = if (self.guard) |guard| guard.until else null;
+            result.guard = if (value.cycle_max_iterations == null and value.cycle_until.len == 0 and value.cycle_stop_after_passes == null) null else .{
+                .max_iterations = value.cycle_max_iterations,
+                .until = if (std.mem.eql(u8, previous_until orelse "", value.cycle_until)) previous_until else if (value.cycle_until.len == 0) null else value.cycle_until,
+                .stop_after_passes = value.cycle_stop_after_passes,
+            };
+        }
+        if (!std.mem.eql(u8, self.spawn_target orelse "", value.spawn_target_project_path))
+            result.spawn_target = if (value.spawn_target_project_path.len == 0) null else value.spawn_target_project_path;
+        return result;
+    }
+
+    pub fn eql(a: EdgeConfiguration, b: EdgeConfiguration) bool {
+        inline for (.{ "kind", "condition", "transform_kind", "transform_value" }) |field|
+            if (!std.mem.eql(u8, @field(a, field), @field(b, field))) return false;
+        if (!optionalTextEqual(a.spawn_target, b.spawn_target)) return false;
+        if (a.guard) |left| {
+            const right = b.guard orelse return false;
+            return left.max_iterations == right.max_iterations and left.stop_after_passes == right.stop_after_passes and optionalTextEqual(left.until, right.until);
+        }
+        return b.guard == null;
+    }
+};
+
+fn optionalTextEqual(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a) |left| return if (b) |right| std.mem.eql(u8, left, right) else false;
+    return b == null;
+}
+
+fn sameGuardControls(a: EdgeDraft, b: EdgeDraft) bool {
+    return a.cycle_max_iterations == b.cycle_max_iterations and
+        a.cycle_stop_after_passes == b.cycle_stop_after_passes and
+        std.mem.eql(u8, a.cycle_until, b.cycle_until);
+}
+
+pub fn validateEdgeEdit(initial: EdgeDraft, draft: EdgeDraft) FormError!void {
+    if (!std.mem.eql(u8, initial.from, draft.from) or !std.mem.eql(u8, initial.to, draft.to))
+        return error.ChangedEdgeEndpoints;
+    var checked = draft;
+    if (sameGuardControls(initial, draft)) {
+        checked.cycle_max_iterations = null;
+        checked.cycle_stop_after_passes = null;
+    }
+    if (std.mem.eql(u8, initial.transform_kind, draft.transform_kind) and std.mem.eql(u8, initial.transform_value, draft.transform_value) and isTransformKind(initial.transform_kind))
+        checked.transform_kind = "none";
+    try validateEdge(checked);
+}
+
+test "edge editing forms: changing one bound preserves untouched optional text and clearing removes guard" {
+    const original = EdgeConfiguration{
+        .kind = "handoff", .condition = "always", .transform_kind = "none", .transform_value = "",
+        .guard = .{ .max_iterations = 3, .until = "", .stop_after_passes = null },
+        .spawn_target = "",
+    };
+    var draft = original.draft("a", "b");
+    draft.cycle_max_iterations = 4;
+    const changed = original.applying(draft);
+    try std.testing.expectEqualStrings("", changed.guard.?.until.?);
+    try std.testing.expectEqualStrings("", changed.spawn_target.?);
+    draft.cycle_max_iterations = null;
+    try std.testing.expect(original.applying(draft).guard == null);
+    try std.testing.expect(EdgeConfiguration.eql(original, original.applying(original.draft("a", "b"))));
+}
 
 fn freeSlice(allocator: std.mem.Allocator, value: []const u8) void {
     if (value.len != 0) allocator.free(value);
@@ -145,6 +260,7 @@ pub const Settings = struct {
 };
 
 pub const FormError = error{
+    ChangedEdgeEndpoints,
     EmptyTitle,
     MissingSource,
     MissingTarget,
