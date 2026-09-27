@@ -46,6 +46,8 @@ public actor GraphStore {
   private var commandTail: Task<GraphStoreCommandResult, Never>?
   private var commandTailID: UInt64?
   private var nextCommandID: UInt64 = 0
+  // Tests observe actual queue admission instead of guessing with sleeps.
+  var queuedCommandSequence: UInt64 { nextCommandID }
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
   private let onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])?
   private let onConnectionFailure: (@Sendable (UUID) -> Void)?
@@ -994,6 +996,14 @@ public actor GraphStore {
       graph.edges.append(LoopEdge(from: from, to: to, spec: spec))
       unblockIfStillIdle(to)
 
+    case .updateEdge(let id, let from, let to, let expectedSpec, let spec):
+      if let error = Self.updateEdge(
+        in: &graph, id: id, from: from, to: to, expectedSpec: expectedSpec, spec: spec)
+      {
+        return await reject(error, broadcastErrors: broadcastErrors)
+      }
+      unblockIfStillIdle(to)
+
     case .nodeCheckApproved(let nodeID):
       if await sessionPermitsResolution(nodeID, succeeded: true) {
         resolveNode(
@@ -1067,10 +1077,38 @@ public actor GraphStore {
       await resumeResolvedSession(nodeID)
 
     case .subGraphCommand(let nodeID, let inner):
-      if let error = await runInSubGraph(
-        nodeID, inner, broadcastErrors: broadcastErrors)
-      {
-        return await reject(error, broadcastErrors: broadcastErrors)
+      if case .updateEdge(let id, let from, let to, let expectedSpec, let spec) = inner {
+        // No suspension between the current child snapshot and its writeback.
+        // commandTail also orders this after queued legacy child-store writebacks.
+        guard let node = graph.nodes[id: nodeID], node.loopType == .composite,
+          var child = node.subGraph
+        else {
+          return await reject(
+            "edge update refused: no direct composite \(nodeID)",
+            broadcastErrors: broadcastErrors)
+        }
+        if let error = Self.updateEdge(
+          in: &child, id: id, from: from, to: to, expectedSpec: expectedSpec, spec: spec)
+        {
+          return await reject(error, broadcastErrors: broadcastErrors)
+        }
+        if let state = Self.edgeTargetReadiness(to, in: child) {
+          child.nodes[id: to]?.state = state
+          child.nodes[id: to]?.stallReason = nil
+          child.nodes[id: to]?.resolution = nil
+        }
+        graph.nodes[id: nodeID]?.subGraph = child
+        rollUpComposite(nodeID)
+      } else if Self.containsEdgeUpdate(inner) {
+        return await reject(
+          "edge update refused: only the root or one direct composite is supported",
+          broadcastErrors: broadcastErrors)
+      } else {
+        if let error = await runInSubGraph(
+          nodeID, inner, broadcastErrors: broadcastErrors)
+        {
+          return await reject(error, broadcastErrors: broadcastErrors)
+        }
       }
 
     case .pilotComposite(let nodeID):
@@ -1110,6 +1148,47 @@ public actor GraphStore {
   }
 
   // MARK: - Composites
+
+  private static func containsEdgeUpdate(_ command: GraphCommand) -> Bool {
+    switch command {
+    case .updateEdge: return true
+    case .subGraphCommand(_, let inner): return containsEdgeUpdate(inner)
+    default: return false
+    }
+  }
+
+  private static func updateEdge(
+    in graph: inout LoopGraph, id: UUID, from: UUID, to: UUID,
+    expectedSpec: EdgeSpec, spec: EdgeSpec
+  ) -> String? {
+    guard let edge = graph.edges[id: id] else {
+      return "edge update refused: no edge \(id) in this graph"
+    }
+    guard edge.from == from, edge.to == to, edge.spec == expectedSpec else {
+      return "edge update refused: edge changed while editing"
+    }
+    guard from != to, graph.nodes[id: from] != nil, graph.nodes[id: to] != nil else {
+      return "edge update refused: both distinct endpoints must remain in this graph"
+    }
+    guard
+      !graph.edges.contains(where: {
+        $0.id != id && $0.from == from && $0.to == to && $0.kind == spec.kind
+      })
+    else {
+      return "edge update refused: duplicate \(spec.kind) edge"
+    }
+    if spec.cycleGuard != edge.cycleGuard, let guardValue = spec.cycleGuard,
+      !guardValue.isBounded
+    {
+      return "edge update refused: changed cycle guards must be bounded"
+    }
+    graph.edges[id: id]?.kind = spec.kind
+    graph.edges[id: id]?.condition = spec.condition
+    graph.edges[id: id]?.payloadTransform = spec.payloadTransform
+    graph.edges[id: id]?.cycleGuard = spec.cycleGuard
+    graph.edges[id: id]?.spawnTargetProjectPath = spec.spawnTargetProjectPath
+    return nil
+  }
 
   /// Wraps a command whose target loop lives inside a composite's sub-graph, for
   /// dispatch through `runInSubGraph` — `nil` when the command needs no routing.
@@ -3702,12 +3781,17 @@ public actor GraphStore {
   }
 
   private func unblockIfStillIdle(_ nodeID: UUID) {
+    guard let state = Self.edgeTargetReadiness(nodeID, in: graph) else { return }
+    setNodeState(nodeID, state)
+  }
+
+  private static func edgeTargetReadiness(_ nodeID: UUID, in graph: LoopGraph) -> LoopState? {
     guard graph.nodes[id: nodeID]?.state == .idle || graph.nodes[id: nodeID]?.state == .blocked
-    else { return }
+    else { return nil }
     let stillBlocked = graph.edges.contains {
       $0.to == nodeID && $0.kind.blocksTarget && !$0.fired
     }
-    setNodeState(nodeID, stillBlocked ? .blocked : .idle)
+    return stillBlocked ? .blocked : .idle
   }
 
   // MARK: - Goal-based stop-condition polling

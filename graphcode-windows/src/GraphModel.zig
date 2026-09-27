@@ -1,6 +1,7 @@
 const std = @import("std");
 const Wire = @import("Wire.zig");
-pub const WorktreeSummary = @import("WorktreeStatus.zig").Summary;
+const WorktreeStatus = @import("WorktreeStatus.zig");
+pub const WorktreeSummary = WorktreeStatus.Summary;
 
 pub const Node = struct {
     id: []u8,
@@ -47,6 +48,18 @@ pub const QuickChat = struct {
     activity_sequence: u64 = 0,
 };
 
+pub const CycleGuard = struct {
+    max_iterations: ?i64 = null,
+    until: ?[]u8 = null,
+    stop_after_passes_without_improvement: ?i64 = null,
+};
+
+pub const PayloadTransform = union(enum) {
+    none,
+    template: []const u8,
+    script: []const u8,
+};
+
 pub const Edge = struct {
     id: []u8 = &.{},
     from: []u8,
@@ -55,7 +68,11 @@ pub const Edge = struct {
     condition: []u8 = @constCast("always"),
     blocks_target: bool = true,
     fired: bool = false,
-    fire_count: u32 = 0,
+    fire_count: i64 = 0,
+    cycle_guard: ?CycleGuard = null,
+    payload_transform: PayloadTransform = .none,
+    spawn_target_project_path: ?[]const u8 = null,
+    editable_configuration: bool = true,
 };
 
 pub const Project = struct {
@@ -134,10 +151,199 @@ fn lifecycleProbeCallback(context: ?*anyopaque, request: LifecycleRequest) void 
     probe.called = true;
 }
 
+fn worktreeBindingFactsDiffer(before: Node, after: Node) bool {
+    return !std.mem.eql(u8, before.worktree_path, after.worktree_path) or
+        !std.mem.eql(u8, before.worktree_branch, after.worktree_branch) or
+        !std.mem.eql(u8, before.state, after.state) or
+        !std.mem.eql(u8, before.loop_type, after.loop_type);
+}
+
+fn uniqueWorktreeNodeIndex(nodes: []const Node, id: []const u8) !?usize {
+    if (id.len == 0) return error.AmbiguousWorktreeNode;
+    var found: ?usize = null;
+    for (nodes, 0..) |node, index| {
+        if (!std.mem.eql(u8, node.id, id)) continue;
+        if (found != null) return error.AmbiguousWorktreeNode;
+        found = index;
+    }
+    return found;
+}
+
+fn flatWorktreeBindingsChanged(previous: []const Node, next: []const Node) !bool {
+    for (previous) |node| {
+        if (node.worktree_path.len == 0) continue;
+        _ = try uniqueWorktreeNodeIndex(previous, node.id);
+        const index = (try uniqueWorktreeNodeIndex(next, node.id)) orelse return true;
+        if (worktreeBindingFactsDiffer(node, next[index])) return true;
+    }
+    for (next) |node| {
+        if (node.worktree_path.len == 0) continue;
+        _ = try uniqueWorktreeNodeIndex(next, node.id);
+        const index = (try uniqueWorktreeNodeIndex(previous, node.id)) orelse return true;
+        if (worktreeBindingFactsDiffer(previous[index], node)) return true;
+    }
+    return false;
+}
+
+const WorktreeBindingComparison = struct {
+    const max_depth = 32;
+    const max_items = 4096;
+    const max_json_work = 2 * Wire.legacy_max_payload;
+    const max_scratch = 8 * Wire.legacy_max_payload;
+
+    allocator: std.mem.Allocator,
+    project: Project,
+    remaining_items: usize = max_items,
+    remaining_json: usize = max_json_work,
+
+    fn consumeItems(self: *@This(), count: usize) !void {
+        if (count > self.remaining_items) return error.WorktreeComparisonLimit;
+        self.remaining_items -= count;
+    }
+
+    fn indexNodes(self: *@This(), nodes: []const Node) !std.StringHashMap(usize) {
+        var indices = std.StringHashMap(usize).init(self.allocator);
+        errdefer indices.deinit();
+        for (nodes, 0..) |node, index| {
+            if (node.id.len == 0) return error.AmbiguousWorktreeNode;
+            const entry = try indices.getOrPut(node.id);
+            if (entry.found_existing) return error.AmbiguousWorktreeNode;
+            entry.value_ptr.* = index;
+        }
+        return indices;
+    }
+
+    fn decode(self: *@This(), node: Node) !Graph {
+        if (!std.mem.eql(u8, node.loop_type, "composite") and
+            !std.mem.eql(u8, node.loop_type, "proactive")) return error.UnsupportedWorktreeSubgraph;
+        const bytes = node.subgraph_json;
+        if (bytes.len > self.remaining_json) return error.WorktreeComparisonLimit;
+        self.remaining_json -= bytes.len;
+
+        var scanner = std.json.Scanner.initCompleteInput(self.allocator, bytes);
+        defer scanner.deinit();
+        var json_depth: usize = 0;
+        while (true) {
+            switch (try scanner.next()) {
+                .object_begin, .array_begin => {
+                    json_depth += 1;
+                    if (json_depth > 4 * max_depth) return error.WorktreeComparisonLimit;
+                },
+                .object_end, .array_end => json_depth -= 1,
+                .end_of_document => break,
+                else => {},
+            }
+        }
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, bytes, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.MalformedSubgraph;
+        const root = parsed.value.object;
+        const json_nodes: []const std.json.Value = if (root.get("nodes")) |value| switch (value) {
+            .array => |array| array.items,
+            else => return error.MalformedSubgraph,
+        } else &.{};
+        if (json_nodes.len > self.remaining_items) return error.WorktreeComparisonLimit;
+        if (root.get("edges")) |value| switch (value) {
+            .array => |array| try self.consumeItems(array.items.len),
+            else => return error.MalformedSubgraph,
+        };
+        var graph = try decodeSubgraph(self.allocator, self.project, bytes);
+        errdefer freeGraph(self.allocator, &graph);
+        if (graph.nodes.items.len != json_nodes.len) return error.MalformedSubgraph;
+        for (json_nodes, graph.nodes.items) |value, decoded| {
+            if (value != .object) return error.MalformedSubgraph;
+            const object = value.object;
+            const id = object.get("id") orelse return error.AmbiguousWorktreeNode;
+            if (id != .string or id.string.len == 0 or !std.mem.eql(u8, id.string, decoded.id))
+                return error.AmbiguousWorktreeNode;
+            if (object.get("subGraph")) |nested| switch (nested) {
+                .null => if (decoded.subgraph_json.len != 0) return error.MalformedSubgraph,
+                .object => if (decoded.subgraph_json.len == 0) return error.MalformedSubgraph,
+                else => return error.UnsupportedWorktreeSubgraph,
+            };
+        }
+        return graph;
+    }
+
+    fn compare(self: *@This(), previous: []const Node, next: []const Node, depth: usize) anyerror!bool {
+        if (depth > max_depth) return error.WorktreeComparisonLimit;
+        try self.consumeItems(previous.len);
+        try self.consumeItems(next.len);
+        var before_indices = try self.indexNodes(previous);
+        defer before_indices.deinit();
+        var after_indices = try self.indexNodes(next);
+        defer after_indices.deinit();
+        for (previous) |node| {
+            const index = after_indices.get(node.id);
+            if (node.worktree_path.len != 0) {
+                const other = next[index orelse return true];
+                if (worktreeBindingFactsDiffer(node, other)) return true;
+            }
+            if (node.subgraph_json.len != 0) {
+                var before = try self.decode(node);
+                defer freeGraph(self.allocator, &before);
+                if (index) |matched| {
+                    const other = next[matched];
+                    if (!std.mem.eql(u8, node.loop_type, other.loop_type)) return true;
+                    if (other.subgraph_json.len != 0) {
+                        if (std.mem.eql(u8, node.subgraph_json, other.subgraph_json)) {
+                            if (try self.compare(before.nodes.items, before.nodes.items, depth + 1)) return true;
+                        } else {
+                            var after = try self.decode(other);
+                            defer freeGraph(self.allocator, &after);
+                            if (try self.compare(before.nodes.items, after.nodes.items, depth + 1)) return true;
+                        }
+                        continue;
+                    }
+                }
+                if (try self.compare(before.nodes.items, &.{}, depth + 1)) return true;
+            }
+        }
+        for (next) |node| {
+            const index = before_indices.get(node.id);
+            if (node.worktree_path.len != 0) {
+                const other = previous[index orelse return true];
+                if (!std.mem.eql(u8, node.worktree_path, other.worktree_path)) return true;
+            }
+            if (node.subgraph_json.len != 0 and (index == null or previous[index.?].subgraph_json.len == 0)) {
+                var added = try self.decode(node);
+                defer freeGraph(self.allocator, &added);
+                if (try self.compare(&.{}, added.nodes.items, depth + 1)) return true;
+            }
+        }
+        return false;
+    }
+};
+
+fn worktreeBindingsChanged(allocator: std.mem.Allocator, project: Project, previous: []const Node, next: []const Node) !bool {
+    if (previous.len > WorktreeBindingComparison.max_items or next.len > WorktreeBindingComparison.max_items - previous.len)
+        return error.WorktreeComparisonLimit;
+    var nested_bytes: usize = 0;
+    var relevant = false;
+    for ([_][]const Node{ previous, next }) |nodes| {
+        for (nodes) |node| {
+            relevant = relevant or node.worktree_path.len != 0 or node.subgraph_json.len != 0;
+            if (node.subgraph_json.len > WorktreeBindingComparison.max_json_work - nested_bytes)
+                return error.WorktreeComparisonLimit;
+            nested_bytes += node.subgraph_json.len;
+        }
+    }
+    if (!relevant) return false;
+    if (nested_bytes == 0) return flatWorktreeBindingsChanged(previous, next);
+    const capacity = @min(WorktreeBindingComparison.max_scratch, 64 * 1024 + (previous.len + next.len) * 256 + nested_bytes * 64);
+    const buffer = try allocator.alloc(u8, capacity);
+    defer allocator.free(buffer);
+    // The region also owns any partially decoded nodes when the existing parser runs out of memory.
+    var scratch = std.heap.FixedBufferAllocator.init(buffer);
+    var comparison = WorktreeBindingComparison{ .allocator = scratch.allocator(), .project = project };
+    return comparison.compare(previous, next, 0) catch |err| return if (err == error.OutOfMemory) error.WorktreeComparisonLimit else err;
+}
+
 pub const GraphSummary = struct {
     project: Project,
     nodes: std.array_list.Managed(Node),
     edges: std.array_list.Managed(Edge),
+    worktree_notice: ?WorktreeStatus.NoticeRecord = null,
 
     fn deinit(self: *GraphSummary, allocator: std.mem.Allocator) void {
         freeProject(allocator, self.project);
@@ -250,6 +456,7 @@ pub const Model = struct {
     }
 
     pub fn beginRestore(self: *Model) void {
+        self.invalidateWorktreeNotices(.connection_changed);
         self.restore_generation += 1;
         self.restore_state = .restoring;
     }
@@ -261,6 +468,7 @@ pub const Model = struct {
 
     pub fn markReconnecting(self: *Model) void {
         // Graph summaries and selection intentionally survive transport loss.
+        self.invalidateWorktreeNotices(.connection_changed);
         self.restore_state = .reconnecting;
     }
 
@@ -311,6 +519,62 @@ pub const Model = struct {
             if (std.mem.eql(u8, summary.project.path, project_path)) return summary;
         }
         return null;
+    }
+
+    fn worktreeNoticeOwner(self: *Model, project_path: []const u8) !*GraphSummary {
+        for (self.graphs.items) |*summary| {
+            if (!std.mem.eql(u8, summary.project.path, project_path)) continue;
+            if (!summary.project.isLocalFilesystem()) return error.UnsupportedWorktreeProject;
+            return summary;
+        }
+        return error.WorktreeProjectClosed;
+    }
+
+    pub fn recordWorktreeInspection(self: *Model, inspection: *const WorktreeStatus.Inspection, policy: WorktreeStatus.PolicyOutcome) !void {
+        const owner = try self.worktreeNoticeOwner(inspection.project_path);
+        owner.worktree_notice = WorktreeStatus.NoticeRecord.inspected(inspection, policy);
+    }
+
+    pub fn recordWorktreeFailure(self: *Model, project_path: []const u8, failure: anyerror) !void {
+        const owner = try self.worktreeNoticeOwner(project_path);
+        var record = owner.worktree_notice orelse WorktreeStatus.NoticeRecord{};
+        record.refresh_error = failure;
+        owner.worktree_notice = record;
+    }
+
+    pub fn recordWorktreePolicy(self: *Model, project_path: []const u8, policy: WorktreeStatus.PolicyOutcome) !void {
+        const owner = try self.worktreeNoticeOwner(project_path);
+        var record = owner.worktree_notice orelse WorktreeStatus.NoticeRecord{};
+        record.policy = policy;
+        owner.worktree_notice = record;
+    }
+
+    pub fn invalidateWorktreeNotices(self: *Model, reason: WorktreeStatus.StaleReason) void {
+        for (self.graphs.items) |*summary| {
+            if (summary.worktree_notice) |*record| {
+                if (record.observation != null) {
+                    record.stale = reason;
+                    record.stale_error = null;
+                }
+            }
+        }
+    }
+
+    fn invalidateForWorktreeBindings(self: *Model, project: Project, previous: []const Node, next: []const Node) void {
+        self.applyWorktreeBindingChange(worktreeBindingsChanged(self.allocator, project, previous, next));
+    }
+
+    fn applyWorktreeBindingChange(self: *Model, change: anyerror!bool) void {
+        const changed = change catch |err| {
+            self.invalidateWorktreeNotices(.bindings_unavailable);
+            for (self.graphs.items) |*summary| {
+                if (summary.worktree_notice) |*record| {
+                    if (record.observation != null) record.stale_error = err;
+                }
+            }
+            return;
+        };
+        if (changed) self.invalidateWorktreeNotices(.bindings_changed);
     }
 
     pub fn selectProject(self: *Model, project_path: []const u8) bool {
@@ -410,6 +674,9 @@ pub const Model = struct {
         for (self.open_projects.items) |project| known = known or std.mem.eql(u8, project.path, path);
         for (self.recent_projects.items) |project| known = known or std.mem.eql(u8, project.path, path);
         if (!known) return false;
+        if (index) |i| {
+            self.invalidateForWorktreeBindings(self.graphs.items[i].project, self.graphs.items[i].nodes.items, &.{});
+        }
         switch (action) {
             .select => unreachable,
             .close => {
@@ -803,13 +1070,15 @@ pub const Model = struct {
         const node = top.nodes.items[index];
         snapshot.composite_title = try self.allocator.dupe(u8, node.title);
         const nested = decodeSubgraph(self.allocator, top.project, node.subgraph_json) catch |err| switch (err) {
-            error.MalformedSubgraph, error.MalformedJsonString => {
+            error.OutOfMemory => return err,
+            else => {
+                // Malformed nested data retains the top-level fallback, including
+                // errors from the typed edge parser; allocation failures do not.
                 self.allocator.free(snapshot.composite_title.?);
                 snapshot.composite_title = null;
                 snapshot.clear_composite = true;
                 return snapshot;
             },
-            else => return err,
         };
         freeGraph(self.allocator, &snapshot.graph.?);
         snapshot.graph = nested;
@@ -859,13 +1128,21 @@ pub const Model = struct {
     fn upsertSummary(self: *Model, graph: *const Graph) !void {
         var copy = try cloneGraph(self.allocator, .{ .project = graph.project, .nodes = graph.nodes, .edges = graph.edges });
         defer freeGraph(self.allocator, &copy);
+        const previous = if (self.graphFor(graph.project.path)) |summary| summary.nodes.items else &.{};
+        const binding_change = worktreeBindingsChanged(self.allocator, graph.project, previous, graph.nodes.items);
+        if (binding_change) |_| {} else |err| {
+            if (err == error.OutOfMemory) return err;
+        }
         for (self.graphs.items) |*summary| {
             if (!std.mem.eql(u8, summary.project.path, graph.project.path)) continue;
+            self.applyWorktreeBindingChange(binding_change);
             std.mem.swap(std.array_list.Managed(Node), &summary.nodes, &copy.nodes);
             std.mem.swap(std.array_list.Managed(Edge), &summary.edges, &copy.edges);
             return;
         }
-        try self.graphs.append(.{ .project = copy.project, .nodes = copy.nodes, .edges = copy.edges });
+        try self.graphs.ensureUnusedCapacity(1);
+        self.applyWorktreeBindingChange(binding_change);
+        self.graphs.appendAssumeCapacity(.{ .project = copy.project, .nodes = copy.nodes, .edges = copy.edges });
         copy.project = .{ .path = &.{}, .name = &.{} };
         copy.nodes = std.array_list.Managed(Node).init(self.allocator);
         copy.edges = std.array_list.Managed(Edge).init(self.allocator);
@@ -1024,11 +1301,7 @@ fn cloneGraph(allocator: std.mem.Allocator, source: GraphSummary) !Graph {
         errdefer freeNode(allocator, copy);
         try graph.nodes.append(copy);
     }
-    for (source.edges.items) |edge| {
-        const copy = try cloneEdge(allocator, edge);
-        errdefer freeEdge(allocator, copy);
-        try graph.edges.append(copy);
-    }
+    graph.edges = try cloneEdges(allocator, source.edges.items);
     return graph;
 }
 
@@ -1137,7 +1410,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
     return copy;
 }
 
-fn cloneEdge(allocator: std.mem.Allocator, edge: Edge) !Edge {
+pub fn cloneEdge(allocator: std.mem.Allocator, edge: Edge) !Edge {
     var copy = Edge{
         .from = &.{},
         .to = &.{},
@@ -1145,6 +1418,7 @@ fn cloneEdge(allocator: std.mem.Allocator, edge: Edge) !Edge {
         .blocks_target = edge.blocks_target,
         .fired = edge.fired,
         .fire_count = edge.fire_count,
+        .editable_configuration = edge.editable_configuration,
     };
     errdefer freeEdge(allocator, copy);
     copy.id = try allocator.dupe(u8, edge.id);
@@ -1152,15 +1426,52 @@ fn cloneEdge(allocator: std.mem.Allocator, edge: Edge) !Edge {
     copy.to = try allocator.dupe(u8, edge.to);
     copy.kind = try allocator.dupe(u8, edge.kind);
     copy.condition = try allocator.dupe(u8, edge.condition);
+    copy.payload_transform = switch (edge.payload_transform) {
+        .none => .none,
+        .template => |text| .{ .template = try allocator.dupe(u8, text) },
+        .script => |text| .{ .script = try allocator.dupe(u8, text) },
+    };
+    if (edge.spawn_target_project_path) |path| copy.spawn_target_project_path = try allocator.dupe(u8, path);
+    if (edge.cycle_guard) |guard| {
+        copy.cycle_guard = .{
+            .max_iterations = guard.max_iterations,
+            .stop_after_passes_without_improvement = guard.stop_after_passes_without_improvement,
+            .until = if (guard.until) |until| try allocator.dupe(u8, until) else null,
+        };
+    }
     return copy;
 }
 
-fn freeEdge(allocator: std.mem.Allocator, edge: Edge) void {
+fn cloneEdges(allocator: std.mem.Allocator, edges: []const Edge) !std.array_list.Managed(Edge) {
+    var copies = std.array_list.Managed(Edge).init(allocator);
+    errdefer freeEdges(allocator, &copies);
+    for (edges) |edge| {
+        const copy = try cloneEdge(allocator, edge);
+        errdefer freeEdge(allocator, copy);
+        try copies.append(copy);
+    }
+    return copies;
+}
+
+fn freeEdges(allocator: std.mem.Allocator, edges: *std.array_list.Managed(Edge)) void {
+    for (edges.items) |edge| freeEdge(allocator, edge);
+    edges.deinit();
+}
+
+pub fn freeEdge(allocator: std.mem.Allocator, edge: Edge) void {
     allocator.free(edge.id);
     allocator.free(edge.from);
     allocator.free(edge.to);
     allocator.free(edge.kind);
     allocator.free(edge.condition);
+    switch (edge.payload_transform) {
+        .none => {},
+        .template, .script => |text| allocator.free(text),
+    }
+    if (edge.spawn_target_project_path) |path| allocator.free(path);
+    if (edge.cycle_guard) |guard| {
+        if (guard.until) |until| allocator.free(until);
+    }
 }
 
 fn freeAttentionEntry(allocator: std.mem.Allocator, entry: AttentionEntry) void {
@@ -1531,29 +1842,182 @@ fn decodeNodes(
 fn decodeEdges(
     allocator: std.mem.Allocator,
     bytes: []const u8,
-    edges: *std.array_list.Managed(Edge),
-) !void {
-    var items = try JsonItems.init(allocator, bytes, '[');
-    while (try items.next()) |value| {
-        const object = value.container('{') orelse continue;
-        var fields = try JsonFields.init(allocator, object);
-        defer fields.deinit();
-        var edge = Edge{
-            .from = &.{},
-            .to = &.{},
-            .condition = &.{},
-            .fired = fields.get("fired").boolean() orelse false,
-            .fire_count = fields.get("fireCount").unsigned(u32) orelse 0,
-        };
+) !std.array_list.Managed(Edge) {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value != .array) return error.MalformedEdge;
+    var edges = std.array_list.Managed(Edge).init(allocator);
+    errdefer freeEdges(allocator, &edges);
+    for (parsed.value.array.items) |value| {
+        const edge = try decodeEdge(allocator, value);
         errdefer freeEdge(allocator, edge);
-        edge.id = try fields.get("id").duplicateString(allocator, "");
-        edge.from = try fields.get("from").duplicateString(allocator, "");
-        edge.to = try fields.get("to").duplicateString(allocator, "");
-        edge.kind = try fields.get("kind").duplicateString(allocator, "handoff");
-        edge.blocks_target = !std.mem.eql(u8, edge.kind, "message");
-        edge.condition = try fields.get("condition").duplicateString(allocator, "always");
         try edges.append(edge);
     }
+    return edges;
+}
+
+fn decodeEdge(allocator: std.mem.Allocator, value: std.json.Value) !Edge {
+    if (value != .object) return error.MalformedEdge;
+    const object = value.object;
+    const count = try edgeOptionalInteger(object.get("fireCount")) orelse blk: {
+        const legacy = object.get("fired") orelse break :blk 0;
+        break :blk switch (legacy) {
+            .null => 0,
+            .bool => |fired| @as(i64, if (fired) 1 else 0),
+            else => return error.MalformedEdge,
+        };
+    };
+    var edge = Edge{
+        .from = &.{},
+        .to = &.{},
+        .condition = &.{},
+        .fire_count = count,
+        .fired = count > 0,
+    };
+    errdefer freeEdge(allocator, edge);
+    edge.id = try allocator.dupe(u8, edgeString(object, "id", ""));
+    edge.from = try allocator.dupe(u8, edgeString(object, "from", ""));
+    edge.to = try allocator.dupe(u8, edgeString(object, "to", ""));
+    edge.kind = try allocator.dupe(u8, edgeString(object, "kind", "handoff"));
+    edge.condition = try allocator.dupe(u8, edgeString(object, "condition", "always"));
+    edge.blocks_target = !std.mem.eql(u8, edge.kind, "message");
+    edge.cycle_guard = try decodeCycleGuard(allocator, object.get("cycleGuard"));
+    edge.payload_transform = decodePayloadTransform(allocator, object) catch |err| switch (err) {
+        error.UnsupportedEdgeConfiguration => blk: {
+            edge.editable_configuration = false;
+            break :blk .none;
+        },
+        else => return err,
+    };
+    if (object.get("spawnTargetProjectPath")) |path| switch (path) {
+        .null => {},
+        .string => |text| edge.spawn_target_project_path = try allocator.dupe(u8, text),
+        else => edge.editable_configuration = false,
+    };
+    return edge;
+}
+
+fn decodePayloadTransform(allocator: std.mem.Allocator, object: std.json.ObjectMap) !PayloadTransform {
+    if (object.get("payloadTransform")) |value| {
+        if (value != .null) {
+            if (value != .object or value.object.count() != 1) return error.UnsupportedEdgeConfiguration;
+            var iterator = value.object.iterator();
+            const entry = iterator.next().?;
+            if (entry.value_ptr.* != .object) return error.UnsupportedEdgeConfiguration;
+            if (std.mem.eql(u8, entry.key_ptr.*, "none")) return .none;
+            const text = entry.value_ptr.object.get("_0") orelse return error.UnsupportedEdgeConfiguration;
+            if (text != .string) return error.UnsupportedEdgeConfiguration;
+            if (std.mem.eql(u8, entry.key_ptr.*, "template")) return .{ .template = try allocator.dupe(u8, text.string) };
+            if (std.mem.eql(u8, entry.key_ptr.*, "script")) return .{ .script = try allocator.dupe(u8, text.string) };
+            return error.UnsupportedEdgeConfiguration;
+        }
+    }
+    if (object.get("payloadNote")) |note| switch (note) {
+        .null => {},
+        .string => |text| return .{ .template = try allocator.dupe(u8, text) },
+        else => return error.UnsupportedEdgeConfiguration,
+    };
+    return .none;
+}
+
+test "edge editing model: lossless transform spawn legacy and unsupported fields" {
+    const allocator = std.testing.allocator;
+    var edges = try decodeEdges(allocator,
+        \\[{"payloadTransform":{"template":{"_0":" \u2603 \"text\" "}},"spawnTargetProjectPath":""},{"payloadNote":"legacy","spawnTargetProjectPath":null},{"payloadTransform":{"script":{"_0":""}}},{"payloadTransform":{"future":{"_0":"x"}}},{"spawnTargetProjectPath":3}]
+    );
+    defer freeEdges(allocator, &edges);
+    try std.testing.expectEqualStrings(" \xe2\x98\x83 \"text\" ", edges.items[0].payload_transform.template);
+    try std.testing.expectEqualStrings("", edges.items[0].spawn_target_project_path.?);
+    try std.testing.expectEqualStrings("legacy", edges.items[1].payload_transform.template);
+    try std.testing.expect(edges.items[1].spawn_target_project_path == null);
+    try std.testing.expectEqualStrings("", edges.items[2].payload_transform.script);
+    try std.testing.expect(!edges.items[3].editable_configuration and !edges.items[4].editable_configuration);
+    var copies = try cloneEdges(allocator, edges.items);
+    defer freeEdges(allocator, &copies);
+    try std.testing.expect(copies.items[0].payload_transform.template.ptr != edges.items[0].payload_transform.template.ptr);
+    try std.testing.expect(!copies.items[3].editable_configuration);
+}
+
+test "edge editing model: added configuration allocations unwind" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var edges = try decodeEdges(allocator,
+                \\[{"payloadTransform":{"script":{"_0":"command"}},"spawnTargetProjectPath":"project","cycleGuard":{"until":"until"}},{"payloadNote":"legacy"}]
+            );
+            defer freeEdges(allocator, &edges);
+            var copies = try cloneEdges(allocator, edges.items);
+            defer freeEdges(allocator, &copies);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+/// Resolve from the cache, not the separately cloned display projection.
+pub fn copyCachedEdgeForEditing(allocator: std.mem.Allocator, model: *const Model, id: []const u8) !Edge {
+    const root = model.currentGraph() orelse return error.StaleScope;
+    if (model.open_composite_id) |parent_id| {
+        const parent_index = findNodeIndexByID(root.nodes.items, parent_id) orelse return error.StaleScope;
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, root.nodes.items[parent_index].subgraph_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.StaleScope;
+        const edges = parsed.value.object.get("edges") orelse return error.StaleEdge;
+        const nodes = parsed.value.object.get("nodes") orelse return error.StaleScope;
+        if (edges != .array or nodes != .array) return error.StaleScope;
+        for (edges.array.items) |value| {
+            if (value != .object or !std.mem.eql(u8, edgeString(value.object, "id", ""), id)) continue;
+            const edge = try decodeEdge(allocator, value);
+            errdefer freeEdge(allocator, edge);
+            var source = false;
+            var target = false;
+            for (nodes.array.items) |node| {
+                if (node != .object) return error.StaleScope;
+                const node_id = edgeString(node.object, "id", "");
+                source = source or std.mem.eql(u8, node_id, edge.from);
+                target = target or std.mem.eql(u8, node_id, edge.to);
+            }
+            if (!source) return error.MissingSource;
+            if (!target) return error.MissingTarget;
+            return edge;
+        }
+        return error.StaleEdge;
+    }
+    const index = findEdgeIndexByID(root.edges.items, id) orelse return error.StaleEdge;
+    const edge = root.edges.items[index];
+    if (findNodeIndexByID(root.nodes.items, edge.from) == null) return error.MissingSource;
+    if (findNodeIndexByID(root.nodes.items, edge.to) == null) return error.MissingTarget;
+    return cloneEdge(allocator, edge);
+}
+
+fn edgeString(object: std.json.ObjectMap, key: []const u8, fallback: []const u8) []const u8 {
+    const value = object.get(key) orelse return fallback;
+    return if (value == .string) value.string else fallback;
+}
+
+fn edgeOptionalInteger(value: ?std.json.Value) !?i64 {
+    const field = value orelse return null;
+    return switch (field) {
+        .null => null,
+        .integer => |number| number,
+        else => error.MalformedEdge,
+    };
+}
+
+fn decodeCycleGuard(allocator: std.mem.Allocator, value: ?std.json.Value) !?CycleGuard {
+    const field = value orelse return null;
+    if (field == .null) return null;
+    if (field != .object) return error.MalformedEdge;
+    const maximum = try edgeOptionalInteger(field.object.get("maxIterations"));
+    const plateau = try edgeOptionalInteger(field.object.get("stopAfterPassesWithoutImprovement"));
+    const until: ?[]const u8 = if (field.object.get("until")) |text| switch (text) {
+        .null => null,
+        .string => |string| string,
+        else => return error.MalformedEdge,
+    } else null;
+    return .{
+        .max_iterations = maximum,
+        .stop_after_passes_without_improvement = plateau,
+        .until = if (until) |text| try allocator.dupe(u8, text) else null,
+    };
 }
 
 const MetricSamples = struct {
@@ -1699,7 +2163,7 @@ fn decodeGraphObject(allocator: std.mem.Allocator, parent_project: ?Project, jso
         graph.project.name = try project.get("name").duplicateString(allocator, "");
     }
     if (fields.get("nodes").container('[')) |nodes| try decodeNodes(allocator, nodes, &graph.nodes);
-    if (fields.get("edges").container('[')) |edges| try decodeEdges(allocator, edges, &graph.edges);
+    if (fields.get("edges").container('[')) |edges| graph.edges = try decodeEdges(allocator, edges);
     return graph;
 }
 
@@ -1786,6 +2250,359 @@ fn freeGraph(allocator: std.mem.Allocator, graph: *Graph) void {
     for (graph.edges.items) |edge| freeEdge(allocator, edge);
     graph.nodes.deinit();
     graph.edges.deinit();
+}
+
+fn noticeTestModel(allocator: std.mem.Allocator) !Model {
+    var model = Model.init(allocator);
+    errdefer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Same"},"nodes":[{"id":"a","title":"A","state":"running","worktreeBinding":{"path":"C:\\wt-a"}}],"edges":[]}}}
+    );
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"C:\\notice-b","name":"Same"},"nodes":[],"edges":[]}}}
+    );
+    return model;
+}
+
+fn recordTestNotice(model: *Model, path: []const u8, bytes: u64) !void {
+    var inspection = WorktreeStatus.Inspection{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(std.testing.allocator),
+        .project_path = try std.testing.allocator.dupe(u8, path),
+        .default_branch = @constCast("main"),
+    };
+    defer std.testing.allocator.free(inspection.project_path);
+    defer inspection.entries.deinit();
+    try inspection.entries.append(.{
+        .path = @constCast("tree"),
+        .branch = @constCast("topic"),
+        .size_bytes = bytes,
+        .size_complete = true,
+        .pushed = true,
+        .landed = true,
+    });
+    try model.recordWorktreeInspection(&inspection, WorktreeStatus.policyReadOutcome(error.FileNotFound));
+    @memset(inspection.project_path, 'x');
+    inspection.entries.items[0].size_bytes = 0;
+}
+
+test "worktree notice observations keep exact owners and outlive inspection storage" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try std.testing.expect(model.graphFor("C:\\notice-b").?.worktree_notice == null);
+    try std.testing.expect(model.selectProject("C:\\notice-b"));
+    try recordTestNotice(&model, "C:\\notice-b", 4294967296);
+    try std.testing.expectEqual(@as(u64, 2147483648), model.graphFor("C:\\notice-a").?.worktree_notice.?.observation.?.size.bytes);
+    try std.testing.expectEqual(@as(u64, 4294967296), model.graphFor("C:\\notice-b").?.worktree_notice.?.observation.?.size.bytes);
+    std.mem.swap(GraphSummary, &model.graphs.items[0], &model.graphs.items[1]);
+    try std.testing.expect(model.selectProject("C:\\notice-a"));
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.notice, model.graphFor("C:\\notice-a").?.worktree_notice.?.state());
+    try std.testing.expectEqual(@as(usize, 1), model.graphFor("C:\\notice-b").?.worktree_notice.?.observation.?.summary.total);
+    try std.testing.expectError(error.WorktreeProjectClosed, recordTestNotice(&model, "C:\\foreign", 1));
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":"ssh://host/repo","name":"Same"},"nodes":[],"edges":[]}}}
+    );
+    try std.testing.expectError(error.UnsupportedWorktreeProject, recordTestNotice(&model, "ssh://host/repo", 2147483648));
+    try std.testing.expect(model.graphFor("ssh://host/repo").?.worktree_notice == null);
+}
+
+test "worktree notice failed refresh and policy outcome never fabricate new counts" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try model.recordWorktreeFailure("C:\\notice-a", error.GitFailed);
+    const failed = model.graphFor("C:\\notice-a").?.worktree_notice.?;
+    try std.testing.expectEqual(@as(u64, 2147483648), failed.observation.?.size.bytes);
+    try std.testing.expectEqual(@as(?anyerror, error.GitFailed), failed.refresh_error);
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, failed.state());
+    try model.recordWorktreeFailure("C:\\notice-b", error.GitFailed);
+    try std.testing.expect(model.graphFor("C:\\notice-b").?.worktree_notice.?.observation == null);
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try model.recordWorktreePolicy("C:\\notice-a", WorktreeStatus.policyReadOutcome(error.AccessDenied));
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, model.graphFor("C:\\notice-a").?.worktree_notice.?.state());
+    try model.recordWorktreePolicy("C:\\notice-a", WorktreeStatus.policyReadOutcome(
+        \\{"allowReclaim":false,"confirmEachReclaim":true,"onResolveLanded":"keep","noticeSizeGB":4,"noticeCount":12}
+    ));
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.below_threshold, model.graphFor("C:\\notice-a").?.worktree_notice.?.state());
+    try std.testing.expectEqual(@as(?anyerror, error.GitFailed), model.graphFor("C:\\notice-b").?.worktree_notice.?.refresh_error);
+}
+
+test "worktree notice invalidation follows bindings connection and actual owner lifetime" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try recordTestNotice(&model, "C:\\notice-b", 2147483648);
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Same"},"nodes":[{"id":"a","title":"Renamed","state":"running","position":{"x":900,"y":20},"worktreeBinding":{"path":"C:\\wt-a"}}],"edges":[]}}}
+    );
+    try std.testing.expect(model.graphFor("C:\\notice-a").?.worktree_notice.?.stale == null);
+    try std.testing.expect(model.graphFor("C:\\notice-b").?.worktree_notice.?.stale == null);
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":4,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Same"},"nodes":[{"id":"a","title":"Renamed","state":"succeeded","worktreeBinding":{"path":"C:\\wt-a"}}],"edges":[]}}}
+    );
+    for (model.graphs.items) |graph| try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_changed), graph.worktree_notice.?.stale);
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.notice, model.graphFor("C:\\notice-a").?.worktree_notice.?.state());
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, model.graphFor("C:\\notice-b").?.worktree_notice.?.state());
+    model.markReconnecting();
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .connection_changed), model.graphFor("C:\\notice-a").?.worktree_notice.?.stale);
+    try std.testing.expect(model.applyLifecycle(.close, "C:\\notice-a"));
+    try std.testing.expect(model.graphFor("C:\\notice-a") == null);
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":5,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Same"},"nodes":[],"edges":[]}}}
+    );
+    try std.testing.expect(model.graphFor("C:\\notice-a").?.worktree_notice == null);
+    model.beginRestore();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":6,"event":{"graphChanged":{"project":{"path":"C:\\notice-b","name":"Same"},"nodes":[],"edges":[]}}}
+    );
+    model.markRestored();
+    try std.testing.expect(model.graphFor("C:\\notice-a") == null);
+    try std.testing.expect(model.graphFor("C:\\notice-b").?.worktree_notice != null);
+    model.invalidateWorktreeNotices(.worktrees_changed);
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .worktrees_changed), model.graphFor("C:\\notice-b").?.worktree_notice.?.stale);
+}
+
+test "worktree notice branch binding changes invalidate otherwise unchanged observations" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Same"},"nodes":[{"id":"a","title":"A","state":"running","worktreeBinding":{"path":"C:\\wt-a","branch":"main"}}],"edges":[]}}}
+    );
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try recordTestNotice(&model, "C:\\notice-b", 2147483648);
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":4,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Same"},"nodes":[{"id":"a","title":"A","state":"running","worktreeBinding":{"path":"C:\\wt-a","branch":"feature"}}],"edges":[]}}}
+    );
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_changed), model.graphFor("C:\\notice-a").?.worktree_notice.?.stale);
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_changed), model.graphFor("C:\\notice-b").?.worktree_notice.?.stale);
+}
+
+fn loadNestedNoticeTestGraph(model: *Model, subgraph: []const u8, parent_type: []const u8) !void {
+    const frame = try std.mem.concat(std.testing.allocator, u8, &.{
+        "{\"version\":2,\"kind\":\"event\",\"sequence\":20,\"event\":{\"graphChanged\":{\"project\":{\"path\":\"C:\\\\notice-a\",\"name\":\"A\"},\"nodes\":[{\"id\":\"group\",\"title\":\"Group\",\"loopType\":\"",
+        parent_type,
+        "\",\"subGraph\":",
+        subgraph,
+        "}],\"edges\":[]}}}",
+    });
+    defer std.testing.allocator.free(frame);
+    _ = try model.updateFromFrame(frame);
+}
+
+fn recordActiveNestedNotice(model: *Model) !void {
+    const active = model.graph.?;
+    const node = active.nodes.items[findNodeIndexByID(active.nodes.items, "child").?];
+    var inspection = WorktreeStatus.Inspection{
+        .project_path = active.project.path,
+        .default_branch = @constCast("main"),
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(std.testing.allocator),
+    };
+    defer inspection.entries.deinit();
+    try inspection.entries.append(.{
+        .path = node.worktree_path,
+        .branch = node.worktree_branch,
+        .bound_running = true,
+        .size_bytes = 2147483648,
+        .size_complete = true,
+    });
+    try model.recordWorktreeInspection(&inspection, WorktreeStatus.policyReadOutcome(error.FileNotFound));
+}
+
+test "worktree notice nested binding changes invalidate an active composite inspection" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try loadNestedNoticeTestGraph(&model,
+        \\{"nodes":[{"id":"child","title":"Child","loopType":"turnBased","state":"running","worktreeBinding":{"path":"C:\\nested-a","branch":"main"}}],"edges":[]}
+    , "composite");
+    try std.testing.expect(model.openComposite("group"));
+    try std.testing.expectEqualStrings("C:\\nested-a", model.graph.?.nodes.items[0].worktree_path);
+    try recordActiveNestedNotice(&model);
+    try loadNestedNoticeTestGraph(&model,
+        \\{"nodes":[{"id":"child","title":"Child","loopType":"turnBased","state":"running","worktreeBinding":{"path":"C:\\nested-b","branch":"main"}}],"edges":[]}
+    , "composite");
+    try std.testing.expectEqualStrings("C:\\nested-b", model.graph.?.nodes.items[0].worktree_path);
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_changed), model.graphFor("C:\\notice-a").?.worktree_notice.?.stale);
+}
+
+const nested_notice_baseline =
+    \\{"nodes":[{"id":"child","title":"Child","loopType":"turnBased","state":"running","worktreeBinding":{"path":"C:\\nested-a","branch":"main"}},{"id":"peer","title":"Peer","state":"idle"}],"edges":[]}
+;
+
+test "worktree notice nested branch state removal and type changes invalidate by stable scope" {
+    const branch_change =
+        \\{"nodes":[{"id":"child","title":"Child","loopType":"turnBased","state":"running","worktreeBinding":{"path":"C:\\nested-a","branch":"topic"}},{"id":"peer","title":"Peer","state":"idle"}],"edges":[]}
+    ;
+    const state_change =
+        \\{"nodes":[{"id":"child","title":"Child","loopType":"turnBased","state":"succeeded","worktreeBinding":{"path":"C:\\nested-a","branch":"main"}},{"id":"peer","title":"Peer","state":"idle"}],"edges":[]}
+    ;
+    const removal =
+        \\{"nodes":[{"id":"peer","title":"Peer","state":"idle"}],"edges":[]}
+    ;
+    const type_change =
+        \\{"nodes":[{"id":"child","title":"Child","loopType":"goalBased","state":"running","worktreeBinding":{"path":"C:\\nested-a","branch":"main"}},{"id":"peer","title":"Peer","state":"idle"}],"edges":[]}
+    ;
+    const cases = [_]struct { graph: []const u8, parent_type: []const u8 = "composite" }{
+        .{ .graph = branch_change },
+        .{ .graph = state_change },
+        .{ .graph = removal },
+        .{ .graph = type_change },
+        .{ .graph = nested_notice_baseline, .parent_type = "turnBased" },
+        .{ .graph = nested_notice_baseline, .parent_type = "proactive" },
+    };
+    for (cases) |case| {
+        var model = try noticeTestModel(std.testing.allocator);
+        defer model.deinit();
+        try loadNestedNoticeTestGraph(&model, nested_notice_baseline, "composite");
+        try std.testing.expect(model.openComposite("group"));
+        try recordActiveNestedNotice(&model);
+        try loadNestedNoticeTestGraph(&model, case.graph, case.parent_type);
+        try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_changed), model.graphFor("C:\\notice-a").?.worktree_notice.?.stale);
+    }
+}
+
+test "worktree notice nested reorder title and position edits retain the inspected values" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try loadNestedNoticeTestGraph(&model, nested_notice_baseline, "proactive");
+    try std.testing.expect(model.openComposite("group"));
+    try recordActiveNestedNotice(&model);
+    const previous = model.graphFor("C:\\notice-a").?.worktree_notice.?;
+    try loadNestedNoticeTestGraph(&model,
+        \\{"nodes":[{"id":"peer","title":"Renamed peer","state":"idle","position":{"x":10,"y":20}},{"id":"child","title":"Renamed child","loopType":"turnBased","state":"running","position":{"x":90,"y":30},"worktreeBinding":{"path":"C:\\nested-a","branch":"main"}}],"edges":[]}
+    , "proactive");
+    try std.testing.expectEqualDeep(previous, model.graphFor("C:\\notice-a").?.worktree_notice.?);
+    const repeated = model.graphFor("C:\\notice-a").?.nodes.items[0].subgraph_json;
+    const owned_repeat = try std.testing.allocator.dupe(u8, repeated);
+    defer std.testing.allocator.free(owned_repeat);
+    try loadNestedNoticeTestGraph(&model, owned_repeat, "proactive");
+    try std.testing.expectEqualDeep(previous, model.graphFor("C:\\notice-a").?.worktree_notice.?);
+}
+
+test "worktree notice comparisons recurse into deeper supported scopes" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try loadNestedNoticeTestGraph(&model,
+        \\{"nodes":[{"id":"child","title":"Child","loopType":"turnBased","state":"running","worktreeBinding":{"path":"C:\\nested-a","branch":"main"}},{"id":"inner","loopType":"proactive","subGraph":{"nodes":[{"id":"child","state":"running","worktreeBinding":{"path":"C:\\deep","branch":"main"}}],"edges":[]}}],"edges":[]}
+    , "composite");
+    try std.testing.expect(model.openComposite("group"));
+    try recordActiveNestedNotice(&model);
+    try loadNestedNoticeTestGraph(&model,
+        \\{"nodes":[{"id":"inner","loopType":"proactive","subGraph":{"nodes":[{"id":"child","state":"running","worktreeBinding":{"path":"C:\\deep","branch":"changed"}}],"edges":[]}},{"id":"child","title":"Child","loopType":"turnBased","state":"running","worktreeBinding":{"path":"C:\\nested-a","branch":"main"}}],"edges":[]}
+    , "composite");
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_changed), model.graphFor("C:\\notice-a").?.worktree_notice.?.stale);
+}
+
+test "worktree notice malformed unsupported and ambiguous nested data remain uncertain" {
+    const cases = [_][]const u8{
+        "{\"nodes\":1,\"edges\":[]}",
+        "{bad}",
+        "{\"nodes\":[{\"id\":\"same\"},{\"id\":\"same\"}],\"edges\":[]}",
+        "{\"nodes\":[{\"id\":\"child\",\"subGraph\":{\"nodes\":[],\"edges\":[]}}],\"edges\":[]}",
+    };
+    for (cases) |graph| {
+        var model = try noticeTestModel(std.testing.allocator);
+        defer model.deinit();
+        try loadNestedNoticeTestGraph(&model, graph, "composite");
+        try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+        try loadNestedNoticeTestGraph(&model, graph, "composite");
+        const record = model.graphFor("C:\\notice-a").?.worktree_notice.?;
+        try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_unavailable), record.stale);
+        try std.testing.expect(record.stale_error != null);
+        try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, record.state());
+        const presentation = WorktreeStatus.NoticePresentation.fromRecord(record).?;
+        try std.testing.expectEqual(WorktreeStatus.NoticePhase.stale, presentation.phase);
+        try std.testing.expectEqual(record.stale_error, presentation.failure);
+    }
+}
+
+test "worktree notice nested comparison OOM retains explicit uncertainty without altering nodes" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try loadNestedNoticeTestGraph(&model, nested_notice_baseline, "composite");
+    try std.testing.expect(model.openComposite("group"));
+    try recordActiveNestedNotice(&model);
+    const owner = model.graphFor("C:\\notice-a").?;
+    const nodes = owner.nodes.items;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    model.allocator = failing.allocator();
+    model.invalidateForWorktreeBindings(owner.project, nodes, nodes);
+    model.allocator = std.testing.allocator;
+    try std.testing.expect(failing.has_induced_failure);
+    const record = model.graphFor("C:\\notice-a").?.worktree_notice.?;
+    try std.testing.expectEqual(@as(?anyerror, error.OutOfMemory), record.stale_error);
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_unavailable), record.stale);
+    try std.testing.expectEqualStrings(nested_notice_baseline, nodes[0].subgraph_json);
+    try std.testing.expectEqual(@as(u64, 2147483648), record.observation.?.size.bytes);
+    try recordActiveNestedNotice(&model);
+    try std.testing.expect(model.graphFor("C:\\notice-a").?.worktree_notice.?.stale_error == null);
+}
+
+test "worktree notice flat title-only comparison does not allocate recursive scratch" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    const owner = model.graphFor("C:\\notice-a").?;
+    const previous = owner.worktree_notice.?;
+    var edited = owner.nodes.items[0];
+    edited.title = @constCast("A renamed");
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    model.allocator = failing.allocator();
+    model.invalidateForWorktreeBindings(owner.project, owner.nodes.items, &.{edited});
+    model.allocator = std.testing.allocator;
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqualDeep(previous, model.graphFor("C:\\notice-a").?.worktree_notice.?);
+}
+
+test "worktree notice comparison depth row work and scratch bounds fail closed" {
+    const allocator = std.testing.allocator;
+    var model = try noticeTestModel(allocator);
+    defer model.deinit();
+    const project = model.graphFor("C:\\notice-a").?.project;
+    var comparison = WorktreeBindingComparison{ .allocator = allocator, .project = project };
+    try std.testing.expect(!(try comparison.compare(&.{}, &.{}, 32)));
+    try std.testing.expectError(error.WorktreeComparisonLimit, comparison.compare(&.{}, &.{}, 33));
+    const nodes = try allocator.alloc(Node, 4097);
+    defer allocator.free(nodes);
+    for (nodes) |*node| node.* = .{
+        .id = @constCast("unused"),
+        .title = @constCast(""),
+        .loop_type = @constCast("turnBased"),
+        .state = @constCast("idle"),
+        .activity = @constCast(""),
+        .presence = @constCast(""),
+    };
+    try std.testing.expect(!(try worktreeBindingsChanged(allocator, project, nodes[0..4096], &.{})));
+    try std.testing.expectError(error.WorktreeComparisonLimit, worktreeBindingsChanged(allocator, project, nodes, &.{}));
+    const oversized = try allocator.alloc(u8, 4194305);
+    defer allocator.free(oversized);
+    @memset(oversized, ' ');
+    nodes[0].subgraph_json = oversized;
+    try std.testing.expectError(error.WorktreeComparisonLimit, worktreeBindingsChanged(allocator, project, nodes[0..1], &.{}));
+    var tiny: [1]u8 = undefined;
+    var scratch = std.heap.FixedBufferAllocator.init(&tiny);
+    comparison = .{ .allocator = scratch.allocator(), .project = project };
+    try std.testing.expectError(error.OutOfMemory, comparison.compare(nodes[0..1], &.{}, 0));
+}
+
+test "worktree notice deeply nested identical frames never bypass comparison bounds" {
+    const allocator = std.testing.allocator;
+    var graph = try allocator.dupe(u8, "{\"nodes\":[],\"edges\":[]}");
+    defer allocator.free(graph);
+    for (0..34) |index| {
+        const wrapped = try std.fmt.allocPrint(allocator, "{{\"nodes\":[{{\"id\":\"layer-{d}\",\"loopType\":\"composite\",\"subGraph\":{s}}}],\"edges\":[]}}", .{ index, graph });
+        allocator.free(graph);
+        graph = wrapped;
+    }
+    var model = try noticeTestModel(allocator);
+    defer model.deinit();
+    try loadNestedNoticeTestGraph(&model, graph, "composite");
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try loadNestedNoticeTestGraph(&model, graph, "composite");
+    const record = model.graphFor("C:\\notice-a").?.worktree_notice.?;
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_unavailable), record.stale);
+    try std.testing.expectEqual(@as(?anyerror, error.WorktreeComparisonLimit), record.stale_error);
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, record.state());
 }
 
 test "graph snapshots decode escaped project data and presence" {
@@ -2227,9 +3044,181 @@ test "fireCount parses complete positive numeric tokens" {
         \\{"version":2,"kind":"event","sequence":4,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"a","title":"A","state":"running"},{"id":"b","title":"B","state":"blocked"}],"edges":[{"from":"a","to":"b","kind":"handoff","fireCount":1},{"from":"a","to":"b","kind":"handoff","fireCount":123}]}}}
     ;
     _ = try model.updateFromFrame(frame);
-    try std.testing.expectEqual(@as(u32, 1), model.graph.?.edges.items[0].fire_count);
-    try std.testing.expectEqual(@as(u32, 123), model.graph.?.edges.items[1].fire_count);
+    try std.testing.expectEqual(@as(i64, 1), model.graph.?.edges.items[0].fire_count);
+    try std.testing.expectEqual(@as(i64, 123), model.graph.?.edges.items[1].fire_count);
     try std.testing.expectEqual(@as(usize, 0), model.attentionCount());
+}
+
+test "edge guard decoding preserves optional signed data and authoritative counts" {
+    const Case = struct { json: []const u8, count: i64, guarded: bool = false };
+    const cases = [_]Case{
+        .{ .json = "[{}]", .count = 0 },
+        .{ .json = "[{\"cycleGuard\":null,\"fired\":null}]", .count = 0 },
+        .{ .json = "[{\"fired\":true}]", .count = 1 },
+        .{ .json = "[{\"fired\":false}]", .count = 0 },
+        .{ .json = "[{\"fireCount\":null,\"fired\":true}]", .count = 1 },
+        .{ .json = "[{\"fireCount\":null,\"fired\":false}]", .count = 0 },
+        .{ .json = "[{\"fireCount\":null}]", .count = 0 },
+        .{ .json = "[{\"fireCount\":0,\"fired\":true}]", .count = 0 },
+        .{ .json = "[{\"fireCount\":2,\"fired\":false}]", .count = 2 },
+        .{ .json = "[{\"fireCount\":2,\"fired\":\"unused\"}]", .count = 2 },
+        .{ .json = "[{\"fireCount\":-1,\"fired\":true}]", .count = -1 },
+        .{ .json = "[{\"fireCount\":9223372036854775807}]", .count = std.math.maxInt(i64) },
+        .{ .json = "[{\"fireCount\":-9223372036854775808}]", .count = std.math.minInt(i64) },
+        .{ .json = "[{\"cycleGuard\":{}}]", .count = 0, .guarded = true },
+        .{ .json = "[{\"cycleGuard\":{\"maxIterations\":null,\"until\":null,\"stopAfterPassesWithoutImprovement\":null}}]", .count = 0, .guarded = true },
+        .{ .json = "[{\"future\":{\"fireCount\":99,\"kind\":\"message\",\"until\":\"wrong\"},\"cycleGuard\":{\"budget\":5}}]", .count = 0, .guarded = true },
+    };
+    for (cases) |case| {
+        var edges = try decodeEdges(std.testing.allocator, case.json);
+        defer freeEdges(std.testing.allocator, &edges);
+        try std.testing.expectEqual(@as(usize, 1), edges.items.len);
+        const edge = edges.items[0];
+        try std.testing.expectEqual(case.count, edge.fire_count);
+        try std.testing.expectEqual(case.count > 0, edge.fired);
+        try std.testing.expectEqual(case.guarded, edge.cycle_guard != null);
+        try std.testing.expectEqualStrings("handoff", edge.kind);
+        try std.testing.expectEqualStrings("always", edge.condition);
+    }
+    var edges = try decodeEdges(std.testing.allocator,
+        \\[{"kind":"futureKind","condition":"futureCondition","cycleGuard":{"maxIterations":-9223372036854775808,"until":" \tquote \"x\" \\ \u2603  ","stopAfterPassesWithoutImprovement":9223372036854775807}},{"cycleGuard":{"maxIterations":0,"until":"","stopAfterPassesWithoutImprovement":-2}}]
+    );
+    defer freeEdges(std.testing.allocator, &edges);
+    const guard = edges.items[0].cycle_guard.?;
+    try std.testing.expectEqualStrings("futureKind", edges.items[0].kind);
+    try std.testing.expectEqualStrings("futureCondition", edges.items[0].condition);
+    try std.testing.expectEqual(@as(?i64, std.math.minInt(i64)), guard.max_iterations);
+    try std.testing.expectEqual(@as(?i64, std.math.maxInt(i64)), guard.stop_after_passes_without_improvement);
+    try std.testing.expectEqualStrings(" \tquote \"x\" \\ ☃  ", guard.until.?);
+    try std.testing.expectEqual(@as(?i64, 0), edges.items[1].cycle_guard.?.max_iterations);
+    try std.testing.expectEqual(@as(?i64, -2), edges.items[1].cycle_guard.?.stop_after_passes_without_improvement);
+    try std.testing.expectEqualStrings("", edges.items[1].cycle_guard.?.until.?);
+}
+
+fn edgeGuardTestFrame(allocator: std.mem.Allocator, edges: []const u8) ![]u8 {
+    return std.mem.concat(allocator, u8, &.{
+        "{\"version\":2,\"kind\":\"event\",\"sequence\":1,\"event\":{\"graphChanged\":{\"project\":{\"path\":\"edge-fixture\",\"name\":\"Edge fixture\"},\"nodes\":[],\"edges\":",
+        edges,
+        "}}}",
+    });
+}
+
+test "edge guard malformed replacements preserve the last valid graph" {
+    const allocator = std.testing.allocator;
+    var model = Model.init(allocator);
+    defer model.deinit();
+    const valid = try edgeGuardTestFrame(allocator,
+        \\[{"id":"kept","from":"a","to":"b","cycleGuard":{"until":"keep me"},"fireCount":2}]
+    );
+    defer allocator.free(valid);
+    _ = try model.updateFromFrame(valid);
+    for ([_][]const u8{
+        "[false]",
+        "[{\"cycleGuard\":\"none\"}]",
+        "[{\"cycleGuard\":[]}]",
+        "[{\"cycleGuard\":{\"until\":true}}]",
+        "[{\"cycleGuard\":{\"maxIterations\":\"3\"}}]",
+        "[{\"cycleGuard\":{\"maxIterations\":2.5}}]",
+        "[{\"cycleGuard\":{\"maxIterations\":9223372036854775808}}]",
+        "[{\"cycleGuard\":{\"stopAfterPassesWithoutImprovement\":false}}]",
+        "[{\"cycleGuard\":{\"stopAfterPassesWithoutImprovement\":-9223372036854775809}}]",
+        "[{\"fireCount\":\"2\",\"fired\":true}]",
+        "[{\"fireCount\":2.5,\"fired\":true}]",
+        "[{\"fireCount\":2.0}]",
+        "[{\"fireCount\":2e0}]",
+        "[{\"fireCount\":9223372036854775808}]",
+        "[{\"fireCount\":-9223372036854775809}]",
+        "[{\"fired\":\"true\"}]",
+        "[{\"fireCount\":null,\"fired\":1}]",
+        "[{\"cycleGuard\":{\"until\":\"allocated first\"}},{\"cycleGuard\":false}]",
+    }) |invalid| {
+        const frame = try edgeGuardTestFrame(allocator, invalid);
+        defer allocator.free(frame);
+        try std.testing.expectError(error.MalformedEdge, model.updateFromFrame(frame));
+        for ([_]Edge{ model.graph.?.edges.items[0], model.currentGraph().?.edges.items[0] }) |edge| {
+            try std.testing.expectEqualStrings("kept", edge.id);
+            try std.testing.expectEqualStrings("keep me", edge.cycle_guard.?.until.?);
+            try std.testing.expectEqual(@as(i64, 2), edge.fire_count);
+            try std.testing.expect(edge.fired);
+        }
+    }
+    try std.testing.expectError(error.SyntaxError, decodeEdges(allocator, "[{]"));
+}
+
+test "edge guard ownership survives input release project selection and same ID refresh" {
+    const allocator = std.testing.allocator;
+    var model = Model.init(allocator);
+    defer model.deinit();
+    {
+        const frame = try edgeGuardTestFrame(allocator,
+            \\[{"id":"kept","from":"a","to":"b","cycleGuard":{"until":"  keep me  ","maxIterations":3},"fireCount":2},{"id":"other","from":"b","to":"a"}]
+        );
+        defer allocator.free(frame);
+        _ = try model.updateFromFrame(frame);
+        @memset(frame, '?');
+    }
+    const retained = model.currentGraph().?.edges.items[0];
+    const selected = model.graph.?.edges.items[0];
+    try std.testing.expect(retained.cycle_guard.?.until.?.ptr != selected.cycle_guard.?.until.?.ptr);
+    try std.testing.expect(retained.id.ptr != selected.id.ptr);
+    try std.testing.expectEqualStrings("  keep me  ", selected.cycle_guard.?.until.?);
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"other-project","name":"Other"},"nodes":[],"edges":[]}}}
+    );
+    try std.testing.expect(model.selectProject("other-project"));
+    try std.testing.expect(model.selectProject("edge-fixture"));
+    try std.testing.expectEqualStrings("  keep me  ", model.graph.?.edges.items[0].cycle_guard.?.until.?);
+    const refresh = try edgeGuardTestFrame(allocator,
+        \\[{"id":"other","from":"b","to":"a"},{"id":"kept","from":"a","to":"b","cycleGuard":{"until":"replacement","stopAfterPassesWithoutImprovement":2},"fireCount":3}]
+    );
+    defer allocator.free(refresh);
+    _ = try model.updateFromFrame(refresh);
+    const index = findEdgeIndexByID(model.graph.?.edges.items, "kept").?;
+    try std.testing.expectEqual(@as(usize, 1), index);
+    const updated = model.graph.?.edges.items[index];
+    try std.testing.expectEqualStrings("a", updated.from);
+    try std.testing.expectEqualStrings("b", updated.to);
+    try std.testing.expectEqualStrings("replacement", updated.cycle_guard.?.until.?);
+    try std.testing.expectEqual(@as(?i64, null), updated.cycle_guard.?.max_iterations);
+    const removed = try edgeGuardTestFrame(allocator,
+        \\[{"id":"kept","from":"a","to":"b","cycleGuard":null,"fireCount":0,"fired":true}]
+    );
+    defer allocator.free(removed);
+    _ = try model.updateFromFrame(removed);
+    try std.testing.expect(model.graph.?.edges.items[0].cycle_guard == null);
+    try std.testing.expect(model.currentGraph().?.edges.items[0].cycle_guard == null);
+    try std.testing.expect(!model.graph.?.edges.items[0].fired);
+}
+
+test "edge guard decoder and clone append allocations unwind" {
+    const Exercise = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var edges = try decodeEdges(allocator,
+                \\[{"id":"one","from":"a","to":"b","kind":"message","condition":"onSuccess","cycleGuard":{"maxIterations":3,"until":"  test \"done\"  ","stopAfterPassesWithoutImprovement":2},"fireCount":2},{"id":"two","from":"b","to":"a","cycleGuard":{"until":"another"}}]
+            );
+            defer freeEdges(allocator, &edges);
+            var copies = try cloneEdges(allocator, edges.items);
+            defer freeEdges(allocator, &copies);
+            try std.testing.expectEqualStrings("  test \"done\"  ", copies.items[0].cycle_guard.?.until.?);
+            try std.testing.expect(edges.items[0].cycle_guard.?.until.?.ptr != copies.items[0].cycle_guard.?.until.?.ptr);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Exercise.run, .{});
+}
+
+test "edge guard composite decoder retains bounds and rejects malformed guard" {
+    const allocator = std.testing.allocator;
+    var graph = try decodeSubgraph(allocator, .{ .path = @constCast("edge-fixture"), .name = @constCast("Edge fixture") },
+        \\{"nodes":[],"edges":[{"id":"nested","from":"a","to":"b","cycleGuard":{"maxIterations":4,"until":"nested command"},"fireCount":3}]}
+    );
+    defer freeGraph(allocator, &graph);
+    try std.testing.expectEqualStrings("nested", graph.edges.items[0].id);
+    try std.testing.expectEqualStrings("nested command", graph.edges.items[0].cycle_guard.?.until.?);
+    try std.testing.expectEqual(@as(?i64, 4), graph.edges.items[0].cycle_guard.?.max_iterations);
+    try std.testing.expect(graph.edges.items[0].fired);
+    try std.testing.expectError(error.MalformedEdge, decodeSubgraph(allocator, graph.project,
+        \\{"nodes":[],"edges":[{"cycleGuard":false}]}
+    ));
 }
 
 test "metric history samples retain recent values for sparklines" {
@@ -2483,7 +3472,7 @@ test "field scope missing null and wrong-type fields keep defaults without child
         try std.testing.expectEqual(@as(usize, 0), model.graph.?.edges.items.len);
     }
     const json =
-        \\{"nodes":[null,"{not a node}",[{"id":"not-immediate"}],{"id":null,"title":null,"state":{},"goal":null,"presence":null,"worktreeBinding":null,"templateFollow":null,"usage":null,"createdAt":-1,"metricHistory":null}],"edges":[false,[{"id":"not-immediate"}],{"from":null,"to":null,"kind":null,"condition":null,"fired":null,"fireCount":-1}]}
+        \\{"nodes":[null,"{not a node}",[{"id":"not-immediate"}],{"id":null,"title":null,"state":{},"goal":null,"presence":null,"worktreeBinding":null,"templateFollow":null,"usage":null,"createdAt":-1,"metricHistory":null}],"edges":[{"from":null,"to":null,"kind":null,"condition":null,"fired":null,"fireCount":-1}]}
     ;
     var graph = try decodeSubgraph(allocator, .{ .path = &.{}, .name = &.{} }, json);
     defer freeGraph(allocator, &graph);
@@ -2502,7 +3491,10 @@ test "field scope missing null and wrong-type fields keep defaults without child
     try std.testing.expectEqualStrings("always", graph.edges.items[0].condition);
     try std.testing.expectEqualStrings("handoff", graph.edges.items[0].kind);
     try std.testing.expect(graph.edges.items[0].blocks_target and !graph.edges.items[0].fired);
-    try std.testing.expectEqual(@as(u32, 0), graph.edges.items[0].fire_count);
+    try std.testing.expectEqual(@as(i64, -1), graph.edges.items[0].fire_count);
+    for ([_][]const u8{ "{\"edges\":[false]}", "{\"edges\":[[{\"id\":\"not-immediate\"}]]}" }) |invalid| {
+        try std.testing.expectError(error.MalformedEdge, decodeSubgraph(allocator, graph.project, invalid));
+    }
 }
 
 fn checkScopeDecoder(allocator: std.mem.Allocator) !void {
@@ -2573,7 +3565,7 @@ test "field scope canonical fields and supported legacy fallbacks have explicit 
         }
     }
     const aliases =
-        \\{"nodes":[{"worktreeBinding":{"path":"preferred","worktreePath":"alias"}},{"worktreeBinding":{"path":null,"worktreePath":"alias"}},{"worktreeBinding":{"path":false,"worktreePath":"alias"}},{"presence":"busy"},{"usage":{"inputTokens":null,"inputTokenCount":2,"outputTokens":3}},{"createdAt":12.5}],"edges":[{"fireCount":1e2}]}
+        \\{"nodes":[{"worktreeBinding":{"path":"preferred","worktreePath":"alias"}},{"worktreeBinding":{"path":null,"worktreePath":"alias"}},{"worktreeBinding":{"path":false,"worktreePath":"alias"}},{"presence":"busy"},{"usage":{"inputTokens":null,"inputTokenCount":2,"outputTokens":3}},{"createdAt":12.5}],"edges":[{"fireCount":1}]}
     ;
     var graph = try decodeSubgraph(allocator, .{ .path = &.{}, .name = &.{} }, aliases);
     defer freeGraph(allocator, &graph);
@@ -2583,7 +3575,8 @@ test "field scope canonical fields and supported legacy fallbacks have explicit 
     try std.testing.expectEqualStrings("busy", graph.nodes.items[3].presence);
     try std.testing.expectEqual(@as(?u32, 5), graph.nodes.items[4].token_usage);
     try std.testing.expectEqual(@as(?u64, 12), graph.nodes.items[5].created_at);
-    try std.testing.expectEqual(@as(u32, 1), graph.edges.items[0].fire_count);
+    try std.testing.expectEqual(@as(i64, 1), graph.edges.items[0].fire_count);
+    try std.testing.expectError(error.MalformedEdge, decodeSubgraph(allocator, graph.project, "{\"edges\":[{\"fireCount\":1e2}]}"));
 }
 
 fn checkScopeMalformed(allocator: std.mem.Allocator, json: []const u8, expected: anyerror, before: *const Model) !void {
@@ -2809,7 +3802,7 @@ test "field scope validator bounds wide objects and opaque child spans" {
 
 const ownershipGraphJson =
     \\{"project":{"path":"C:\\owned\\graph","name":"Owned \"graph\""},
-    \\"edges":[{"id":"edge-first","from":"first","to":"second","kind":"handoff","condition":"onSuccess","fired":true,"fireCount":2},{"id":"edge-second","from":"second","to":"first","kind":"message"}],
+    \\"edges":[{"id":"edge-first","from":"first","to":"second","kind":"handoff","condition":"onSuccess","fired":true,"fireCount":2,"cycleGuard":{"maxIterations":5,"until":"done","stopAfterPassesWithoutImprovement":3},"payloadTransform":{"template":{"_0":" \u2603 text "}},"spawnTargetProjectPath":""},{"id":"edge-second","from":"second","to":"first","kind":"message","fireCount":-2,"payloadTransform":{"script":{"_0":"command"}},"spawnTargetProjectPath":"C:\\spawn"}],
     \\"nodes":[{"id":"first","title":"First \"node\"","loopType":"proactive","state":"running","activity":"editing","presence":{"presence":"busy"},"backend":"copilot","pilotState":"piloted","goal":{"summary":"Ship it","predicate":"done"},"metricCommand":"measure","metricDirection":"decrease","triggerPrompt":"Continue","checkDescription":"Check","modelTier":"high","pollIntervalSeconds":12.5,"stallAfterSeconds":60,"createdAt":123,"metricHistory":[{"value":3},{"value":2}],"inputTokens":11,"outputTokens":7,"worktreeBinding":{"path":"C:\\owned\\branch","branch":"topic"},"subGraph":{"nodes":[{"id":"child","title":"Child","state":"idle"}],"edges":[]},"templateFollow":{"id":"template"}},{"id":"second","title":"Second","state":"idle"}]}
 ;
 const ownershipGraphFrame = "{\"graphChanged\":" ++ ownershipGraphJson ++ "}";
@@ -2864,10 +3857,20 @@ fn expectOwnershipGraph(graph: anytype) !void {
     try std.testing.expectEqualStrings("handoff", edge.kind);
     try std.testing.expectEqualStrings("onSuccess", edge.condition);
     try std.testing.expect(edge.blocks_target and edge.fired);
-    try std.testing.expectEqual(@as(u32, 2), edge.fire_count);
+    try std.testing.expectEqual(@as(i64, 2), edge.fire_count);
+    try std.testing.expectEqual(@as(?i64, 5), edge.cycle_guard.?.max_iterations);
+    try std.testing.expectEqualStrings("done", edge.cycle_guard.?.until.?);
+    try std.testing.expectEqual(@as(?i64, 3), edge.cycle_guard.?.stop_after_passes_without_improvement);
+    try std.testing.expectEqualStrings(" \xe2\x98\x83 text ", edge.payload_transform.template);
+    try std.testing.expectEqualStrings("", edge.spawn_target_project_path.?);
+    try std.testing.expect(edge.editable_configuration);
     try std.testing.expectEqualStrings("edge-second", graph.edges.items[1].id);
     try std.testing.expectEqualStrings("always", graph.edges.items[1].condition);
     try std.testing.expect(!graph.edges.items[1].blocks_target);
+    try std.testing.expectEqual(@as(i64, -2), graph.edges.items[1].fire_count);
+    try std.testing.expect(!graph.edges.items[1].fired);
+    try std.testing.expectEqualStrings("command", graph.edges.items[1].payload_transform.script);
+    try std.testing.expectEqualStrings("C:\\spawn", graph.edges.items[1].spawn_target_project_path.?);
 }
 
 fn checkGraphDecoderOwnership(allocator: std.mem.Allocator) !void {
@@ -2969,7 +3972,7 @@ fn checkDecoderListGrowth(allocator: std.mem.Allocator) !void {
         edges.deinit();
     }
     try decodeNodes(allocator, "[{\"id\":\"node\"}" ++ (",{\"id\":\"node\"}" ** 9) ++ "]", &nodes);
-    try decodeEdges(allocator, "[{\"from\":\"node\",\"to\":\"node\"}" ++ (",{\"from\":\"node\",\"to\":\"node\"}" ** 9) ++ "]", &edges);
+    edges = try decodeEdges(allocator, "[{\"from\":\"node\",\"to\":\"node\"}" ++ (",{\"from\":\"node\",\"to\":\"node\"}" ** 9) ++ "]");
     try std.testing.expectEqual(@as(usize, 10), nodes.items.len);
     try std.testing.expectEqual(@as(usize, 10), edges.items.len);
     for (nodes.items) |node| try std.testing.expectEqualStrings("Untitled", node.title);
@@ -2999,8 +4002,9 @@ test "decoder ownership malformed subgraphs preserve primary errors under alloca
         \\{"nodes":[{"id":"valid"}],"edges":[{"id":"valid","from":"valid","to":"valid"},{"id":"next","from":"valid","to":"valid","condition":"bad\q"}]}
         ,
     };
-    for (malformed_strings) |json| {
-        try checkOwnershipAllocationFailures(checkMalformedSubgraphOwnership, .{ json, error.MalformedJsonString });
+    const string_errors = [_]anyerror{ error.MalformedJsonString, error.MalformedJsonString, error.SyntaxError };
+    for (malformed_strings, string_errors) |json, expected| {
+        try checkOwnershipAllocationFailures(checkMalformedSubgraphOwnership, .{ json, expected });
     }
     const malformed_arrays = [_][]const u8{
         \\{"nodes":[
@@ -3042,22 +4046,23 @@ test "decoder ownership malformed strings preserve the previous graph" {
         \\{"graphChanged":{"project":{"path":"C:\\owned\\graph","name":"Changed"},"nodes":[{"id":"valid"}],"edges":[{"id":"valid","from":"valid","to":"valid"},{"id":"invalid","from":"valid","to":"valid","condition":"bad\q"}]}}
         ,
     };
-    for (invalid_frames) |frame| {
-        try std.testing.expectError(error.MalformedJsonString, model.decodeGraph(frame));
+    const string_errors = [_]anyerror{ error.MalformedJsonString, error.MalformedJsonString, error.SyntaxError };
+    for (invalid_frames, string_errors) |frame, expected| {
+        try std.testing.expectError(expected, model.decodeGraph(frame));
         try expectOwnershipGraph(model.graph.?);
         try expectOwnershipGraph(model.graphs.items[0]);
-        try checkOwnershipAllocationFailures(checkMalformedGraphDecoderOwnership, .{frame});
+        try checkOwnershipAllocationFailures(checkMalformedGraphDecoderOwnership, .{ frame, expected });
     }
 
     try std.testing.expectError(error.MalformedGraph, model.decodeGraph("{\"graphChanged\":{"));
     try expectOwnershipGraph(model.graph.?);
 }
 
-fn checkMalformedGraphDecoderOwnership(allocator: std.mem.Allocator, frame: []const u8) !void {
+fn checkMalformedGraphDecoderOwnership(allocator: std.mem.Allocator, frame: []const u8, expected: anyerror) !void {
     var model = Model.init(allocator);
     defer model.deinit();
     model.decodeGraph(frame) catch |err| {
-        if (err != error.MalformedJsonString) return err;
+        if (err != expected) return err;
         try std.testing.expect(model.graph == null);
         try std.testing.expectEqual(@as(usize, 0), model.graphs.items.len);
         return;
@@ -3074,6 +4079,14 @@ const ownershipReplacementFrame =
 const ownershipMalformedCompositeFrame =
     \\{"graphChanged":{"project":{"path":"C:\\owned\\graph","name":"Ignored rename"},"edges":[],"nodes":[{"id":"first","title":"Updated","loopType":"proactive","subGraph":{"nodes":[{"id":"child","title":"bad\q"}],"edges":[]}}]}}
 ;
+const ownershipMalformedCompositeEdgeFrames = [_][]const u8{
+    \\{"graphChanged":{"project":{"path":"C:\\owned\\graph","name":"Ignored rename"},"edges":[],"nodes":[{"id":"first","title":"Updated","loopType":"proactive","subGraph":{"nodes":[{"id":"child"}],"edges":[{"from":"child","to":"child","condition":"bad\q"}]}}]}}
+    ,
+    \\{"graphChanged":{"project":{"path":"C:\\owned\\graph","name":"Ignored rename"},"edges":[],"nodes":[{"id":"first","title":"Updated","loopType":"proactive","subGraph":{"nodes":[{"id":"child"}],"edges":[{"from":"child","to":"child","cycleGuard":{"maxIterations":"bad"}}]}}]}}
+    ,
+    \\{"graphChanged":{"project":{"path":"C:\\owned\\graph","name":"Ignored rename"},"edges":[],"nodes":[{"id":"first","title":"Updated","loopType":"proactive","subGraph":{"nodes":[{"id":"child"}],"edges":[{"from":"child","to":"child","id":"first","id":"duplicate"}]}}]}}
+    ,
+};
 const ownershipOtherReplacementFrame =
     \\{"graphChanged":{"project":{"path":"other","name":"Ignored rename"},"nodes":[{"id":"other-node","title":"Changed other","state":"succeeded"}],"edges":[]}}
 ;
@@ -3096,6 +4109,8 @@ fn initOwnershipModel(allocator: std.mem.Allocator, failed_frame: []const u8, co
         try model.decodeGraph(failed_frame);
     }
     model.beginRestore();
+    try recordTestNotice(&model, "C:\\owned\\graph", 2147483648);
+    try recordTestNotice(&model, "other", 4294967296);
     return model;
 }
 
@@ -3121,7 +4136,10 @@ fn expectModelDataEqual(expected: *const Model, actual: *const Model) !void {
     try std.testing.expectEqualDeep(expected.attention.items, actual.attention.items);
     try std.testing.expectEqualDeep(expected.attention_entries.items, actual.attention_entries.items);
     try std.testing.expectEqual(expected.graphs.items.len, actual.graphs.items.len);
-    for (expected.graphs.items, actual.graphs.items) |left, right| try expectGraphDataEqual(left, right);
+    for (expected.graphs.items, actual.graphs.items) |left, right| {
+        try expectGraphDataEqual(left, right);
+        try std.testing.expectEqualDeep(left.worktree_notice, right.worktree_notice);
+    }
     try std.testing.expectEqual(expected.graph == null, actual.graph == null);
     if (expected.graph) |graph| try expectGraphDataEqual(graph, actual.graph.?);
     try std.testing.expectEqual(expected.activity.items.len, actual.activity.items.len);
@@ -3172,6 +4190,9 @@ test "decoder ownership populated model replacements preserve coherent state at 
         .{ .frame = ownershipNewProjectFrame },
         .{ .frame = ownershipReplacementFrame, .composite = true },
         .{ .frame = ownershipMalformedCompositeFrame, .composite = true },
+        .{ .frame = ownershipMalformedCompositeEdgeFrames[0], .composite = true },
+        .{ .frame = ownershipMalformedCompositeEdgeFrames[1], .composite = true },
+        .{ .frame = ownershipMalformedCompositeEdgeFrames[2], .composite = true },
         .{ .frame = ownershipEmptyFrame },
     };
     for (cases) |case| {
@@ -3185,14 +4206,16 @@ test "decoder ownership populated model replacements preserve coherent state at 
 }
 
 test "decoder ownership malformed open subgraph retains the existing top level fallback" {
-    var model = Model.init(std.testing.allocator);
-    defer model.deinit();
-    try model.decodeGraph(ownershipGraphFrame);
-    try std.testing.expect(model.openComposite("first"));
-    try model.decodeGraph(ownershipMalformedCompositeFrame);
-    try std.testing.expect(!model.isCompositeOpen());
-    try std.testing.expectEqualStrings("first", model.graph.?.nodes.items[0].id);
-    try std.testing.expectEqualStrings("Owned \"graph\"", model.graph.?.project.name);
+    for ([_][]const u8{ownershipMalformedCompositeFrame} ++ ownershipMalformedCompositeEdgeFrames) |frame| {
+        var model = Model.init(std.testing.allocator);
+        defer model.deinit();
+        try model.decodeGraph(ownershipGraphFrame);
+        try std.testing.expect(model.openComposite("first"));
+        try model.decodeGraph(frame);
+        try std.testing.expect(!model.isCompositeOpen());
+        try std.testing.expectEqualStrings("first", model.graph.?.nodes.items[0].id);
+        try std.testing.expectEqualStrings("Owned \"graph\"", model.graph.?.project.name);
+    }
 }
 
 test "decoder ownership best effort synchronization never retains a different project on allocation failure" {
@@ -3303,4 +4326,41 @@ test "decoder ownership attention eviction lifecycle removal discards obsolete l
 
 test "decoder ownership attention eviction restore reconciliation discards obsolete lists on allocation failure" {
     try checkAttentionEvictionFailures(true);
+}
+
+fn checkNestedEdgeFallbackOwnership(allocator: std.mem.Allocator, summary: *const GraphSummary) !void {
+    var model = Model.init(allocator);
+    defer model.deinit();
+    model.open_composite_id = try allocator.dupe(u8, summary.nodes.items[0].id);
+    var snapshot = try model.prepareLegacySnapshot(summary, 0, "child");
+    defer snapshot.deinit(allocator);
+    // No allocation follows the catch boundary, so a later OOM cannot mask
+    // an allocation failure swallowed by the malformed-data fallback.
+    try std.testing.expect(snapshot.clear_composite);
+    try std.testing.expect(snapshot.composite_title == null);
+    try expectGraphDataEqual(summary.*, snapshot.graph orelse return error.TestExpectedGraph);
+}
+
+test "decoder ownership nested edge fallback propagates its own OutOfMemory" {
+    const allocator = std.testing.allocator;
+    const errors = [_]anyerror{ error.SyntaxError, error.MalformedEdge, error.DuplicateField };
+    for (ownershipMalformedCompositeEdgeFrames, errors) |frame, expected| {
+        var graph = (try decodeGraphFrame(allocator, frame)) orelse return error.TestExpectedGraph;
+        defer freeGraph(allocator, &graph);
+        try std.testing.expectEqual(@as(usize, 1), graph.nodes.items.len);
+        try checkMalformedSubgraphOwnership(allocator, graph.nodes.items[0].subgraph_json, expected);
+        const summary = GraphSummary{ .project = graph.project, .nodes = graph.nodes, .edges = graph.edges };
+
+        var counting = std.testing.FailingAllocator.init(allocator, .{});
+        try checkNestedEdgeFallbackOwnership(counting.allocator(), &summary);
+        try std.testing.expect(counting.alloc_index > 0);
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = counting.alloc_index - 1 });
+        try std.testing.expectError(error.OutOfMemory, checkNestedEdgeFallbackOwnership(failing.allocator(), &summary));
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        std.debug.print("nested edge fallback {s}: final allocation {d}/{d} -> OutOfMemory\n", .{
+            @errorName(expected), counting.alloc_index - 1, counting.alloc_index,
+        });
+        try checkOwnershipAllocationFailures(checkNestedEdgeFallbackOwnership, .{&summary});
+    }
 }
