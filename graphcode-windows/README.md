@@ -15,6 +15,8 @@ window and attaches to the persistent zmx session for its selected node. Surface
 destruction kills only the attach client; zmx owns the session and survives shell
 restarts. The host contract is the accepted two-surface terminal-gate contract,
 not a synthetic terminal proof.
+Workspace reopen and activation restore the selected tab's focused pane rather
+than assuming that terminal slot zero or the last active slot is visible.
 
 The graph surface also provides native Win32 create/edit forms for nodes and
 edges, a settings dialog, context menus, and keyboard-accessible actions:
@@ -57,6 +59,15 @@ share the same application action router as keyboard shortcuts, and project
 actions use the Windows `IFileOpenDialog` folder picker. The no-project state
 also presents accessible native buttons for opening a folder or the global
 overview; recent projects remain selectable in the sidebar.
+
+Pressing and releasing unmodified `F10` enters the native menu bar, including
+while an embedded terminal has focus. The shell passes the original key pair
+to Windows default menu processing only when the release still targets the
+same eligible, app-owned window. Observed focus/activation changes, modal
+disablement, and intervening input cancel the pending pair; modified `F10`
+(including `Shift+F10`) retains its existing input route.
+Both ordinary and system-key plain `F10` messages use this route; an Alt-context
+message is excluded even if the modifier snapshot no longer shows Alt pressed.
 
 `F6` (or View > Focus Window Toolbar) enters the window toolbar; `Shift+F6`
 enters at its last visible control. Within the toolbar, `Tab`/`Shift+Tab` and
@@ -153,6 +164,26 @@ controls/windows/menus. This is not a live multi-instance, keyboard, UIA, or
 real-daemon walkthrough. The lifecycle parity row remains Partial: macOS also
 provides a structured Manage view, content summaries, creation-order/running-only
 cycling, and recoverable deletion with daemon/session teardown.
+
+## Graph decoder ownership
+
+Graph snapshots own their project, node, edge, and optional string storage.
+`GraphModel.decodeGraph` propagates allocation failures, including failures while
+preparing attention, activity, restore-generation, selection, and legacy/nested
+snapshots. It prepares owned replacements before its final fallible summary
+update. On error, existing model data remains intact; list capacity may grow.
+This guarantee covers the decoder, not all model operations or the sequence
+bookkeeping performed by `updateFromFrame` before decoding. Nondecoder navigation
+and attention APIs retain their best-effort interface. If attention rebuilding
+fails after nondecoder project eviction, both owned attention lists are cleared
+so removed projects cannot remain visible. Wire defaults and the
+existing malformed-open-subgraph fallback to the top-level graph are unchanged.
+
+From `graphcode-windows`, run `zig test src\GraphModel.zig --test-filter "decoder ownership"`
+with Zig 0.15.2 for direct test-allocator, exhaustive allocation-fault, malformed
+input, and temporary-JSON-lifetime coverage. Run `zig test src\GraphModel.zig`
+for the existing semantic root as well. These are offline allocation simulations,
+not evidence of true OS memory exhaustion or live UI behavior.
 
 ## Build
 
