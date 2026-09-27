@@ -18,9 +18,39 @@ not a synthetic terminal proof.
 
 The graph surface also provides native Win32 create/edit forms for nodes and
 edges, a settings dialog, context menus, and keyboard-accessible actions:
-`Ctrl+N` creates a node, `Ctrl+E` edits the selected node, `Ctrl+J` opens the
-jump palette (also `Ctrl+P`), and `Ctrl+,` opens settings. Mutations are sent as correlated v2
-daemon requests; daemon refusals remain visible as explicit status errors.
+`Ctrl+N` creates a node, `Ctrl+J` opens the jump palette, and `Ctrl+,` opens
+advanced connection settings. With the graph canvas owning the keyboard,
+`F2` or `Ctrl+E` renames the selected loop; `Ctrl+E` edits the selected edge
+instead when an edge is selected. Full **Edit Details...** remains a node
+context-menu action, not the `Ctrl+E` action. **Open Terminal** is also in that
+menu; Enter is not a standalone shortcut for it. Mutations are sent as
+correlated v2 daemon requests; daemon refusals remain visible as explicit status
+errors.
+
+Edge editing queues one checked `updateEdge` command, never delete/recreate.
+The existing edge ID and endpoints stay fixed, and the daemon retains its current
+fire count. The editor owns the complete initial configuration across the modal,
+then rechecks the displayed project, cached graph, composite address and edge
+configuration before queueing. A configuration conflict is refused; a runtime
+count advance alone is not a conflict. An observation subscription to a different
+cached project does not prohibit editing the selected project.
+
+Unchanged legacy values are retained, including an absent versus present-empty
+cycle guard and nil versus empty text. Changed guards use the existing daemon
+creation rule; clearing changed guard controls removes the guard. Only root and
+one directly addressed composite are supported by this new command; deeper edit
+wrappers are explicitly refused without changing existing non-edit commands.
+The command requires a supporting daemon and has no destructive compatibility
+fallback. "Queued" is not daemon acceptance or persistence. Native interaction,
+real daemon persistence and macOS runtime behavior remain unverified by the
+data-only regression coverage.
+
+Edge edits use length-aware text capture for both live changes and submission.
+Unreadable text, invalid selections and allocation failures block submission
+until that field is read successfully; recovering one field does not clear
+another field's error. This checked reader is edit-only. Creation, node and
+settings forms retain their existing bounded reader and are outside this
+capture validation.
 
 The shell exposes a native File/Loop/Terminal/View/Help menu bar. Menu items
 share the same application action router as keyboard shortcuts, and project
@@ -48,12 +78,22 @@ authenticated account, and the `codespace` token scope — without the scope,
 discovery reports the exact `gh auth refresh -h github.com -s codespace` command
 that grants it.
 
-Parity actions are reachable without App-specific view coupling: `Ctrl+P` opens
-the searchable jump/palette form, `Ctrl+Up`/`Ctrl+Down` navigate by stable
-project/node identity, `Ctrl+Tab` advances attention, and `Ctrl+Shift+R`,
-`Ctrl+Shift+P`, and `Ctrl+Shift+A` toggle the workspace rail, panel, and
-activity settings. `Ctrl+Q` creates a daemon-owned Quick Chat; `Ctrl+Shift+Q`
-renames the selected chat and `Ctrl+Shift+X` deletes it.
+When the app root owns the keyboard, `Ctrl+P` is another route to the same
+searchable jump palette as `Ctrl+J`, and `Ctrl+Up`/`Ctrl+Down` navigate by stable
+project/node identity. `Ctrl+Shift+L`, `Ctrl+Shift+B`, and `Ctrl+Shift+A` toggle
+the application sidebar, terminal workspace, and activity strip, respectively.
+`Ctrl+Q` creates a daemon-owned Quick Chat; `Ctrl+Shift+Q` renames the selected
+chat and `Ctrl+Shift+Delete` requests its deletion with confirmation.
+`Ctrl+Shift+R` adds an SSH repository, `Ctrl+Shift+P` opens worktree policy,
+and `Ctrl+Shift+X` cancels a clone; they are not aliases for those toggles or
+chat deletion.
+
+These root-window bindings are not universal terminal or dialog shortcuts.
+`Ctrl+J` is forwarded from the terminal; `Ctrl+P` is not. In the jump palette,
+Up/Down moves through results and Enter accepts the selection, returning to
+the selected loop in the graph rather than opening its terminal. Native forms
+keep their own text editing, Tab navigation, and acceptance/cancellation;
+Enter in an already-open menu activates its highlighted item.
 
 Custom canvas, sidebar, header, and detail layout use 96-DPI logical units.
 UI Automation receives physical client pixels: logical bounds, including the
@@ -167,6 +207,26 @@ The parity row remains **Partial**: shown-dialog accessibility/keyboard/layout
 and multi-instance behavior, complete live totals, running-only cycling, and
 recoverable deletion still need their own evidence or implementation.
 
+## Graph decoder ownership
+
+Graph snapshots own their project, node, edge, and optional string storage.
+`GraphModel.decodeGraph` propagates allocation failures, including failures while
+preparing attention, activity, restore-generation, selection, and legacy/nested
+snapshots. It prepares owned replacements before its final fallible summary
+update. On error, existing model data remains intact; list capacity may grow.
+This guarantee covers the decoder, not all model operations or the sequence
+bookkeeping performed by `updateFromFrame` before decoding. Nondecoder navigation
+and attention APIs retain their best-effort interface. If attention rebuilding
+fails after nondecoder project eviction, both owned attention lists are cleared
+so removed projects cannot remain visible. Wire defaults and the
+existing malformed-open-subgraph fallback to the top-level graph are unchanged.
+
+From `graphcode-windows`, run `zig test src\GraphModel.zig --test-filter "decoder ownership"`
+with Zig 0.15.2 for direct test-allocator, exhaustive allocation-fault, malformed
+input, and temporary-JSON-lifetime coverage. Run `zig test src\GraphModel.zig`
+for the existing semantic root as well. These are offline allocation simulations,
+not evidence of true OS memory exhaustion or live UI behavior.
+
 ## Build
 
 From a fresh checkout, bootstrap the exact Zig toolchains, Swift 6.3.3, and
@@ -193,6 +253,16 @@ The Swift scripts select the SDK and runtime that ship with the pinned Swift
 toolchain and ignore inherited Visual Studio `INCLUDE`/`LIB` settings. This
 prevents mixed VS/Swift SDK environments from producing false missing-module
 errors for `_complex` or `ucrt`.
+
+Standalone `Tools\windows\Tests\WindowsShell.Tests.ps1` requires the pinned
+Winghostty static host library, not only its headers. After loading the bootstrap
+environment, build that prerequisite before running the native contracts:
+
+```powershell
+Push-Location $env:GRAPHCODE_WINGHOSTTY_ROOT
+try { & $env:GRAPHCODE_ZIG0152 build -Demit-win32-host=true }
+finally { Pop-Location }
+```
 
 `Tools\windows\validate.ps1 -Task windows-shell` performs pin, clean-worktree,
 format, lifecycle-contract, real provider build, and native UI Automation live
