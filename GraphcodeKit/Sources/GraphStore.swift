@@ -1170,9 +1170,11 @@ public actor GraphStore {
     guard from != to, graph.nodes[id: from] != nil, graph.nodes[id: to] != nil else {
       return "edge update refused: both distinct endpoints must remain in this graph"
     }
-    guard !graph.edges.contains(where: {
-      $0.id != id && $0.from == from && $0.to == to && $0.kind == spec.kind
-    }) else {
+    guard
+      !graph.edges.contains(where: {
+        $0.id != id && $0.from == from && $0.to == to && $0.kind == spec.kind
+      })
+    else {
       return "edge update refused: duplicate \(spec.kind) edge"
     }
     if spec.cycleGuard != edge.cycleGuard, let guardValue = spec.cycleGuard,
