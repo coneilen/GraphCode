@@ -165,13 +165,25 @@ public struct RemoteProjectLocation: Equatable, Sendable {
   /// nothing (measured on the loopback rig), so every spawn site calls
   /// `prepareControlSocketDirectory()` before dialing.
   ///
-  /// A Codespace dials through `gh codespace ssh -c <name> -- <ssh-flags> <command>`
-  /// instead — everything after `--` reaches gh's underlying ssh untouched, so the
-  /// keepalive posture carries over. `ControlMaster` deliberately does not: gh opens a
-  /// fresh tunnel on a random local port per run and exits with it, so a persisted
-  /// master would rarely be matched again (`%C` hashes the port) and each one left
-  /// behind would sit on a dead tunnel — orphans, not multiplexing.
+  /// A Codespace reuses one connection the same way once its ssh user is known, with gh
+  /// as the `ProxyCommand` (`multiplexedCodespaceInvocation`). Until then it dials
+  /// through `gh codespace ssh -c <name> -- <ssh-flags> <command>` — everything after
+  /// `--` reaches gh's underlying ssh untouched, so the keepalive posture carries over,
+  /// but `ControlMaster` does not: gh opens a fresh tunnel on a random local port per
+  /// run, so `%C` would never match again.
   public func sshInvocation(remoteCommand: String, interactive: Bool = false) -> [String] {
+    sshInvocation(
+      remoteCommand: remoteCommand, interactive: interactive,
+      codespaceUser: multiplexedCodespaceUser)
+  }
+
+  func sshInvocation(
+    remoteCommand: String, interactive: Bool, codespaceUser: String?
+  ) -> [String] {
+    if isCodespace, let codespaceUser {
+      return multiplexedCodespaceInvocation(
+        user: codespaceUser, remoteCommand: remoteCommand, interactive: interactive)
+    }
     if isCodespace {
       var invocation = [GhLocator.executablePath, "codespace", "ssh", "-c", host, "--"]
       if interactive { invocation.append("-t") }
