@@ -437,6 +437,10 @@ Invoke-Native "Update offer modal deferral executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\UpdateOfferPresentation.zig } finally { Pop-Location }
 }
+Invoke-Native "Sketch promotion executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\SketchPromotion.zig --test-filter 'sketch promotion' } finally { Pop-Location }
+}
 Invoke-Native "Context menu and gate fixture message executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
@@ -636,6 +640,8 @@ Invoke-Native "Worktree status executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\WorktreeStatus.zig } finally { Pop-Location }
 }
+& (Join-Path $PSScriptRoot "WorktreeGitProcess.Tests.ps1") -Zig $zig `
+  -EvidenceDirectory (Join-Path $shellRoot (".zig-cache\worktree-process-" + [guid]::NewGuid().ToString("N")))
 Invoke-Native "Draft attachments executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\DraftAttachments.zig } finally { Pop-Location }
@@ -659,6 +665,20 @@ Invoke-Native "Windows shell diagnostics executable tests" {
 Invoke-Native "Workspace lifecycle executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\WorkspaceLifecycle.zig } finally { Pop-Location }
+}
+Invoke-Native "Workspace manager data executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\WorkspaceManager.zig } finally { Pop-Location }
+}
+Invoke-Native "Workspace manager form data executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) { $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration" }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\WorkspaceManagerForm.zig --test-filter "workspace manager" -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
+  } finally { Pop-Location }
 }
 Invoke-Native "Sidebar navigation executable tests" {
   Push-Location $shellRoot
