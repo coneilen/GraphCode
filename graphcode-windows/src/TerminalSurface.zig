@@ -1054,6 +1054,48 @@ pub const Workspace = struct {
         self.enqueueInput(self.active_surface, text);
     }
 
+    pub fn copySelection(self: *Workspace, allocator: std.mem.Allocator) !?[]u8 {
+        if (self.active_surface >= self.surfaces.len) return null;
+        const slot = &self.surfaces[self.active_surface];
+        const surface = slot.surface orelse return null;
+        const selection = slot.accessibility_selection orelse return null;
+        if (selection.end <= selection.start) return null;
+
+        const span = selection.end - selection.start;
+        const capacity_u64 = std.math.mul(u64, span, 4) catch return error.SelectionTooLarge;
+        if (capacity_u64 > std.math.maxInt(usize)) return error.SelectionTooLarge;
+        const capacity: usize = @intCast(capacity_u64);
+        const text = try allocator.alloc(u8, capacity);
+        errdefer allocator.free(text);
+        var length: u64 = 0;
+        const result = c.winghostty_surface_copy_accessibility_range(
+            surface,
+            selection.start,
+            selection.end,
+            text.ptr,
+            text.len,
+            &length,
+        );
+        if (result == c.WINGHOSTTY_CLIPBOARD_UNAVAILABLE) return error.TerminalClipboardUnavailable;
+        if (result != c.WINGHOSTTY_OK) return error.TerminalSelectionCopyFailed;
+        if (length > text.len) return error.TerminalSelectionCopyOverflow;
+        return try allocator.realloc(text, @intCast(length));
+    }
+
+    pub fn pasteText(self: *Workspace, text: []const u8) !void {
+        if (text.len == 0) return;
+        if (self.active_surface >= self.surfaces.len) return error.TerminalSurfaceUnavailable;
+        const surface = self.surfaces[self.active_surface].surface orelse return error.TerminalSurfaceUnavailable;
+        const length = std.math.cast(u32, text.len) orelse return error.TerminalPasteTooLarge;
+        if (c.winghostty_paste_validate(text.ptr, length) != c.WINGHOSTTY_PASTE_SAFE) {
+            return error.TerminalPasteRequiresConfirmation;
+        }
+        const result = c.winghostty_surface_paste_text(surface, text.ptr, length, 0);
+        if (result == c.WINGHOSTTY_PASTE_REQUIRES_CONFIRMATION) return error.TerminalPasteRequiresConfirmation;
+        if (result == c.WINGHOSTTY_CLIPBOARD_UNAVAILABLE) return error.TerminalClipboardUnavailable;
+        if (result != c.WINGHOSTTY_OK) return error.TerminalPasteFailed;
+    }
+
     pub fn inputStatus(self: *const Workspace, current_status: []const u8) ?[]const u8 {
         const workspace: *Workspace = @constCast(self);
         workspace.input_mutex.lock();
@@ -2755,7 +2797,7 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
 }
 
 fn isApplicationShortcut(key: usize, ctrl: bool, shift: bool) bool {
-    _ = shift;
+    if (ctrl and shift and (key == 'C' or key == 'V')) return true;
     if (key == c.VK_TAB) return true;
     if (!ctrl) return false;
     return switch (key) {
@@ -2768,11 +2810,13 @@ fn callbackModifiers(mask: u32) struct { ctrl: bool, shift: bool } {
     return .{ .ctrl = (mask & 0x02) != 0, .shift = (mask & 0x01) != 0 };
 }
 
-test "child key callback forwards advertised menu shortcuts only" {
+test "TerminalSurface.isApplicationShortcut forwards registered terminal shortcuts" {
     try std.testing.expect(isApplicationShortcut(c.VK_PRIOR, true, false));
     try std.testing.expect(isApplicationShortcut(c.VK_NEXT, true, false));
     try std.testing.expect(isApplicationShortcut(c.VK_TAB, true, false));
     try std.testing.expect(isApplicationShortcut(c.VK_TAB, false, true));
+    try std.testing.expect(isApplicationShortcut('C', true, true));
+    try std.testing.expect(isApplicationShortcut('V', true, true));
     try std.testing.expect(isApplicationShortcut(0xBC, true, false));
     try std.testing.expect(isApplicationShortcut('W', true, true));
     try std.testing.expect(!isApplicationShortcut(c.VK_UP, false, false));

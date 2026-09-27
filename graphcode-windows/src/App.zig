@@ -20,6 +20,7 @@ const GraphModel = @import("GraphModel.zig");
 const InputRouter = @import("InputRouter.zig");
 const MainWindow = @import("MainWindow.zig");
 const TerminalWorkspace = @import("TerminalWorkspace.zig");
+const Clipboard = @import("Clipboard.zig");
 const Tokens = @import("DesignTokens.zig");
 const Dpi = @import("Dpi.zig");
 const AppFont = @import("AppFont.zig");
@@ -54,6 +55,21 @@ const tray_test_hook_environment = "GRAPHCODE_TRAY_TEST_HOOK";
 const daemon_supervisor_test_hook_environment = "GRAPHCODE_DAEMON_SUPERVISOR_TEST_HOOK";
 const daemon_supervisor_test_property =
     std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.DaemonSupervisorState");
+
+const WorkspaceKeyRoute = union(enum) {
+    action: InputRouter.Action,
+    copy_terminal_selection,
+    paste_clipboard_text,
+};
+
+fn terminalPasteFailureStatus(err: anyerror) []const u8 {
+    if (err == error.TerminalPasteRequiresConfirmation) {
+        return "Terminal blocked unsafe clipboard text; paste a single line to continue";
+    }
+    if (err == error.TerminalClipboardUnavailable) return "Terminal clipboard is unavailable";
+    return "Unable to paste clipboard text";
+}
+
 extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
 
 fn workspaceUser(allocator: std.mem.Allocator) ![]u8 {
@@ -4717,11 +4733,56 @@ pub const App = struct {
 
     fn onWorkspaceKey(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool) callconv(.c) void {
         const app: *App = @ptrCast(@alignCast(context.?));
-        app.dispatchWorkspaceKey(key, ctrl, shift);
+        app.handleWorkspaceKeyRoute(App.dispatchWorkspaceKey(key, ctrl, shift, true));
     }
 
-    fn dispatchWorkspaceKey(self: *App, key: usize, ctrl: bool, shift: bool) void {
-        self.handleAction(InputRouter.keyAction(key, ctrl, shift));
+    fn dispatchWorkspaceKey(key: usize, ctrl: bool, shift: bool, terminal_context_active: bool) WorkspaceKeyRoute {
+        if (terminal_context_active and ctrl and shift) {
+            if (key == 'C') return .copy_terminal_selection;
+            if (key == 'V') return .paste_clipboard_text;
+        }
+        return .{ .action = InputRouter.keyAction(key, ctrl, shift) };
+    }
+
+    fn handleWorkspaceKeyRoute(self: *App, route: WorkspaceKeyRoute) void {
+        switch (route) {
+            .action => |action| self.handleAction(action),
+            .copy_terminal_selection => self.copyTerminalSelection(),
+            .paste_clipboard_text => self.pasteClipboardText(),
+        }
+    }
+
+    fn copyTerminalSelection(self: *App) void {
+        const workspace = self.workspace orelse return;
+        const selection = workspace.copySelection(self.allocator) catch |err| {
+            std.log.warn("Unable to read terminal selection for clipboard: {s}", .{@errorName(err)});
+            self.setStatus("Unable to copy terminal selection");
+            return;
+        } orelse {
+            self.setStatus("No terminal selection to copy");
+            return;
+        };
+        defer self.allocator.free(selection);
+        Clipboard.writeText(self.window.hwnd, self.allocator, selection) catch |err| {
+            std.log.warn("Unable to write terminal selection to Windows clipboard: {s}", .{@errorName(err)});
+            self.setStatus("Unable to copy terminal selection");
+            return;
+        };
+        self.setStatus("Terminal selection copied");
+    }
+
+    fn pasteClipboardText(self: *App) void {
+        const workspace = self.workspace orelse return;
+        const text = Clipboard.readText(self.window.hwnd, self.allocator) catch |err| {
+            std.log.warn("Unable to read Windows clipboard for terminal paste: {s}", .{@errorName(err)});
+            self.setStatus("Unable to paste clipboard text");
+            return;
+        };
+        defer self.allocator.free(text);
+        workspace.pasteText(text) catch |err| {
+            std.log.warn("Unable to paste clipboard text into terminal: {s}", .{@errorName(err)});
+            self.setStatus(terminalPasteFailureStatus(err));
+        };
     }
 
     fn toggleWorkspacePanelState(self: *App) void {
@@ -6360,7 +6421,10 @@ fn workspaceCycleTarget(items: []const WorkspaceLifecycle.Workspace, current_ide
 
 fn fallbackKeyAction(key: usize, ctrl: bool, shift: bool, alt: bool) InputRouter.Action {
     if (alt and (key == c.VK_PRIOR or key == c.VK_NEXT)) return .none;
-    return InputRouter.keyAction(key, ctrl, shift);
+    return switch (App.dispatchWorkspaceKey(key, ctrl, shift, false)) {
+        .action => |action| action,
+        .copy_terminal_selection, .paste_clipboard_text => InputRouter.keyAction(key, ctrl, shift),
+    };
 }
 
 fn onDaemonFrame(
@@ -8367,6 +8431,43 @@ test "workspace running cycle never launches a closed workspace" {
     Probe.launches = 0;
     _ = try cycleWorkspaceWith(Probe, std.testing.allocator, "C:\\fixture\\.graphcode-alpha", "c:/fixture/.graphcode-alpha", 1);
     try std.testing.expectEqual(@as(usize, 0), Probe.launches);
+}
+
+test "App.dispatchWorkspaceKey routes clipboard shortcuts only with terminal context" {
+    const copy_active = App.dispatchWorkspaceKey('C', true, true, true);
+    try std.testing.expectEqual(
+        std.meta.Tag(WorkspaceKeyRoute).copy_terminal_selection,
+        std.meta.activeTag(copy_active),
+    );
+    const paste_active = App.dispatchWorkspaceKey('V', true, true, true);
+    try std.testing.expectEqual(
+        std.meta.Tag(WorkspaceKeyRoute).paste_clipboard_text,
+        std.meta.activeTag(paste_active),
+    );
+
+    const copy_inactive = App.dispatchWorkspaceKey('C', true, true, false);
+    try std.testing.expectEqual(
+        std.meta.Tag(WorkspaceKeyRoute).action,
+        std.meta.activeTag(copy_inactive),
+    );
+    try std.testing.expectEqual(InputRouter.Action.clone_repository, copy_inactive.action);
+    const paste_inactive = App.dispatchWorkspaceKey('V', true, true, false);
+    try std.testing.expectEqual(InputRouter.Action.none, paste_inactive.action);
+    try std.testing.expectEqual(
+        InputRouter.Action.clone_repository,
+        fallbackKeyAction('C', true, true, false),
+    );
+}
+
+test "terminalPasteFailureStatus exposes provider paste safety rejections" {
+    try std.testing.expectEqualStrings(
+        "Terminal blocked unsafe clipboard text; paste a single line to continue",
+        terminalPasteFailureStatus(error.TerminalPasteRequiresConfirmation),
+    );
+    try std.testing.expectEqualStrings(
+        "Terminal clipboard is unavailable",
+        terminalPasteFailureStatus(error.TerminalClipboardUnavailable),
+    );
 }
 
 test "workspace cycle keyboard fallback never turns Alt paging into terminal tabs" {
