@@ -99,7 +99,13 @@ pub const MenuState = struct {
     /// At least one reclaimable worktree row is currently selected, either in
     /// the Worktrees dialog or via the sidebar's single-selection shortcut.
     worktree_row_selected: bool,
+    has_jump_target: bool,
+    can_navigate_loops: bool,
+    can_create_edge: bool,
+    has_selected_loop: bool,
     has_workspace: bool,
+    can_cycle_tabs: bool,
+    can_cycle_panes: bool,
     has_attention: bool,
     can_close_tab: bool,
     sidebar_visible: bool,
@@ -608,22 +614,22 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState, refresh: MenuRefresh) void {
     setEnabled(hwnd, .reveal_worktree, state.can_worktrees and state.worktree_row_selected);
     setEnabled(hwnd, .edit_worktree_policy, state.can_worktrees);
     setEnabled(hwnd, .save_worktree_policy, state.can_worktrees and state.worktree_dialog_open);
-    setEnabled(hwnd, .jump_loop, state.has_project);
+    setEnabled(hwnd, .jump_loop, state.has_jump_target);
     setEnabled(hwnd, .review_attention, state.has_attention);
-    setEnabled(hwnd, .next_loop, state.has_project);
-    setEnabled(hwnd, .previous_loop, state.has_project);
+    setEnabled(hwnd, .next_loop, state.can_navigate_loops);
+    setEnabled(hwnd, .previous_loop, state.can_navigate_loops);
     setEnabled(hwnd, .create_node, state.has_project);
-    setEnabled(hwnd, .create_edge, state.has_project);
-    setEnabled(hwnd, .stop_loop, state.has_project);
+    setEnabled(hwnd, .create_edge, state.can_create_edge);
+    setEnabled(hwnd, .stop_loop, state.has_selected_loop);
     setEnabled(hwnd, .show_graph, state.has_workspace);
     setEnabled(hwnd, .new_tab, state.has_workspace);
     setEnabled(hwnd, .close_tab, state.can_close_tab);
     setEnabled(hwnd, .split_right, state.has_workspace);
     setEnabled(hwnd, .split_down, state.has_workspace);
-    setEnabled(hwnd, .next_tab, state.has_workspace);
-    setEnabled(hwnd, .previous_tab, state.has_workspace);
-    setEnabled(hwnd, .focus_next_pane, state.has_workspace);
-    setEnabled(hwnd, .focus_previous_pane, state.has_workspace);
+    setEnabled(hwnd, .next_tab, state.can_cycle_tabs);
+    setEnabled(hwnd, .previous_tab, state.can_cycle_tabs);
+    setEnabled(hwnd, .focus_next_pane, state.can_cycle_panes);
+    setEnabled(hwnd, .focus_previous_pane, state.can_cycle_panes);
     setEnabled(hwnd, .settings, true);
     setEnabled(hwnd, .product_settings, true);
     setEnabled(hwnd, .reconnect, true);
@@ -635,6 +641,10 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState, refresh: MenuRefresh) void {
     setChecked(hwnd, .toggle_workspace, state.workspace_visible);
     setChecked(hwnd, .toggle_activity, state.activity_visible);
     if (redrawsMenuBar(refresh)) _ = c.DrawMenuBar(hwnd);
+}
+
+pub fn loopNavigationAvailable(loop_count: usize, selected_index: ?usize) bool {
+    return loop_count > 1 or (loop_count == 1 and selected_index == null);
 }
 
 fn workspaceCycleAvailable(workspaces: []const WorkspaceItem) bool {
@@ -1614,6 +1624,185 @@ test "workspace cycle keyboard actual accelerator descriptors provide both direc
     }
 }
 
+test "production dispatch delivers IME composition lifecycle to a native EDIT control" {
+    const Probe = struct {
+        var original: c.WNDPROC = null;
+        var messages: [3]c.UINT = undefined;
+        var count: usize = 0;
+
+        fn editProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.c) c.LRESULT {
+            if (message == c.WM_IME_STARTCOMPOSITION or
+                message == c.WM_IME_COMPOSITION or
+                message == c.WM_IME_ENDCOMPOSITION)
+            {
+                messages[count] = message;
+                count += 1;
+            }
+            return c.CallWindowProcW(original, hwnd, message, wparam, lparam);
+        }
+    };
+    Probe.count = 0;
+    const parent = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+        std.unicode.utf8ToUtf16LeStringLiteral("IME dispatch test"),
+        c.WS_OVERLAPPED,
+        0,
+        0,
+        320,
+        120,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(parent);
+    const edit = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("EDIT"),
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        c.WS_CHILD | c.ES_AUTOHSCROLL,
+        0,
+        0,
+        280,
+        24,
+        parent,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.EditCreationFailed;
+    const previous = c.SetWindowLongPtrW(
+        edit,
+        c.GWLP_WNDPROC,
+        @bitCast(@intFromPtr(&Probe.editProc)),
+    );
+    if (previous == 0) return error.EditSubclassFailed;
+    Probe.original = @ptrFromInt(@as(usize, @bitCast(previous)));
+
+    var window = Window{ .hwnd = parent };
+    var message = std.mem.zeroes(c.MSG);
+    message.hwnd = edit;
+    for ([_]struct { kind: c.UINT, lparam: c.LPARAM }{
+        .{ .kind = c.WM_IME_STARTCOMPOSITION, .lparam = 0 },
+        .{ .kind = c.WM_IME_COMPOSITION, .lparam = 0x0008 },
+        .{ .kind = c.WM_IME_ENDCOMPOSITION, .lparam = 0 },
+    }) |expected| {
+        message.message = expected.kind;
+        message.lParam = expected.lparam;
+        window.dispatchMessage(&message, .{}, edit);
+    }
+    try std.testing.expectEqualSlices(c.UINT, &.{
+        c.WM_IME_STARTCOMPOSITION,
+        c.WM_IME_COMPOSITION,
+        c.WM_IME_ENDCOMPOSITION,
+    }, Probe.messages[0..Probe.count]);
+}
+
+test "production dispatch preserves dead-key composition and non-US physical-key mapping" {
+    const Probe = struct {
+        var dead_chars: [4]u16 = undefined;
+        var dead_count: usize = 0;
+        var chars: [8]u16 = undefined;
+        var char_count: usize = 0;
+
+        fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.c) c.LRESULT {
+            switch (message) {
+                c.WM_DEADCHAR => {
+                    dead_chars[dead_count] = @truncate(wparam);
+                    dead_count += 1;
+                    return 0;
+                },
+                c.WM_CHAR => {
+                    chars[char_count] = @truncate(wparam);
+                    char_count += 1;
+                    return 0;
+                },
+                else => return c.DefWindowProcW(hwnd, message, wparam, lparam),
+            }
+        }
+
+        fn reset() void {
+            dead_count = 0;
+            char_count = 0;
+        }
+    };
+    const test_class = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeKeyboardLayoutDispatchTest");
+    var window_class = std.mem.zeroes(c.WNDCLASSW);
+    window_class.hInstance = c.GetModuleHandleW(null);
+    window_class.lpszClassName = test_class;
+    window_class.lpfnWndProc = &Probe.windowProc;
+    if (c.RegisterClassW(&window_class) == 0) return error.WindowClassRegistrationFailed;
+    defer _ = c.UnregisterClassW(test_class, window_class.hInstance);
+    const hwnd = c.CreateWindowExW(
+        0,
+        test_class,
+        std.unicode.utf8ToUtf16LeStringLiteral("Keyboard layout dispatch test"),
+        c.WS_OVERLAPPED,
+        0,
+        0,
+        320,
+        120,
+        null,
+        null,
+        window_class.hInstance,
+        null,
+    ) orelse return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+
+    const original_layout = c.GetKeyboardLayout(0);
+    defer _ = c.ActivateKeyboardLayout(original_layout, 0);
+    var original_keyboard_state: [256]u8 = undefined;
+    if (c.GetKeyboardState(&original_keyboard_state) == 0) return error.KeyboardStateUnavailable;
+    defer _ = c.SetKeyboardState(&original_keyboard_state);
+    var clear_keyboard_state = [_]u8{0} ** 256;
+    if (c.SetKeyboardState(&clear_keyboard_state) == 0) return error.KeyboardStateUnavailable;
+
+    var window = Window{ .hwnd = hwnd };
+    const Dispatch = struct {
+        fn key(target: *Window, target_hwnd: c.HWND, layout: c.HKL, scan_code: u32) !void {
+            const virtual_key = c.MapVirtualKeyExW(scan_code, c.MAPVK_VSC_TO_VK_EX, layout);
+            if (virtual_key == 0) return error.VirtualKeyMappingUnavailable;
+            var message = std.mem.zeroes(c.MSG);
+            message.hwnd = target_hwnd;
+            message.message = c.WM_KEYDOWN;
+            message.wParam = virtual_key;
+            message.lParam = @intCast(1 | (scan_code << 16));
+            target.dispatchMessage(&message, .{}, target_hwnd);
+            while (c.PeekMessageW(&message, target_hwnd, c.WM_KEYFIRST, c.WM_KEYLAST, c.PM_REMOVE) != 0) {
+                target.dispatchMessage(&message, .{}, target_hwnd);
+            }
+        }
+    };
+
+    const international = c.LoadKeyboardLayoutW(
+        std.unicode.utf8ToUtf16LeStringLiteral("00020409"),
+        c.KLF_NOTELLSHELL,
+    ) orelse {
+        std.log.warn("skipping keyboard composition test: US-International layout is unavailable", .{});
+        return error.SkipZigTest;
+    };
+    defer _ = c.UnloadKeyboardLayout(international);
+    if (c.ActivateKeyboardLayout(international, 0) == null) return error.KeyboardLayoutActivationFailed;
+    Probe.reset();
+    try Dispatch.key(&window, hwnd, international, 0x28);
+    try std.testing.expectEqual(@as(usize, 1), Probe.dead_count);
+    try Dispatch.key(&window, hwnd, international, 0x12);
+    try std.testing.expectEqualSlices(u16, &.{0x00e9}, Probe.chars[0..Probe.char_count]);
+
+    const french = c.LoadKeyboardLayoutW(
+        std.unicode.utf8ToUtf16LeStringLiteral("0000040c"),
+        c.KLF_NOTELLSHELL,
+    ) orelse {
+        std.log.warn("skipping keyboard composition test: French layout is unavailable", .{});
+        return error.SkipZigTest;
+    };
+    defer _ = c.UnloadKeyboardLayout(french);
+    if (c.ActivateKeyboardLayout(french, 0) == null) return error.KeyboardLayoutActivationFailed;
+    Probe.reset();
+    try Dispatch.key(&window, hwnd, french, 0x10);
+    try std.testing.expectEqualSlices(u16, &.{'a'}, Probe.chars[0..Probe.char_count]);
+}
+
 test "workspace cycle keyboard pretranslation consumes owned normal and system keys before child dispatch" {
     const Probe = struct {
         direction: ?isize = null,
@@ -1944,6 +2133,92 @@ fn expectDisabledWorkspaceCommand(menu: c.HMENU, command: Command) !void {
     const state = c.GetMenuState(menu, @intFromEnum(command), c.MF_BYCOMMAND);
     try std.testing.expect(state != std.math.maxInt(c.UINT));
     try std.testing.expect(state & c.MF_GRAYED != 0);
+}
+
+fn expectEnabledNativeMenuCommand(menu: c.HMENU, command: Command) !void {
+    const state = c.GetMenuState(menu, @intFromEnum(command), c.MF_BYCOMMAND);
+    try std.testing.expect(state != std.math.maxInt(c.UINT));
+    try std.testing.expect(state & c.MF_GRAYED == 0);
+}
+
+test "updateMenu applies loop and terminal capabilities to a real HMENU" {
+    const hwnd = try hiddenWorkspaceTestWindow();
+    defer _ = c.DestroyWindow(hwnd);
+    try installMenu(hwnd);
+    const menu = c.GetMenu(hwnd);
+    var state = MenuState{
+        .has_project = true,
+        .can_worktrees = false,
+        .worktree_dialog_open = false,
+        .worktree_row_selected = false,
+        .has_jump_target = false,
+        .can_navigate_loops = false,
+        .can_create_edge = false,
+        .has_selected_loop = false,
+        .has_workspace = true,
+        .can_cycle_tabs = false,
+        .can_cycle_panes = false,
+        .has_attention = false,
+        .can_close_tab = false,
+        .sidebar_visible = false,
+        .workspace_visible = false,
+        .activity_visible = false,
+        .update_checking = false,
+    };
+
+    updateMenu(hwnd, state, .state_change);
+    for ([_]Command{
+        .jump_loop,
+        .next_loop,
+        .previous_loop,
+        .create_edge,
+        .stop_loop,
+        .next_tab,
+        .previous_tab,
+        .focus_next_pane,
+        .focus_previous_pane,
+    }) |command| try expectDisabledWorkspaceCommand(menu, command);
+
+    state.has_jump_target = true;
+    state.can_create_edge = true;
+    state.has_selected_loop = true;
+    state.can_cycle_tabs = true;
+    state.can_cycle_panes = true;
+    for ([_]Command{
+        .jump_loop,
+        .create_edge,
+        .stop_loop,
+        .next_tab,
+        .previous_tab,
+        .focus_next_pane,
+        .focus_previous_pane,
+    }) |command| {
+        updateMenu(hwnd, state, .state_change);
+        try expectEnabledNativeMenuCommand(menu, command);
+    }
+
+    const navigation_cases = [_]struct {
+        loop_count: usize,
+        selected_index: ?usize,
+        enabled: bool,
+    }{
+        .{ .loop_count = 0, .selected_index = null, .enabled = false },
+        .{ .loop_count = 1, .selected_index = null, .enabled = true },
+        .{ .loop_count = 1, .selected_index = 0, .enabled = false },
+        .{ .loop_count = 2, .selected_index = null, .enabled = true },
+        .{ .loop_count = 2, .selected_index = 1, .enabled = true },
+    };
+    for (navigation_cases) |case| {
+        state.can_navigate_loops = loopNavigationAvailable(case.loop_count, case.selected_index);
+        updateMenu(hwnd, state, .state_change);
+        for ([_]Command{ .next_loop, .previous_loop }) |command| {
+            if (case.enabled) {
+                try expectEnabledNativeMenuCommand(menu, command);
+            } else {
+                try expectDisabledWorkspaceCommand(menu, command);
+            }
+        }
+    }
 }
 
 test "workspace menu checks the exact command and retains target labels and enablement" {

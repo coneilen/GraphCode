@@ -447,6 +447,83 @@ test "sketch promotion real menu plan exposes only three eligible target actions
     }
 }
 
+test "sketch promotion production popup installs native Goal Turn Timed submenu on hidden HWND" {
+    const hwnd = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+        std.unicode.utf8ToUtf16LeStringLiteral("Promotion menu test"),
+        c.WS_OVERLAPPEDWINDOW,
+        0,
+        0,
+        0,
+        0,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+
+    const context = SketchPromotion.Context{};
+    const cases = [_]struct { sketch: bool, context: ?*const SketchPromotion.Context, enabled: bool }{
+        .{ .sketch = false, .context = null, .enabled = false },
+        .{ .sketch = true, .context = null, .enabled = false },
+        .{ .sketch = true, .context = &context, .enabled = true },
+    };
+    for (cases) |case| {
+        const popup = buildMenu(.{ .node = .{
+            .project_path = "C:\\fixture",
+            .id = "sketch-a",
+            .sketch = case.sketch,
+            .promotion_context = case.context,
+        } }) orelse return error.MenuCreationFailed;
+        const bar = c.CreateMenu() orelse {
+            _ = c.DestroyMenu(popup);
+            return error.MenuCreationFailed;
+        };
+        defer {
+            _ = c.SetMenu(hwnd, null);
+            _ = c.DestroyMenu(bar);
+        }
+        if (c.AppendMenuW(bar, c.MF_POPUP | c.MF_STRING, @intFromPtr(popup), std.unicode.utf8ToUtf16LeStringLiteral("Node").ptr) == 0) {
+            _ = c.DestroyMenu(popup);
+            return error.MenuInstallFailed;
+        }
+        if (c.SetMenu(hwnd, bar) == 0) return error.MenuInstallFailed;
+        const menu = c.GetSubMenu(c.GetMenu(hwnd), 0);
+        try std.testing.expect(menu != null);
+        var edit_position: c_int = 0;
+        while (edit_position < c.GetMenuItemCount(menu) and c.GetMenuItemID(menu, edit_position) != ids.edit_node) : (edit_position += 1) {}
+        try std.testing.expect(edit_position < c.GetMenuItemCount(menu));
+        const submenu = c.GetSubMenu(menu, edit_position + 1);
+        if (!case.sketch) {
+            try std.testing.expect(submenu == null);
+            for ([_]c.UINT{ 5116, 5117, 5118 }) |id|
+                try std.testing.expectEqual(std.math.maxInt(c.UINT), c.GetMenuState(menu, id, c.MF_BYCOMMAND));
+            continue;
+        }
+        try std.testing.expect(submenu != null);
+        var title: [64]u16 = undefined;
+        const title_len = c.GetMenuStringW(menu, @intCast(edit_position + 1), &title, title.len, c.MF_BYPOSITION);
+        try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("Promote to..."), title[0..@intCast(title_len)]);
+        try std.testing.expectEqual(@as(c_int, 3), c.GetMenuItemCount(submenu));
+        for ([_]struct { id: c.UINT, label: []const u16, action: Action }{
+            .{ .id = 5116, .label = std.unicode.utf8ToUtf16LeStringLiteral("Goal - asks for a done check"), .action = .promote_goal },
+            .{ .id = 5117, .label = std.unicode.utf8ToUtf16LeStringLiteral("Turn - asks where to pause"), .action = .promote_turn },
+            .{ .id = 5118, .label = std.unicode.utf8ToUtf16LeStringLiteral("Timed - asks for a cadence"), .action = .promote_timed },
+        }, 0..) |item, index| {
+            try std.testing.expectEqual(item.id, c.GetMenuItemID(submenu, @intCast(index)));
+            const state = c.GetMenuState(submenu, item.id, c.MF_BYCOMMAND);
+            try std.testing.expect(state != std.math.maxInt(c.UINT));
+            try std.testing.expectEqual(case.enabled, state & c.MF_GRAYED == 0);
+            var label: [64]u16 = undefined;
+            const length = c.GetMenuStringW(submenu, item.id, &label, label.len, c.MF_BYCOMMAND);
+            try std.testing.expectEqualSlices(u16, item.label, label[0..@intCast(length)]);
+            try std.testing.expectEqual(item.action, actionForCommand(@intCast(item.id)));
+        }
+    }
+}
+
 test "background menu exposes supported folder actions and gates edge creation" {
     const menu = buildMenu(.{ .background = .{
         .project_path = "C:\\fixture",

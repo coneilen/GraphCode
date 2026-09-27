@@ -604,6 +604,28 @@ Invoke-Native "Terminal input queue tests" {
     & $zig test src\TerminalSurface.zig -target x86_64-windows-msvc -lc "-I$include" $terminalVtLib
   } finally { Pop-Location }
 }
+Invoke-Native "Windows clipboard encoding tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  $winghosttyLib = Join-Path $winghosttyRoot "zig-out\lib\winghostty-win32-host.lib"
+  if (-not (Test-Path -LiteralPath $include -PathType Container)) {
+    throw "Winghostty headers are required for clipboard encoding tests."
+  }
+  if (-not (Test-Path -LiteralPath $winghosttyLib -PathType Leaf)) {
+    throw "The pinned Winghostty host library is required for clipboard encoding tests."
+  }
+  Push-Location $shellRoot
+  try {
+    & $zig test src\Clipboard.zig -target x86_64-windows-msvc -lc -luser32 -lkernel32 `
+      "-I$include" $winghosttyLib -lgdi32 -lopengl32 -limm32 -lole32 -loleaut32 `
+      -luiautomationcore -lshell32 -ladvapi32 -lwinhttp
+    if ($LASTEXITCODE -ne 0) { throw "clipboard encoding tests failed" }
+  } finally { Pop-Location }
+}
 Invoke-Native "Graph model executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\GraphModel.zig } finally { Pop-Location }
