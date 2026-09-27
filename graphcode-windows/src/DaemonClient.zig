@@ -181,6 +181,7 @@ pub const DaemonClient = struct {
     fallback_to_v1: bool = false,
     callback: ?EventCallback = null,
     callback_context: ?*anyopaque = null,
+    command_recorder: ?*const fn (*DaemonClient, []const u8) void = recordUiaCommand,
 
     pub fn init(allocator: std.mem.Allocator) !DaemonClient {
         var client = DaemonClient{
@@ -210,6 +211,19 @@ pub const DaemonClient = struct {
 
     pub fn start(self: *DaemonClient) !void {
         self.worker = try std.Thread.spawn(.{}, workerMain, .{self});
+    }
+
+    pub fn initForTesting(allocator: std.mem.Allocator) !DaemonClient {
+        if (!@import("builtin").is_test) @compileError("test-only client construction");
+        var client = DaemonClient{
+            .allocator = allocator,
+            .frame_buffer = try FrameBuffer.init(allocator, .v2),
+            .client_id = "00000000-0000-4000-8000-000000000001".*,
+            .command_recorder = null,
+        };
+        errdefer client.frame_buffer.deinit();
+        client.pipe_name = try allocator.dupe(u8, "\\\\.\\pipe\\edge-edit-inert");
+        return client;
     }
 
     pub fn deinit(self: *DaemonClient) void {
@@ -607,6 +621,21 @@ pub const DaemonClient = struct {
         self.sendCommand(command);
     }
 
+    pub fn sendUpdateEdge(
+        self: *DaemonClient,
+        project_path: []const u8,
+        edge_id: []const u8,
+        from: []const u8,
+        to: []const u8,
+        expected: Forms.EdgeConfiguration,
+        replacement: Forms.EdgeConfiguration,
+        subgraph_address: []const u8,
+    ) !void {
+        if (!std.mem.eql(u8, self.subgraph_node_id, subgraph_address)) return error.StaleScope;
+        const command = try Wire.commandGraphUpdateEdge(self.allocator, project_path, edge_id, from, to, expected, replacement);
+        try self.sendCommandChecked(command);
+    }
+
     pub fn sendPilotComposite(self: *DaemonClient, project_path: []const u8, node_id: []const u8) void {
         const command = Wire.commandGraphPilotComposite(self.allocator, project_path, node_id) catch return;
         self.sendCommand(command);
@@ -738,6 +767,10 @@ pub const DaemonClient = struct {
     }
 
     fn sendCommand(self: *DaemonClient, command_json: []u8) void {
+        self.sendCommandChecked(command_json) catch {};
+    }
+
+    fn sendCommandChecked(self: *DaemonClient, command_json: []u8) !void {
         var addressed = command_json;
         if (self.subgraph_node_id.len != 0 and
             std.mem.indexOf(u8, command_json, "\"graphCommand\"") != null)
@@ -746,21 +779,21 @@ pub const DaemonClient = struct {
                 self.allocator,
                 command_json,
                 self.subgraph_node_id,
-            ) catch {
+            ) catch |err| {
                 self.allocator.free(command_json);
                 self.mutex.lock();
                 self.last_error = "unable to address composite graph command";
                 self.mutex.unlock();
-                return;
+                return err;
             };
             self.allocator.free(command_json);
         }
-        self.recordUiaCommand(addressed);
-        _ = self.sendCommandInternal(addressed, null);
+        if (self.command_recorder) |record| record(self, addressed);
+        if (!self.sendCommandInternal(addressed, null)) return error.OutboundQueueRejected;
     }
 
     fn sendCommandWithRequestID(self: *DaemonClient, command_json: []u8, request_id: [36]u8) bool {
-        self.recordUiaCommand(command_json);
+        if (self.command_recorder) |record| record(self, command_json);
         return self.sendCommandInternal(command_json, request_id);
     }
 

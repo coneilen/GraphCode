@@ -608,6 +608,91 @@ pub fn commandGraphDeleteEdge(
     });
 }
 
+fn encodeEdgeConfiguration(allocator: std.mem.Allocator, spec: Forms.EdgeConfiguration) ![]u8 {
+    const kind = try quoteJson(allocator, spec.kind);
+    defer allocator.free(kind);
+    const condition = try quoteJson(allocator, spec.condition);
+    defer allocator.free(condition);
+    const transform = if (std.mem.eql(u8, spec.transform_kind, "none"))
+        try allocator.dupe(u8, "{\"none\":{}}")
+    else blk: {
+        if (!std.mem.eql(u8, spec.transform_kind, "template") and !std.mem.eql(u8, spec.transform_kind, "script"))
+            return error.UnsupportedEdgeConfiguration;
+        const value = try quoteJson(allocator, spec.transform_value);
+        defer allocator.free(value);
+        break :blk try std.fmt.allocPrint(allocator, "{{\"{s}\":{{\"_0\":{s}}}}}", .{ spec.transform_kind, value });
+    };
+    defer allocator.free(transform);
+    const guard = if (spec.guard) |value|
+        try std.json.Stringify.valueAlloc(allocator, .{
+            .maxIterations = value.max_iterations,
+            .until = value.until,
+            .stopAfterPassesWithoutImprovement = value.stop_after_passes,
+        }, .{})
+    else
+        try allocator.dupe(u8, "null");
+    defer allocator.free(guard);
+    const spawn = if (spec.spawn_target) |path| try quoteJson(allocator, path) else try allocator.dupe(u8, "null");
+    defer allocator.free(spawn);
+    return std.fmt.allocPrint(allocator,
+        "{{\"kind\":{s},\"condition\":{s},\"payloadTransform\":{s},\"cycleGuard\":{s},\"spawnTargetProjectPath\":{s}}}",
+        .{ kind, condition, transform, guard, spawn });
+}
+
+pub fn commandGraphUpdateEdge(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    edge_id: []const u8,
+    from: []const u8,
+    to: []const u8,
+    expected: Forms.EdgeConfiguration,
+    replacement: Forms.EdgeConfiguration,
+) ![]u8 {
+    const path = try quoteJson(allocator, project_path);
+    defer allocator.free(path);
+    const id = try quoteJson(allocator, edge_id);
+    defer allocator.free(id);
+    const source = try quoteJson(allocator, from);
+    defer allocator.free(source);
+    const target = try quoteJson(allocator, to);
+    defer allocator.free(target);
+    const initial = try encodeEdgeConfiguration(allocator, expected);
+    defer allocator.free(initial);
+    const spec = try encodeEdgeConfiguration(allocator, replacement);
+    defer allocator.free(spec);
+    return std.fmt.allocPrint(allocator,
+        "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"updateEdge\":{{\"id\":{s},\"from\":{s},\"to\":{s},\"expectedSpec\":{s},\"spec\":{s}}}}}}}}}",
+        .{ path, id, source, target, initial, spec });
+}
+
+test "edge editing wire: checked update matches typed Swift payload and both envelopes" {
+    const allocator = std.testing.allocator;
+    const expected = Forms.EdgeConfiguration{
+        .kind = "handoff", .condition = "onFailure", .transform_kind = "template",
+        .transform_value = "quoted \"payload\" \xe2\x98\x83",
+        .guard = .{ .max_iterations = null, .until = null, .stop_after_passes = null },
+        .spawn_target = "",
+    };
+    var replacement = expected;
+    replacement.kind = "message";
+    const command = try commandGraphUpdateEdge(allocator, "A",
+        "33333333-3333-4333-8333-333333333333",
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222", expected, replacement);
+    defer allocator.free(command);
+    try std.testing.expectEqualStrings(
+        "{\"graphCommand\":{\"projectPath\":\"A\",\"command\":{\"updateEdge\":{\"id\":\"33333333-3333-4333-8333-333333333333\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"expectedSpec\":{\"kind\":\"handoff\",\"condition\":\"onFailure\",\"payloadTransform\":{\"template\":{\"_0\":\"quoted \\\"payload\\\" \xe2\x98\x83\"}},\"cycleGuard\":{\"maxIterations\":null,\"until\":null,\"stopAfterPassesWithoutImprovement\":null},\"spawnTargetProjectPath\":\"\"},\"spec\":{\"kind\":\"message\",\"condition\":\"onFailure\",\"payloadTransform\":{\"template\":{\"_0\":\"quoted \\\"payload\\\" \xe2\x98\x83\"}},\"cycleGuard\":{\"maxIterations\":null,\"until\":null,\"stopAfterPassesWithoutImprovement\":null},\"spawnTargetProjectPath\":\"\"}}}}}",
+        command);
+    const legacy = try v1Command(allocator, command);
+    defer allocator.free(legacy);
+    try std.testing.expectEqualStrings(command, legacy);
+    const request = try v2Request(allocator, "00000000-0000-4000-8000-000000000001", command);
+    defer allocator.free(request);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, request, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("command").?.object.get("graphCommand").?.object.get("command").?.object.contains("updateEdge"));
+}
+
 
 pub fn commandGraphPilotComposite(allocator: std.mem.Allocator, project_path: []const u8, node_id: []const u8) ![]u8 {
     return graphUnaryUUID(allocator, project_path, "pilotComposite", node_id);
