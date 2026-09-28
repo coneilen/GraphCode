@@ -1891,7 +1891,7 @@ public actor GraphStore {
           ? "update refused: nothing in it applies to a main loop — give it a shape "
             + "first with `graphcode node promote`"
           : "update refused: nothing in it applies to a \(node.loopType) loop"
-            + (Self.retypeTarget(of: node.loopType) == nil
+            + (node.loopType.retypeTarget == nil
               ? "" : " — change its type with `graphcode node promote`"))
       return
     }
@@ -1961,7 +1961,7 @@ public actor GraphStore {
     }
     let source = node.loopType
     let retypes = source != .sketch
-    guard !retypes || Self.retypeTarget(of: source) == promotion.targetType else {
+    guard !retypes || source.retypeTarget == promotion.targetType else {
       announceError(
         "promotion refused: \(node.title) is a \(source) loop — a main loop takes any shape, "
           + "a goal loop can become time-based, and a time-based loop a goal loop")
@@ -2094,18 +2094,6 @@ public actor GraphStore {
     Task {
       await self.deliverRetype(
         nodeID, messages: Self.retypeMessages(for: node, from: source, formerGoal: formerGoal))
-    }
-  }
-
-  /// The one other shape each committed type can take. Goal and time are each other's
-  /// only destination because they are the two unattended types: the session keeps
-  /// running and only what ends it changes. Turn waits on a human and composite is a
-  /// sub-graph, so neither is one decision away from anything.
-  static func retypeTarget(of source: LoopType) -> LoopType? {
-    switch source {
-    case .goalBased: .timeBased
-    case .timeBased: .goalBased
-    case .sketch, .turnBased, .composite: nil
     }
   }
 

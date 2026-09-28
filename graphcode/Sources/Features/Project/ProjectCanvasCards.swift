@@ -114,6 +114,11 @@ extension ProjectCanvasView {
         }
       }
     }
+    if let target = node.loopType.retypeTarget, node.state != .stopped {
+      Button("Change to \(target.displayName)…") {
+        store.send(.promoteNodeRequested(node.id, to: target))
+      }
+    }
     // Available on a resolved loop too: a finished loop is still something you read the
     // graph by, and its name is what you read.
     Button("Rename…") { store.send(.renameNodeRequested(node.id)) }

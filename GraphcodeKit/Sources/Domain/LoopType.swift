@@ -40,4 +40,16 @@ public enum LoopType: String, Codable, CaseIterable, Sendable {
   public var runsUnattended: Bool {
     self == .timeBased || self == .goalBased
   }
+
+  /// The one other shape a committed type can take after creation. Goal and time are each
+  /// other's only destination because they are the two unattended types: the session keeps
+  /// running and only what ends it changes. Turn waits on a human and composite is a
+  /// sub-graph, so neither is one decision away from anything.
+  public var retypeTarget: LoopType? {
+    switch self {
+    case .goalBased: .timeBased
+    case .timeBased: .goalBased
+    case .sketch, .turnBased, .composite: nil
+    }
+  }
 }

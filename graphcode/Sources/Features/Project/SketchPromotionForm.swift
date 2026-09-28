@@ -2,7 +2,8 @@ import ComposableArchitecture
 import GraphcodeKit
 import SwiftUI
 
-/// The one-field form a sketch's "Promote to…" opens — never a re-brief.
+/// The one-field form a sketch's "Promote to…" opens — never a re-brief. A goal or time
+/// loop's "Change to…" opens it too, for the other of the two.
 ///
 /// The dialog asks for exactly what the target type needs and a sketch never did:
 /// a done check for Goal, where to pause for Turn, a cadence for Timed. Everything
@@ -14,6 +15,8 @@ struct SketchPromotionForm: View {
   private var node: LoopNode? {
     store.nodePendingPromotion.flatMap { store.graph.nodes[id: $0] }
   }
+
+  private var retypes: Bool { (store.promotionSource ?? .sketch) != .sketch }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
@@ -35,15 +38,24 @@ struct SketchPromotionForm: View {
         RoundedRectangle(cornerRadius: 2.5)
           .fill(store.promotionTarget.accent)
           .frame(width: 9, height: 9)
-        Text("Promote to \(store.promotionTarget.displayName)")
+        Text("\(retypes ? "Change" : "Promote") to \(store.promotionTarget.displayName)")
           .font(.system(size: 16, weight: .semibold))
       }
-      Text(
-        "Keep the session, add a shape — \(node?.title ?? "this loop") stays "
-          + "exactly where it is."
-      )
-      .font(.system(size: 12))
-      .foregroundStyle(.white.opacity(0.45))
+      Text(subtitle)
+        .font(.system(size: 12))
+        .foregroundStyle(.white.opacity(0.45))
+    }
+  }
+
+  private var subtitle: String {
+    let title = node?.title ?? "this loop"
+    switch store.promotionSource {
+    case .goalBased:
+      return "Keep the session, change what ends it — \(title) stops working toward its goal."
+    case .timeBased:
+      return "Keep the session, change what ends it — \(title) stops its cadence."
+    default:
+      return "Keep the session, add a shape — \(title) stays exactly where it is."
     }
   }
 
@@ -71,9 +83,19 @@ struct SketchPromotionForm: View {
         }
       }
     case .timeBased:
+      if store.promotionSource == .goalBased {
+        DraftField(
+          label: "What should each pass do?",
+          help: "Its goal is withdrawn, so each pass needs a task of its own."
+        ) {
+          DraftProseField(
+            placeholder: "check the flake hasn't come back", text: $store.promotionTask)
+        }
+      }
       DraftField(
         label: "How often?",
-        help: "The work it repeats is what the session is already doing."
+        help: store.promotionSource == .goalBased
+          ? nil : "The work it repeats is what the session is already doing."
       ) {
         VStack(alignment: .leading, spacing: 8) {
           Picker("", selection: $store.promotionInterval) {
@@ -108,13 +130,21 @@ struct SketchPromotionForm: View {
         .font(.system(size: 12.5))
         .foregroundStyle(.white.opacity(0.7))
       Spacer(minLength: 8)
-      if store.promotion == nil, store.promotionTarget == .goalBased {
-        Text("Say what done looks like to continue")
+      if store.promotion == nil, let hint = missingFieldHint {
+        Text(hint)
           .font(.system(size: 11.5))
           .foregroundStyle(.white.opacity(0.62))
           .lineLimit(1)
       }
       promoteButton
+    }
+  }
+
+  private var missingFieldHint: String? {
+    switch store.promotionTarget {
+    case .goalBased: "Say what done looks like to continue"
+    case .timeBased: "Say what each pass does to continue"
+    default: nil
     }
   }
 
@@ -124,7 +154,7 @@ struct SketchPromotionForm: View {
       store.send(.promotionConfirmed)
     } label: {
       HStack(spacing: 6) {
-        Text("Promote")
+        Text(retypes ? "Change" : "Promote")
           .font(.system(size: 13, weight: .semibold))
         Text("⏎").font(.system(size: 11, design: .monospaced)).opacity(0.7)
       }
