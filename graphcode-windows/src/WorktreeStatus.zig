@@ -1,4 +1,12 @@
 const std = @import("std");
+const win = std.os.windows;
+
+extern "kernel32" fn GetFileInformationByHandleEx(
+    file: win.HANDLE,
+    information_class: win.FILE_INFO_BY_HANDLE_CLASS,
+    information: *anyopaque,
+    buffer_size: win.DWORD,
+) callconv(.winapi) win.BOOL;
 
 pub const Entry = struct {
     path: []u8,
@@ -7,6 +15,7 @@ pub const Entry = struct {
     size_complete: bool = false,
     size_error: ?anyerror = null,
     primary: bool = false,
+    opened_checkout: bool = false,
     locked: bool = false,
     prunable: bool = false,
     dirty: bool = false,
@@ -266,10 +275,46 @@ pub fn totalSize(entries: []const Entry) SizeCoverage {
     return size;
 }
 
+pub fn noticeSummary(entries: []const Entry) Summary {
+    var result = Summary{};
+    for (entries) |entry| {
+        if (entry.opened_checkout) continue;
+        result.total += 1;
+        if (decision(entry) == .reclaimable) {
+            result.reclaimable += 1;
+        } else if (entry.locked) {
+            result.blocked += 1;
+        }
+    }
+    return result;
+}
+
+pub fn noticeSize(entries: []const Entry) SizeCoverage {
+    var size = SizeCoverage{};
+    for (entries) |entry| {
+        if (entry.opened_checkout or entry.prunable) continue;
+        size.include(entry.sizeCoverage());
+    }
+    return size;
+}
+
+fn roundUpToKiB(size: SizeCoverage) SizeCoverage {
+    if (!size.complete or size.first_error != null) return size;
+    const remainder = size.bytes % 1024;
+    if (remainder == 0) return size;
+    var rounded = size;
+    rounded.bytes = std.math.add(u64, size.bytes, 1024 - remainder) catch |err| {
+        rounded.recordFailure(err);
+        rounded.bytes = std.math.maxInt(u64);
+        return rounded;
+    };
+    return rounded;
+}
+
 pub const NoticeState = enum { below_threshold, notice, indeterminate };
 
 pub fn noticeState(entries: []const Entry, policy: Policy) NoticeState {
-    return evaluateNotice(summarize(entries), totalSize(entries), policy);
+    return evaluateNotice(noticeSummary(entries), noticeSize(entries), policy);
 }
 
 pub fn evaluateNotice(summary: Summary, size: SizeCoverage, policy: Policy) NoticeState {
@@ -297,8 +342,8 @@ pub const NoticeRecord = struct {
     pub fn inspected(inspection: *const Inspection, policy: PolicyOutcome) NoticeRecord {
         return .{
             .observation = .{
-                .summary = summarize(inspection.entries.items),
-                .size = totalSize(inspection.entries.items),
+                .summary = noticeSummary(inspection.entries.items),
+                .size = noticeSize(inspection.entries.items),
             },
             .policy = policy,
         };
@@ -469,7 +514,10 @@ pub fn inspect(
     errdefer allocator.free(default_branch);
     for (entries.items, 0..) |*entry, index| {
         entry.primary = index == 0;
-        entry.setSize(directorySizeResult(directorySize(entry.path)));
+        entry.opened_checkout = try sameWindowsPath(allocator, project_path, entry.path);
+        if (!entry.opened_checkout and !entry.prunable) {
+            entry.setSize(directorySizeResult(directorySize(entry.path)));
+        }
         for (bindings) |binding| {
             if (std.mem.eql(u8, entry.path, binding.path)) {
                 entry.bound_running = true;
@@ -506,6 +554,35 @@ pub fn inspect(
     };
 }
 
+fn allocatedFileSize(file: std.fs.File) anyerror!u64 {
+    var information: win.FILE_STANDARD_INFORMATION = undefined;
+    if (GetFileInformationByHandleEx(
+        file.handle,
+        .FileStandardInfo,
+        @ptrCast(&information),
+        @sizeOf(win.FILE_STANDARD_INFORMATION),
+    ) == 0) {
+        return win.unexpectedError(win.GetLastError());
+    }
+    if (information.AllocationSize < 0) return error.InvalidAllocationSize;
+    return @intCast(information.AllocationSize);
+}
+
+fn resolvedWindowsPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return std.fs.cwd().realpathAlloc(allocator, path) catch |err| switch (err) {
+        error.FileNotFound => std.fs.path.resolveWindows(allocator, &.{path}),
+        else => return err,
+    };
+}
+
+fn sameWindowsPath(allocator: std.mem.Allocator, left: []const u8, right: []const u8) !bool {
+    const resolved_left = try resolvedWindowsPath(allocator, left);
+    defer allocator.free(resolved_left);
+    const resolved_right = try resolvedWindowsPath(allocator, right);
+    defer allocator.free(resolved_right);
+    return std.ascii.eqlIgnoreCase(resolved_left, resolved_right);
+}
+
 fn directorySize(path: []const u8) !SizeCoverage {
     var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
     defer dir.close();
@@ -517,9 +594,15 @@ fn directorySize(path: []const u8) !SizeCoverage {
         return total;
     }) |item| {
         if (item.kind != .file) continue;
-        total.recordFile(if (item.dir.statFile(item.basename)) |stat| stat.size else |err| err);
+        const file = item.dir.openFile(item.basename, .{}) catch |err| {
+            total.recordFile(err);
+            continue;
+        };
+        const bytes = allocatedFileSize(file);
+        file.close();
+        total.recordFile(bytes);
     }
-    return total;
+    return roundUpToKiB(total);
 }
 
 pub fn deinitInspection(allocator: std.mem.Allocator, inspection: *Inspection) void {
@@ -859,34 +942,48 @@ test "worktree notice entry mapping retains incomplete coverage and known byte l
     try std.testing.expectEqual(NoticeState.indeterminate, noticeState(&entries, .{}));
 }
 
-test "worktree notice count boundaries preserve every Windows inspection row" {
+test "worktree notice count boundaries match seven and eight linked rows" {
     var entries = [_]Entry{.{
         .path = @constCast("worktree"),
         .branch = @constCast("topic"),
         .size_complete = true,
-    }} ** 13;
+    }} ** 15;
     entries[0].primary = true;
+    entries[0].opened_checkout = true;
     entries[1].prunable = true;
     entries[2].locked = true;
     entries[3].branch = @constCast("");
     const configured = try decodePolicy(
         \\{"allowReclaim":false,"confirmEachReclaim":true,"onResolveLanded":"keep","noticeSizeGB":4,"noticeCount":12}
     );
-    const cases = [_]struct { policy: Policy, counts: [3]usize }{
-        .{ .policy = .{}, .counts = .{ 7, 8, 9 } },
-        .{ .policy = configured, .counts = .{ 11, 12, 13 } },
+    const cases = [_]struct {
+        policy: Policy,
+        counts: [3]usize,
+        expected: [3]NoticeState,
+    }{
+        .{
+            .policy = .{},
+            .counts = .{ 8, 9, 10 },
+            .expected = .{ .below_threshold, .notice, .notice },
+        },
+        .{
+            .policy = configured,
+            .counts = .{ 11, 12, 13 },
+            .expected = .{ .below_threshold, .below_threshold, .notice },
+        },
     };
     for (cases) |case| {
-        for (case.counts, [_]NoticeState{ .below_threshold, .notice, .notice }) |count, expected| {
-            try std.testing.expectEqual(count, summarize(entries[0..count]).total);
+        for (case.counts, case.expected) |count, expected| {
             try std.testing.expectEqual(expected, noticeState(entries[0..count], case.policy));
         }
     }
+    try std.testing.expectEqual(@as(usize, 0), noticeSummary(entries[0..9]).reclaimable);
 }
 
-test "worktree notice exact byte boundaries use decoded binary GiB policy" {
+test "worktree notice byte boundaries exclude primary and prunable sizes" {
     var entries = [_]Entry{
-        .{ .path = @constCast("primary"), .branch = @constCast("main"), .primary = true, .size_complete = true },
+        .{ .path = @constCast("primary"), .branch = @constCast("main"), .primary = true, .opened_checkout = true, .size_complete = true },
+        .{ .path = @constCast("prunable"), .branch = @constCast("stale"), .prunable = true, .size_complete = true },
         .{ .path = @constCast("linked"), .branch = @constCast("topic"), .size_complete = true },
     };
     const configured = try decodePolicy(
@@ -896,14 +993,114 @@ test "worktree notice exact byte boundaries use decoded binary GiB policy" {
         .{ .policy = .{}, .bytes = .{ 2147483647, 2147483648, 2147483649 } },
         .{ .policy = configured, .bytes = .{ 4294967295, 4294967296, 4294967297 } },
     };
-    entries[0].size_bytes = 1024;
+    entries[0].size_bytes = 512;
+    entries[1].size_bytes = 1024;
     for (cases) |case| {
         for (case.bytes, [_]NoticeState{ .below_threshold, .notice, .notice }) |bytes, expected| {
-            entries[1].size_bytes = bytes - 1024;
-            try std.testing.expectEqual(bytes, totalSize(&entries).bytes);
+            entries[2].size_bytes = bytes;
             try std.testing.expectEqual(expected, noticeState(&entries, case.policy));
         }
     }
+}
+
+test "worktree notice observation counts prunable rows but excludes them from bytes" {
+    const allocator = std.testing.allocator;
+    var inspection = Inspection{
+        .entries = std.array_list.Managed(Entry).init(allocator),
+        .default_branch = try allocator.dupe(u8, "main"),
+        .project_path = try allocator.dupe(u8, "C:\\repo"),
+    };
+    defer deinitInspection(allocator, &inspection);
+    try inspection.entries.append(.{
+        .path = try allocator.dupe(u8, "C:\\repo"),
+        .branch = try allocator.dupe(u8, "main"),
+        .primary = true,
+        .opened_checkout = true,
+        .size_bytes = 5 * 1024 * 1024 * 1024,
+        .size_complete = true,
+    });
+    try inspection.entries.append(.{
+        .path = try allocator.dupe(u8, "C:\\stale"),
+        .branch = try allocator.dupe(u8, "stale"),
+        .prunable = true,
+        .size_bytes = 5 * 1024 * 1024 * 1024,
+        .size_complete = true,
+    });
+    try inspection.entries.append(.{
+        .path = try allocator.dupe(u8, "C:\\linked"),
+        .branch = try allocator.dupe(u8, "topic"),
+        .size_bytes = 1024,
+        .size_complete = true,
+    });
+
+    const record = NoticeRecord.inspected(&inspection, policyReadOutcome(error.FileNotFound));
+    const observation = record.observation.?;
+    try std.testing.expectEqual(@as(usize, 2), observation.summary.total);
+    try std.testing.expectEqual(@as(u64, 1024), observation.size.bytes);
+    try std.testing.expectEqual(NoticeState.below_threshold, record.state());
+}
+
+test "worktree notice receives allocated sizes rounded per worktree to KiB" {
+    const first = roundUpToKiB(.{ .bytes = 1 });
+    const second = roundUpToKiB(.{ .bytes = 1025 });
+    try std.testing.expectEqual(@as(u64, 1024), first.bytes);
+    try std.testing.expectEqual(@as(u64, 2048), second.bytes);
+    const entries = [_]Entry{
+        .{ .path = @constCast("first"), .branch = @constCast("one"), .size_bytes = first.bytes, .size_complete = true },
+        .{ .path = @constCast("second"), .branch = @constCast("two"), .size_bytes = second.bytes, .size_complete = true },
+    };
+    try std.testing.expectEqual(@as(u64, 3072), noticeSize(&entries).bytes);
+}
+
+test "worktree notice directory sizing uses allocated rather than logical file bytes" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.makeDir("worktree");
+    try temporary.dir.writeFile(.{ .sub_path = "worktree\\tiny-file", .data = "x" });
+    const path = try temporary.dir.realpathAlloc(allocator, "worktree");
+    defer allocator.free(path);
+
+    const size = try directorySize(path);
+    try std.testing.expect(size.complete);
+    try std.testing.expect(size.bytes >= 1024);
+    try std.testing.expectEqual(@as(u64, 0), size.bytes % 1024);
+}
+
+test "inspection identifies the opened checkout by path, not list order" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.makeDir("repository");
+    const root = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const repository_path = try std.fs.path.join(allocator, &.{ root, "repository" });
+    defer allocator.free(repository_path);
+    const opened_path = try std.fs.path.join(allocator, &.{ root, "opened" });
+    defer allocator.free(opened_path);
+
+    const init = try runGit(allocator, &.{ "git", "-C", repository_path, "init", "--quiet", "-b", "main" });
+    allocator.free(init.output);
+    const name = try runGit(allocator, &.{ "git", "-C", repository_path, "config", "user.name", "GraphCode Test" });
+    allocator.free(name.output);
+    const email = try runGit(allocator, &.{ "git", "-C", repository_path, "config", "user.email", "graphcode-test@example.invalid" });
+    allocator.free(email.output);
+    try temporary.dir.writeFile(.{ .sub_path = "repository\\tracked.txt", .data = "tracked" });
+    const add = try runGit(allocator, &.{ "git", "-C", repository_path, "add", "tracked.txt" });
+    allocator.free(add.output);
+    const commit = try runGit(allocator, &.{ "git", "-C", repository_path, "commit", "--quiet", "-m", "initial" });
+    allocator.free(commit.output);
+    const worktree = try runGit(allocator, &.{ "git", "-C", repository_path, "worktree", "add", "--quiet", "-b", "opened", opened_path });
+    allocator.free(worktree.output);
+
+    var inspection = try inspect(allocator, opened_path, &.{});
+    defer deinitInspection(allocator, &inspection);
+    try std.testing.expectEqual(@as(usize, 2), inspection.entries.items.len);
+    try std.testing.expect(inspection.entries.items[0].primary);
+    try std.testing.expect(!inspection.entries.items[0].opened_checkout);
+    try std.testing.expect(!inspection.entries.items[1].primary);
+    try std.testing.expect(inspection.entries.items[1].opened_checkout);
+    try std.testing.expectEqual(@as(usize, 1), noticeSummary(inspection.entries.items).total);
 }
 
 test "worktree notice unknown coverage differs from zero and independent breaches still warn" {
