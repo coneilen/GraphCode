@@ -2326,14 +2326,22 @@ public enum ZmxSessionLauncher {
   /// Brings back the sessions of finished loops that a reboot of their remote host killed
   /// (`GraphStore.ensureUnattendedSessionsAlive`). One probe dial per host names the
   /// sessions that are missing *and* were last seen alive in an earlier boot; only those
-  /// are dialed again, each behind the same boot gate, so a finished loop costs nothing
-  /// per sweep — a codespace dial spends the human's API quota (issue #480).
+  /// are dialed again, each behind the same boot gate.
+  ///
+  /// The probe itself runs only when a pane of that host has redialed since the last
+  /// probe that answered (`redialStamp`): the one thing left dialing a finished loop's
+  /// host is its pane, and a healthy host has no pane redialing, so the sweep spends
+  /// nothing — a codespace dial spends the human's API quota (issue #480).
   ///
   /// `nodes` are already the quiet copies the store made (`GraphStore.rebootRestoreCopy`):
   /// the create resumes the banked conversation, or opens on a note, never on the task.
-  static func restoreRebootedRemote(_ nodes: [LoopNode], projectPath: String) async {
+  static func restoreRebootedRemote(
+    _ nodes: [LoopNode], projectPath: String, gate: RebootProbeGate = .shared
+  ) async {
     guard !nodes.isEmpty, let location = RemoteProjectLocation.parse(projectPath: projectPath)
     else { return }
+    let asked = Date()
+    guard await gate.panesRedialed(location) else { return }
     let name = { (node: LoopNode) in
       SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     }
@@ -2342,9 +2350,52 @@ public enum ZmxSessionLauncher {
         rebootProbeScript(forSessionNames: nodes.map(name))))
     let (succeeded, output) = await collectRemoteOutput(probe, location: location)
     guard succeeded else { return }
+    await gate.probed(location, at: asked)
     let rebooted = parseRebootProbe(output)
     for node in nodes where rebooted.contains(name(node)) {
       await startRemote(node, at: location, onlyAfterReboot: true)
+    }
+  }
+
+  /// Touched by a remote pane's reconnect loop before every redial
+  /// (`SSHReconnectLoop`), and read by `RebootProbeGate`. Per host, not per loop: one
+  /// probe answers for every loop on it.
+  public static func redialStamp(for location: RemoteProjectLocation) -> URL {
+    SupportDirectory.url.appendingPathComponent("remote-redials", isDirectory: true)
+      .appendingPathComponent("\(location.host).redial")
+  }
+
+  /// Whether a host's panes have redialed since its last answered probe — the only
+  /// state `restoreRebootedRemote` keeps. Stamps from before this daemon started count
+  /// once, so a pane left waiting across a daemon restart is still answered.
+  actor RebootProbeGate {
+    static let shared = RebootProbeGate()
+
+    private let stampFor: @Sendable (RemoteProjectLocation) -> URL
+    private var probedAt: [String: Date] = [:]
+
+    init(
+      stampFor: @escaping @Sendable (RemoteProjectLocation) -> URL = {
+        ZmxSessionLauncher.redialStamp(for: $0)
+      }
+    ) {
+      self.stampFor = stampFor
+    }
+
+    func panesRedialed(_ location: RemoteProjectLocation) -> Bool {
+      guard
+        let touched =
+          (try? FileManager.default.attributesOfItem(
+            atPath: stampFor(location).path))?[.modificationDate] as? Date
+      else { return false }
+      guard let since = probedAt[location.host] else { return true }
+      return touched > since
+    }
+
+    /// Recorded only for a probe that answered: one that failed leaves the redial
+    /// pending, so the host is probed once it is back even if every pane has paused.
+    func probed(_ location: RemoteProjectLocation, at date: Date) {
+      probedAt[location.host] = date
     }
   }
 

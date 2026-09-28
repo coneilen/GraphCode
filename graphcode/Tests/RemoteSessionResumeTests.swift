@@ -616,4 +616,40 @@ struct RemoteRebootRestoreTests {
     #expect(process.terminationStatus == 0)
     #expect(ZmxSessionLauncher.parseRebootProbe(output) == ["rebooted", "husk"])
   }
+
+  @Test
+  func aHealthyHostIsNeverProbed() async throws {
+    // The probe is a dial, and on a codespace a dial spends the human's API quota. Only
+    // a pane redialing its host is worth one; a host nobody is redialing costs nothing.
+    let stamp = FileManager.default.temporaryDirectory
+      .appendingPathComponent("redial-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: stamp) }
+    let gate = ZmxSessionLauncher.RebootProbeGate(stampFor: { _ in stamp })
+
+    #expect(await !gate.panesRedialed(location))
+
+    FileManager.default.createFile(atPath: stamp.path, contents: nil)
+    #expect(await gate.panesRedialed(location))
+
+    await gate.probed(location, at: Date().addingTimeInterval(1))
+    #expect(await !gate.panesRedialed(location))
+
+    try FileManager.default.setAttributes(
+      [.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: stamp.path)
+    #expect(await gate.panesRedialed(location))
+  }
+
+  @Test(arguments: [false, true])
+  func aPaneStampsItsHostBeforeEveryRedial(codespace: Bool) throws {
+    let script =
+      codespace
+      ? SSHReconnectLoop.codespaceScript(
+        connect: "CONNECT", reconnect: "RECONNECT", pauseMarker: "/tmp/p",
+        redialStamp: "/tmp/stamp")
+      : SSHReconnectLoop.script(
+        connect: "CONNECT", reconnect: "RECONNECT", redialStamp: "/tmp/stamp")
+    let touch = try #require(script.range(of: "touch '/tmp/stamp' 2>/dev/null; RECONNECT"))
+    let connect = try #require(script.range(of: "CONNECT"))
+    #expect(connect.upperBound <= touch.lowerBound)
+  }
 }
