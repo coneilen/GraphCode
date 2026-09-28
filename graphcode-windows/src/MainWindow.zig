@@ -521,6 +521,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     const terminal = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
     const view = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
     const help = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
+    const discovery = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
     const workspace = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
 
     append(add_folder, "Open Folder...\tCtrl+O", @intFromEnum(Command.open_folder));
@@ -537,7 +538,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     append(file, "Worktrees...\tCtrl+Shift+W", @intFromEnum(Command.worktrees));
     append(file, "Reclaim Selected Worktrees...", @intFromEnum(Command.reclaim_worktrees));
     append(file, "Reveal Selected Worktree in Explorer\tCtrl+Shift+E", @intFromEnum(Command.reveal_worktree));
-    append(file, "Project Worktree Policy...", @intFromEnum(Command.edit_worktree_policy));
+    append(file, "Project Worktree Policy...\tCtrl+Shift+P", @intFromEnum(Command.edit_worktree_policy));
     append(file, "Save Worktree Policy\tCtrl+Shift+S", @intFromEnum(Command.save_worktree_policy));
     separator(file);
     append(file, "Exit", @intFromEnum(Command.exit));
@@ -550,7 +551,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     separator(loop);
     append(loop, "New Loop...\tCtrl+N", @intFromEnum(Command.create_node));
     append(loop, "Create Edge...", @intFromEnum(Command.create_edge));
-    append(loop, "Show in Graph", @intFromEnum(Command.show_graph));
+    append(loop, "Show in Graph\tCtrl+Shift+G", @intFromEnum(Command.show_graph));
     append(loop, "Stop Loop\tCtrl+S", @intFromEnum(Command.stop_loop));
 
     append(terminal, "New Tab\tCtrl+T", @intFromEnum(Command.new_tab));
@@ -575,13 +576,32 @@ pub fn installMenu(hwnd: c.HWND) !void {
     append(view, "Zoom In\tCtrl+=", @intFromEnum(Command.zoom_in));
     append(view, "Fit Canvas\tCtrl+9", @intFromEnum(Command.fit_canvas));
     separator(view);
-    append(view, "Reconnect", @intFromEnum(Command.reconnect));
+    append(view, "Reconnect\tCtrl+R", @intFromEnum(Command.reconnect));
     append(view, "Settings...\tCtrl+Shift+,", @intFromEnum(Command.product_settings));
     append(view, "Advanced Connection Settings...\tCtrl+,", @intFromEnum(Command.settings));
     append(help, "GraphCode Basics\tF1", @intFromEnum(Command.onboarding));
     append(help, "Check for Updates...", @intFromEnum(Command.check_updates));
     separator(help);
     append(help, "About GraphCode", @intFromEnum(Command.about));
+    appendInfo(discovery, "Send selected loop\tCtrl+M");
+    appendInfo(discovery, "Rename selected loop / edit selected edge\tCtrl+E");
+    appendInfo(discovery, "Navigate by project or node\tCtrl+Up / Ctrl+Down");
+    appendInfo(discovery, "Select a worktree row\tUp / Down");
+    appendInfo(discovery, "Focus Terminal A\t1");
+    appendInfo(discovery, "Focus Terminal B\t2");
+    appendInfo(discovery, "Cancel clone\tCtrl+Shift+X");
+    appendInfo(discovery, "Paste terminal text\tCtrl+Shift+V");
+    appendInfo(discovery, "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits");
+    appendInfo(discovery, "Jump palette: Up / Down navigate; Enter opens the selected loop");
+    separator(discovery);
+    appendInfo(discovery, "Drag empty canvas to pan");
+    appendInfo(discovery, "Drag a node to move it");
+    appendInfo(discovery, "Drag a connector onto another node to create an edge");
+    appendInfo(discovery, "Scroll on canvas to zoom");
+    appendInfo(discovery, "Pinch on touchscreen to zoom");
+    appendInfo(discovery, "Right-click a project, loop, chat, or canvas item for context actions");
+    appendInfo(discovery, "Drag a top-level sidebar loop to reorder it");
+    appendPopup(help, "Keyboard & Canvas Gestures", discovery);
 
     append(workspace, "New Workspace...", @intFromEnum(Command.workspace_new));
     append(workspace, "Manage Workspaces...", @intFromEnum(Command.workspace_manage));
@@ -754,6 +774,10 @@ fn append(menu: c.HMENU, text: []const u8, id: usize) void {
     appendEnabled(menu, text, id, true);
 }
 
+fn appendInfo(menu: c.HMENU, text: []const u8) void {
+    appendEnabled(menu, text, 0, false);
+}
+
 fn appendEnabled(menu: c.HMENU, text: []const u8, id: usize, enabled: bool) void {
     const wide = toWideZ(std.heap.c_allocator, text) catch return;
     defer std.heap.c_allocator.free(wide);
@@ -886,6 +910,65 @@ test "native menu exposes the parity command groups" {
     try std.testing.expectEqual(Command.split_right, commandFromId(4303).?);
     try std.testing.expectEqual(Command.about, commandFromId(4501).?);
     try std.testing.expectEqual(@as(?Command, null), commandFromId(9999));
+}
+
+test "main and help menus expose missing shortcuts and canvas gestures" {
+    const hwnd = try hiddenWorkspaceTestWindow();
+    defer _ = c.DestroyWindow(hwnd);
+    try installMenu(hwnd);
+    const root = c.GetMenu(hwnd);
+    const file = c.GetSubMenu(root, 0);
+    const loop = c.GetSubMenu(root, 1);
+    const view = c.GetSubMenu(root, 4);
+    const help = c.GetSubMenu(root, 5);
+
+    const actual_labels = [_]struct { menu: c.HMENU, command: Command, expected: []const u8 }{
+        .{ .menu = file, .command = .edit_worktree_policy, .expected = "Project Worktree Policy...\tCtrl+Shift+P" },
+        .{ .menu = loop, .command = .show_graph, .expected = "Show in Graph\tCtrl+Shift+G" },
+        .{ .menu = view, .command = .reconnect, .expected = "Reconnect\tCtrl+R" },
+    };
+    for (actual_labels) |item| {
+        var label: [128]u16 = undefined;
+        const length = c.GetMenuStringW(item.menu, @intFromEnum(item.command), &label, label.len, c.MF_BYCOMMAND);
+        try std.testing.expect(length > 0 and length < label.len - 1);
+        const actual = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, label[0..@intCast(length)]);
+        defer std.testing.allocator.free(actual);
+        try std.testing.expectEqualStrings(item.expected, actual);
+    }
+
+    const guide = c.GetSubMenu(help, 4);
+    try std.testing.expect(guide != null);
+    const expected = [_][]const u8{
+        "Send selected loop\tCtrl+M",
+        "Rename selected loop / edit selected edge\tCtrl+E",
+        "Navigate by project or node\tCtrl+Up / Ctrl+Down",
+        "Select a worktree row\tUp / Down",
+        "Focus Terminal A\t1",
+        "Focus Terminal B\t2",
+        "Cancel clone\tCtrl+Shift+X",
+        "Paste terminal text\tCtrl+Shift+V",
+        "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits",
+        "Jump palette: Up / Down navigate; Enter opens the selected loop",
+        "Drag empty canvas to pan",
+        "Drag a node to move it",
+        "Drag a connector onto another node to create an edge",
+        "Scroll on canvas to zoom",
+        "Pinch on touchscreen to zoom",
+        "Right-click a project, loop, chat, or canvas item for context actions",
+        "Drag a top-level sidebar loop to reorder it",
+    };
+    try std.testing.expectEqual(@as(c_int, expected.len + 1), c.GetMenuItemCount(guide));
+    try std.testing.expect(c.GetMenuState(guide, 10, c.MF_BYPOSITION) & c.MF_SEPARATOR != 0);
+    for (expected, 0..) |expected_label, expected_index| {
+        const index: c.UINT = @intCast(if (expected_index < 10) expected_index else expected_index + 1);
+        var label: [128]u16 = undefined;
+        const length = c.GetMenuStringW(guide, index, &label, label.len, c.MF_BYPOSITION);
+        try std.testing.expect(length > 0 and length < label.len - 1);
+        const actual = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, label[0..@intCast(length)]);
+        defer std.testing.allocator.free(actual);
+        try std.testing.expectEqualStrings(expected_label, actual);
+        try std.testing.expect(c.GetMenuState(guide, index, c.MF_BYPOSITION) & c.MF_GRAYED != 0);
+    }
 }
 
 const NativeMenuDispatchTest = struct {
