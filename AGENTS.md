@@ -189,10 +189,21 @@ both. Both files are gitignored; `.env.example` is tracked and documents the
 ### macOS CI
 
 `.github/workflows/macos-shared-regression.yml` runs on `macos-26` for every
-pull request. It checks out submodules recursively, runs
-`python3 Tools/portable-prepare.py`, installs mise and the pinned tools, runs
-`swift test --package-path investigation/spikes/swift-portable`, then
-`tuist install`, `make install-zmx`, `make test`, and `make check`.
+pull request that touches macOS-relevant paths. It checks out submodules
+recursively, runs `python3 Tools/portable-prepare.py`, installs mise and the
+pinned tools, runs `swift test --package-path investigation/spikes/swift-portable`,
+then `tuist install`, `make install-zmx`, `make test`, and `make check`.
+
+### Path-gated CI
+
+On pull requests, the Windows, macOS shared Swift, and Linux build jobs run only
+when `Tools/ci/classify-changes.sh` finds relevant changed paths, so a
+documentation-only change (for example `investigation/ui-parity-matrix.md`)
+skips them; skipped jobs still satisfy their required checks. DCO and TDD
+evidence always run. Pushes, merge queue, schedules, manual dispatches, unknown
+paths, and classifier failures all get full validation. When you add a directory
+a suite builds or reads, add it to the classifier and its tests
+(`bash Tools/ci/tests/classify-changes.test.sh`).
 
 ---
 
