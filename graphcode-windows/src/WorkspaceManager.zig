@@ -12,7 +12,7 @@ pub const Summary = union(enum) {
     saved: Counts,
     failed: SummaryFailure,
 };
-pub const delete_reason = "Delete is unavailable here until recoverable deletion with daemon/session teardown is implemented.";
+pub const delete_note = "Delete stops that workspace's daemon, ends its saved terminal sessions, and moves its folder to the Recycle Bin, where Windows can restore it.";
 
 pub const Row = struct {
     workspace: Lifecycle.Workspace,
@@ -36,7 +36,7 @@ pub const Row = struct {
     }
 };
 
-pub const ActionKind = enum { open, rename, new };
+pub const ActionKind = enum { open, rename, new, delete };
 pub const Action = struct {
     kind: ActionKind,
     target: ?Lifecycle.Workspace = null,
@@ -79,13 +79,15 @@ pub const Model = struct {
         const index = selection orelse return error.NoWorkspaceSelected;
         if (index >= self.rows.len) return error.NoWorkspaceSelected;
         const row = self.rows[index];
-        if (kind == .rename) try requireRename(row.refusal());
+        if (kind == .rename or kind == .delete) try requireExclusiveTarget(row.refusal());
         if (kind == .open and !row.canOpen()) return error.UnidentifiedWorkspaceWindow;
         return .{ .kind = kind, .target = try Lifecycle.copyWorkspace(self.allocator, row.workspace) };
     }
 };
 
-fn requireRename(refusal: Refusal) !void {
+/// Renaming and deleting both need a row nothing else holds: not Default, not this window's,
+/// not open elsewhere, and not a window we failed to identify.
+fn requireExclusiveTarget(refusal: Refusal) !void {
     return switch (refusal) {
         .none => {},
         .default => error.DefaultWorkspace,
@@ -106,7 +108,7 @@ pub fn validateTarget(allocator: std.mem.Allocator, action: Action, current_iden
     if (!std.mem.eql(u8, identity, target.identity)) return error.WorkspaceIdentityChanged;
     const is_default = std.mem.eql(u8, identity, default_identity);
     if (is_default != target.is_default) return error.WorkspaceIdentityChanged;
-    if (action.kind == .rename) {
+    if (action.kind == .rename or action.kind == .delete) {
         if (is_default) return error.DefaultWorkspace;
         if (std.mem.eql(u8, identity, current_identity)) return error.CurrentWorkspace;
     }
@@ -115,9 +117,9 @@ pub fn validateTarget(allocator: std.mem.Allocator, action: Action, current_iden
 pub fn refusalText(refusal: Refusal) []const u8 {
     return switch (refusal) {
         .none => "Closed",
-        .default => "Default workspace - cannot rename",
-        .current => "This window - cannot rename",
-        .open => "Open elsewhere - cannot rename",
+        .default => "Default workspace - cannot rename or delete",
+        .current => "This window - cannot rename or delete",
+        .open => "Open elsewhere - cannot rename or delete",
         .unidentified => "Older/unidentified window - close it before changing workspaces",
         .unavailable => "Window ownership unavailable - actions blocked",
     };
@@ -644,6 +646,50 @@ test "workspace manager unknown error and refusal states never become zero count
     const zero = try summaryText(std.testing.allocator, .{ .saved = .{} });
     defer std.testing.allocator.free(zero);
     try std.testing.expectEqualStrings("Saved: 0 projects / 0 top-level loops", zero);
+}
+
+test "workspace manager Delete refuses every row rename refuses and keeps its own target" {
+    const allocator = std.testing.allocator;
+    var def = alpha;
+    def.is_default = true;
+    var model = try Model.init(allocator, &.{ def, beta, alpha, beta }, "c:/elsewhere", &.{ .closed, .open, .unidentified, .unavailable });
+    defer model.deinit();
+    for (0..model.rows.len) |i| {
+        try std.testing.expectError(
+            if (i == 0) error.DefaultWorkspace else if (i == 1) error.WorkspaceInUse else error.UnidentifiedWorkspaceWindow,
+            model.capture(.delete, i),
+        );
+    }
+    try std.testing.expectError(error.NoWorkspaceSelected, model.capture(.delete, null));
+    try std.testing.expectError(error.NoWorkspaceSelected, model.capture(.delete, model.rows.len));
+
+    var closed = try Model.init(allocator, &.{alpha}, "c:/elsewhere", &.{.closed});
+    defer closed.deinit();
+    var action = try closed.capture(.delete, 0);
+    defer action.deinit(allocator);
+    try std.testing.expectEqual(ActionKind.delete, action.kind);
+    try std.testing.expectEqualStrings(alpha.identity, action.target.?.identity);
+}
+
+test "workspace manager Delete revalidates identity default and current after confirmation" {
+    const allocator = std.testing.allocator;
+    const action = Action{ .kind = .delete, .target = alpha };
+    try std.testing.expectError(error.CurrentWorkspace, validateTarget(allocator, action, alpha.identity, "c:/fixture/.graphcode"));
+    try std.testing.expectError(error.WorkspaceIdentityChanged, validateTarget(allocator, action, "c:/elsewhere", alpha.identity));
+    var default_target = Action{ .kind = .delete, .target = alpha };
+    default_target.target.?.is_default = true;
+    try std.testing.expectError(error.DefaultWorkspace, validateTarget(allocator, default_target, "c:/elsewhere", alpha.identity));
+    var drifted = action;
+    drifted.target.?.path = beta.path;
+    try std.testing.expectError(error.WorkspaceIdentityChanged, validateTarget(allocator, drifted, "c:/elsewhere", "c:/fixture/.graphcode"));
+    try validateTarget(allocator, action, "c:/elsewhere", "c:/fixture/.graphcode");
+}
+
+test "workspace manager refusal text covers deletion as well as renaming" {
+    for ([_]Refusal{ .default, .current, .open }) |refusal| {
+        const text = refusalText(refusal);
+        try std.testing.expect(std.mem.indexOf(u8, text, "rename or delete") != null);
+    }
 }
 
 const graph_fixture =
