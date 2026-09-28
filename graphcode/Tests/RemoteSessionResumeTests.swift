@@ -467,8 +467,20 @@ struct RemoteSessionResumeTests {
 
     #expect(started.value.isEmpty)
   }
+}
 
-  // MARK: - Finished loops across a remote reboot
+/// A finished unattended loop across a remote reboot: its session comes back as the
+/// conversation it was, never as another pass at the task.
+@Suite
+struct RemoteRebootRestoreTests {
+  private let location = RemoteProjectLocation(
+    user: "dev", host: "codespace", port: 2222, remotePath: "/workspaces/widget")
+
+  private func goalNode() -> LoopNode {
+    LoopNode(
+      title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"),
+      state: .running)
+  }
 
   @Test
   func theSweepRestoresFinishedLoopsTheRebootKilledAndLeavesThemFinished() async {
@@ -540,7 +552,8 @@ struct RemoteSessionResumeTests {
     let invocation = try #require(
       ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location))
     let script = try #require(invocation.last)
-    let write = RemoteBootMarker.writeFragment(forSessionName: name)
+    // Quote-free, so the login shell's re-quoting of the script cannot hide it.
+    let write = ">\(RemoteBootMarker.markerExpression(forSessionName: name))"
     #expect(script.components(separatedBy: write).count == 3)
   }
 
@@ -565,10 +578,9 @@ struct RemoteSessionResumeTests {
     try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
     try FileManager.default.createDirectory(at: boots, withIntermediateDirectories: true)
     let zmx = bin.appendingPathComponent("zmx")
-    try """
-      #!/bin/sh
-      printf '  name=alive\\tpid=1\\tclients=0\\n  name=husk\\tpid=2\\tended=5\\texit_code=0\\n'
-      """.write(to: zmx, atomically: true, encoding: .utf8)
+    let listing =
+      "  name=alive\\tpid=1\\tclients=0\\n  name=husk\\tpid=2\\tended=5\\texit_code=0\\n"
+    try "#!/bin/sh\nprintf '\(listing)'\n".write(to: zmx, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: zmx.path)
     let bootProbe = Process()
     bootProbe.executableURL = URL(fileURLWithPath: "/bin/sh")

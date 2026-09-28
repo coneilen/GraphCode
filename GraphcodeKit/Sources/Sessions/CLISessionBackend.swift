@@ -287,6 +287,11 @@ extension CLISessionBackend {
     Task.detached { await backend(for: node).launch(node, path) }
   }
 
+  public static let restoreRebootedSessions: @Sendable ([LoopNode], String) async -> Void = {
+    nodes, path in
+    await ZmxSessionLauncher.restoreRebootedRemote(nodes, projectPath: path)
+  }
+
   public static let terminateSession: @Sendable (LoopNode, String?) -> Void = { node, path in
     Task.detached { await backend(for: node).terminate(node, path) }
   }
