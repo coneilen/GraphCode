@@ -24,6 +24,7 @@ pub fn actionForCommand(command: usize) ?Manager.ActionKind {
         open_id => .open,
         rename_id => .rename,
         new_id => .new,
+        delete_id => .delete,
         else => null,
     };
 }
@@ -40,6 +41,7 @@ const Dialog = struct {
     open: c.HWND = null,
     rename: c.HWND = null,
     new: c.HWND = null,
+    delete: c.HWND = null,
     closed: bool = false,
     failure: ?anyerror = null,
 
@@ -107,12 +109,11 @@ fn run(parent: c.HWND, dialog: *Dialog) !void {
     _ = try control(hwnd, dpi, "STATIC", "Workspaces - saved summaries are not live totals", 0, 0, 16, 12, 870, 24);
     dialog.list = try control(hwnd, dpi, "LISTBOX", "", list_id, c.WS_TABSTOP | c.WS_VSCROLL | c.WS_HSCROLL | c.WS_BORDER | c.LBS_NOTIFY | c.LBS_NOINTEGRALHEIGHT, 16, 40, 870, list_height);
     dialog.detail = try control(hwnd, dpi, "EDIT", "Select a workspace to see its full path and actions.", detail_id, c.WS_TABSTOP | c.ES_READONLY | c.ES_MULTILINE | c.ES_AUTOVSCROLL | c.WS_VSCROLL, 16, detail_top, 870, 104);
-    _ = try control(hwnd, dpi, "STATIC", Manager.delete_reason, 0, 0, 16, reason_top, 870, 36);
+    _ = try control(hwnd, dpi, "STATIC", Manager.delete_note, 0, 0, 16, reason_top, 870, 36);
     dialog.open = try control(hwnd, dpi, "BUTTON", "Open", open_id, c.WS_TABSTOP, 16, buttons_top, 110, 30);
     dialog.rename = try control(hwnd, dpi, "BUTTON", "Rename...", rename_id, c.WS_TABSTOP, 138, buttons_top, 120, 30);
     dialog.new = try control(hwnd, dpi, "BUTTON", "New Workspace...", new_id, c.WS_TABSTOP, 270, buttons_top, 160, 30);
-    const delete = try control(hwnd, dpi, "BUTTON", "Delete (unavailable)", delete_id, c.WS_DISABLED, 442, buttons_top, 180, 30);
-    _ = delete;
+    dialog.delete = try control(hwnd, dpi, "BUTTON", "Delete...", delete_id, c.WS_TABSTOP, 442, buttons_top, 180, 30);
     const done = try control(hwnd, dpi, "BUTTON", "Done", done_id, c.WS_TABSTOP | c.BS_DEFPUSHBUTTON, 776, buttons_top, 110, 30);
     _ = c.SendMessageW(hwnd, c.DM_SETDEFID, done_id, 0);
     _ = try syncRows(dialog);
@@ -204,11 +205,20 @@ fn syncRows(dialog: *Dialog) !bool {
     return changed;
 }
 
+/// Delete is offered only for a row nothing else holds, and never while an action is waiting
+/// on the saved-summary reader.
+fn deleteEnabled(waiting: bool, refusal: ?Manager.Refusal) bool {
+    if (waiting) return false;
+    const value = refusal orelse return false;
+    return value == .none;
+}
+
 fn syncDetails(dialog: *Dialog) !void {
     const waiting = dialog.handoff.pending != null;
     const row: ?Manager.Row = if (dialog.selection) |index| dialog.model.rows[index] else null;
     _ = c.EnableWindow(dialog.open, @intFromBool(!waiting and row != null and row.?.canOpen()));
     _ = c.EnableWindow(dialog.rename, @intFromBool(!waiting and row != null and row.?.refusal() == .none));
+    _ = c.EnableWindow(dialog.delete, @intFromBool(deleteEnabled(waiting, if (row) |value| value.refusal() else null)));
     _ = c.EnableWindow(dialog.new, @intFromBool(!waiting));
     _ = c.EnableWindow(dialog.list, @intFromBool(!waiting));
     const allocator = dialog.model.allocator;
@@ -292,12 +302,21 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
     return c.DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
-test "workspace manager controls never route Delete or Done to a mutation" {
+test "workspace manager controls route Delete to a delete action and never route Done" {
     try std.testing.expectEqual(Manager.ActionKind.open, actionForCommand(open_id).?);
     try std.testing.expectEqual(Manager.ActionKind.rename, actionForCommand(rename_id).?);
     try std.testing.expectEqual(Manager.ActionKind.new, actionForCommand(new_id).?);
-    for ([_]usize{ done_id, cancel_id, delete_id, list_id, detail_id, 5116, 5119, 5152, 5154 }) |id|
+    try std.testing.expectEqual(Manager.ActionKind.delete, actionForCommand(delete_id).?);
+    for ([_]usize{ done_id, cancel_id, list_id, detail_id, 5116, 5119, 5152, 5154 }) |id|
         try std.testing.expect(actionForCommand(id) == null);
+}
+
+test "workspace manager Delete is enabled exactly where a deletable row is selected" {
+    for ([_]Manager.Refusal{ .none, .default, .current, .open, .unidentified, .unavailable }) |refusal| {
+        try std.testing.expectEqual(refusal == .none, deleteEnabled(false, refusal));
+        try std.testing.expect(!deleteEnabled(true, refusal));
+    }
+    try std.testing.expect(!deleteEnabled(false, null));
 }
 
 test "workspace manager modal lease blocks reentry and releases before handoff" {
