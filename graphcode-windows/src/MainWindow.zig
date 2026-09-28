@@ -593,15 +593,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     appendInfo(discovery, "Paste terminal text\tCtrl+Shift+V");
     appendInfo(discovery, "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits");
     appendInfo(discovery, "Jump palette: Up / Down navigate; Enter opens the selected loop");
-    separator(discovery);
-    appendInfo(discovery, "Drag empty canvas to pan");
-    appendInfo(discovery, "Drag a node to move it");
-    appendInfo(discovery, "Drag a connector onto another node to create an edge");
-    appendInfo(discovery, "Scroll on canvas to zoom");
-    appendInfo(discovery, "Pinch on touchscreen to zoom");
-    appendInfo(discovery, "Right-click a project, loop, chat, or canvas item for context actions");
-    appendInfo(discovery, "Drag a top-level sidebar loop to reorder it");
-    appendPopup(help, "Keyboard & Canvas Gestures", discovery);
+    appendPopup(help, "Keyboard Shortcuts", discovery);
 
     append(workspace, "New Workspace...", @intFromEnum(Command.workspace_new));
     append(workspace, "Manage Workspaces...", @intFromEnum(Command.workspace_manage));
@@ -912,7 +904,7 @@ test "native menu exposes the parity command groups" {
     try std.testing.expectEqual(@as(?Command, null), commandFromId(9999));
 }
 
-test "main and help menus expose missing shortcuts and canvas gestures" {
+test "main and help menus expose missing shortcuts without canvas gesture claims" {
     const hwnd = try hiddenWorkspaceTestWindow();
     defer _ = c.DestroyWindow(hwnd);
     try installMenu(hwnd);
@@ -949,18 +941,16 @@ test "main and help menus expose missing shortcuts and canvas gestures" {
         "Paste terminal text\tCtrl+Shift+V",
         "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits",
         "Jump palette: Up / Down navigate; Enter opens the selected loop",
-        "Drag empty canvas to pan",
-        "Drag a node to move it",
-        "Drag a connector onto another node to create an edge",
-        "Scroll on canvas to zoom",
-        "Pinch on touchscreen to zoom",
-        "Right-click a project, loop, chat, or canvas item for context actions",
-        "Drag a top-level sidebar loop to reorder it",
     };
-    try std.testing.expectEqual(@as(c_int, expected.len + 1), c.GetMenuItemCount(guide));
-    try std.testing.expect(c.GetMenuState(guide, 10, c.MF_BYPOSITION) & c.MF_SEPARATOR != 0);
+    try std.testing.expectEqual(@as(c_int, expected.len), c.GetMenuItemCount(guide));
+    var guide_title: [128]u16 = undefined;
+    const title_length = c.GetMenuStringW(help, 4, &guide_title, guide_title.len, c.MF_BYPOSITION);
+    try std.testing.expect(title_length > 0 and title_length < guide_title.len - 1);
+    const actual_title = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, guide_title[0..@intCast(title_length)]);
+    defer std.testing.allocator.free(actual_title);
+    try std.testing.expectEqualStrings("Keyboard Shortcuts", actual_title);
     for (expected, 0..) |expected_label, expected_index| {
-        const index: c.UINT = @intCast(if (expected_index < 10) expected_index else expected_index + 1);
+        const index: c.UINT = @intCast(expected_index);
         var label: [128]u16 = undefined;
         const length = c.GetMenuStringW(guide, index, &label, label.len, c.MF_BYPOSITION);
         try std.testing.expect(length > 0 and length < label.len - 1);
