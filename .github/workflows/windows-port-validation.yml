@@ -8,7 +8,29 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      windows: ${{ steps.classify.outputs.windows }}
+      macos: ${{ steps.classify.outputs.macos }}
+      linux: ${{ steps.classify.outputs.linux }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+      - name: Classify changed paths
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash Tools/ci/classify-changes.sh --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA"
+
   windows-spikes:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') }}
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
