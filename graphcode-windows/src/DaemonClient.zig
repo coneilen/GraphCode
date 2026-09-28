@@ -341,19 +341,7 @@ pub const DaemonClient = struct {
 
     pub fn currentDaemonLockName(self: *DaemonClient, allocator: std.mem.Allocator) ![]u8 {
         _ = self;
-        const support = try supportDirectory(allocator);
-        defer allocator.free(support);
-        const normalized = try normalizedSupportPath(allocator, support);
-        defer allocator.free(normalized);
-        const support_hash = try sha256Hex(allocator, normalized);
-        defer allocator.free(support_hash);
-        const sid = try currentSID(allocator);
-        defer allocator.free(sid);
-        return std.fmt.allocPrint(
-            allocator,
-            "Global\\graphcode-daemon-{s}-{s}",
-            .{ sid, support_hash[0..20] },
-        );
+        return daemonLockName(allocator);
     }
 
     fn validateSupportDirectory(allocator: std.mem.Allocator, support_directory: []const u8) !void {
@@ -1707,6 +1695,28 @@ fn currentSID(allocator: std.mem.Allocator) ![]u8 {
     }
     defer _ = c.LocalFree(sid_text);
     return wideToUtf8(allocator, sid_text);
+}
+
+/// Lock name for the daemon that owns `support_directory`. Derived exactly as the Swift
+/// daemon derives it, so this addresses another workspace's daemon, not only our own.
+pub fn daemonLockNameFor(allocator: std.mem.Allocator, support_directory: []const u8) ![]u8 {
+    const normalized = try normalizedSupportPath(allocator, support_directory);
+    defer allocator.free(normalized);
+    const support_hash = try sha256Hex(allocator, normalized);
+    defer allocator.free(support_hash);
+    const sid = try currentSID(allocator);
+    defer allocator.free(sid);
+    return std.fmt.allocPrint(
+        allocator,
+        "Global\\graphcode-daemon-{s}-{s}",
+        .{ sid, support_hash[0..20] },
+    );
+}
+
+pub fn daemonLockName(allocator: std.mem.Allocator) ![]u8 {
+    const support = try supportDirectory(allocator);
+    defer allocator.free(support);
+    return daemonLockNameFor(allocator, support);
 }
 
 fn sha256Hex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
