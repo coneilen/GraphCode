@@ -46,6 +46,7 @@ const WorkspaceControls = @import("WorkspaceControls.zig");
 const WorkspaceLifecycle = @import("WorkspaceLifecycle.zig");
 const WorkspaceManager = @import("WorkspaceManager.zig");
 const WorkspaceManagerForm = @import("WorkspaceManagerForm.zig");
+const WorkspaceTeardown = @import("WorkspaceTeardown.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
 
@@ -203,7 +204,12 @@ fn openWorkspaceWith(comptime Api: type, allocator: std.mem.Allocator, current_i
 }
 
 const WorkspaceMutation = union(enum) { rename: []const u8, delete };
-const WorkspaceMutationResult = enum { renamed, deleted, cancelled };
+const WorkspaceMutationResult = union(enum) {
+    renamed,
+    cancelled,
+    /// Deletion ran; the report says how far it got and what, if anything, it put back.
+    torn_down: WorkspaceTeardown.Report,
+};
 const workspace_delete_confirmation_flags = c.MB_YESNO | c.MB_ICONWARNING | c.MB_DEFBUTTON2;
 
 const WorkspaceMutationApi = struct {
@@ -213,8 +219,8 @@ const WorkspaceMutationApi = struct {
     fn confirm(owner: c.HWND) c.INT {
         return c.MessageBoxW(
             owner,
-            std.unicode.utf8ToUtf16LeStringLiteral("This permanently deletes the workspace folder and all of its projects and loops. Continue?").ptr,
-            std.unicode.utf8ToUtf16LeStringLiteral("Delete Workspace").ptr,
+            std.unicode.utf8ToUtf16LeStringLiteral(WorkspaceTeardown.confirmation_text).ptr,
+            std.unicode.utf8ToUtf16LeStringLiteral(WorkspaceTeardown.delete_caption).ptr,
             workspace_delete_confirmation_flags,
         );
     }
@@ -227,8 +233,12 @@ const WorkspaceMutationApi = struct {
         if (c.MoveFileW(from.ptr, to.ptr) == 0) return error.WorkspaceRenameFailed;
     }
 
-    fn delete(path: []const u8) !void {
-        try std.fs.deleteTreeAbsolute(path);
+    fn delete(
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        current_identity: []const u8,
+    ) !WorkspaceTeardown.Report {
+        return WorkspaceTeardown.deleteRecoverably(allocator, path, current_identity);
     }
 };
 
@@ -277,10 +287,15 @@ fn mutateWorkspaceWith(
         .delete => {
             if (Api.confirm(owner) != c.IDYES) return .cancelled;
             try requireIdentifiedClosedWorkspace(Api, key);
+            // The confirmation pumped messages, so the target is re-derived from the path
+            // we captured and re-checked against Default and this window before any effect.
+            const confirmed = try WorkspaceLifecycle.pathIdentity(allocator, source);
+            defer allocator.free(confirmed);
+            if (!std.mem.eql(u8, confirmed, identity)) return error.WorkspaceIdentityChanged;
+            if (std.mem.eql(u8, confirmed, current_identity)) return error.CurrentWorkspace;
             var directory = try std.fs.openDirAbsolute(source, .{});
             directory.close();
-            try Api.delete(source);
-            return .deleted;
+            return .{ .torn_down = try Api.delete(allocator, source, current_identity) };
         },
     }
 }
@@ -6287,6 +6302,13 @@ pub const App = struct {
                 if (!self.validateManagerAction(action)) return;
                 self.renameWorkspaceTo(target, result.values[0]);
             },
+            .delete => {
+                const target = action.target.?;
+                // Revalidated once more here: the manager's own modal has closed since the
+                // action was captured.
+                if (!self.validateManagerAction(action)) return;
+                self.deleteWorkspaceTarget(target);
+            },
         }
     }
 
@@ -6331,12 +6353,31 @@ pub const App = struct {
             self.setStatus("Workspace was not found");
             return;
         };
+        self.deleteWorkspaceTarget(workspace);
+    }
+
+    /// Shared by the menu path and the manager's Delete button so both get the same
+    /// refusals, the same confirmation, and the same honest status.
+    fn deleteWorkspaceTarget(self: *App, workspace: WorkspaceLifecycle.Workspace) void {
         const outcome = mutateWorkspaceWith(WorkspaceMutationApi, self.allocator, self.window.hwnd, self.workspace_identity, workspace, .delete) catch |err| {
             self.setStatus(workspaceMutationFailure(err));
             return;
         };
-        if (!self.refreshWorkspaceList()) return;
-        self.setStatus(if (outcome == .deleted) "Workspace deleted" else "Workspace deletion cancelled");
+        switch (outcome) {
+            .renamed => {},
+            .cancelled => self.setStatus("Workspace deletion cancelled"),
+            .torn_down => |value| {
+                var report = value;
+                defer report.deinit(self.allocator);
+                if (!self.refreshWorkspaceList()) return;
+                const message = WorkspaceTeardown.statusMessage(self.allocator, report) catch {
+                    self.setStatus("Workspace deletion finished but its result could not be described");
+                    return;
+                };
+                defer self.allocator.free(message);
+                self.setStatus(message);
+            },
+        }
     }
 
     fn cycleWorkspace(self: *App, direction: isize) void {
@@ -8254,10 +8295,20 @@ const WorkspaceMutationFixture = struct {
         }
         return response;
     }
-    fn delete(path: []const u8) !void {
+    /// Deletion is simulated here: App owns the refusals and the confirmation, while the
+    /// recoverable teardown itself is proven in WorkspaceTeardown against its own seam. No
+    /// test ever recycles a folder, signals a daemon, or kills a session.
+    fn delete(
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        current_identity: []const u8,
+    ) !WorkspaceTeardown.Report {
+        _ = allocator;
+        _ = current_identity;
         deletions += 1;
         try std.testing.expectEqualStrings(expected_path, path);
-        if (!skip_delete) try WorkspaceMutationApi.delete(path);
+        if (!skip_delete) try std.fs.deleteTreeAbsolute(path);
+        return .{ .outcome = .deleted, .sessions_targeted = 0, .sessions_known = true };
     }
 };
 
@@ -8323,7 +8374,9 @@ test "workspace deletion guards default current open legacy and every non Yes re
     WorkspaceMutationFixture.reset(saved_alpha_path);
     WorkspaceMutationFixture.response = c.IDYES;
     WorkspaceMutationFixture.list_to_release = &list;
-    try std.testing.expectEqual(WorkspaceMutationResult.deleted, try mutateWorkspaceWith(WorkspaceMutationFixture, allocator, null, default.identity, alpha, .delete));
+    var torn_down = try mutateWorkspaceWith(WorkspaceMutationFixture, allocator, null, default.identity, alpha, .delete);
+    defer torn_down.torn_down.deinit(allocator);
+    try std.testing.expectEqual(WorkspaceTeardown.Outcome.deleted, torn_down.torn_down.outcome);
     try std.testing.expect(WorkspaceMutationFixture.held_during_confirmation);
     try std.testing.expectEqual(@as(usize, 1), WorkspaceMutationFixture.deletions);
     try requireDeletedWorkspace(saved_alpha_path);

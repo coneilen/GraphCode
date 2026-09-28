@@ -696,6 +696,16 @@ Invoke-Native "Workspace manager data executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\WorkspaceManager.zig } finally { Pop-Location }
 }
+Invoke-Native "Workspace teardown executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) { $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration" }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\WorkspaceTeardown.zig -target x86_64-windows-msvc -lc -ladvapi32 -lshell32 -lkernel32 "-I$include"
+  } finally { Pop-Location }
+}
 Invoke-Native "Workspace manager form data executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
