@@ -28,6 +28,18 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash Tools/ci/classify-changes.sh --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA"
 
+  # Deliberately ungated: documentation-only investigation/ changes skip
+  # windows-spikes, but still must not leak local paths or generated artifacts.
+  # The task needs no toolchain or providers and takes about a second.
+  investigation-privacy:
+    name: Investigation privacy scan
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Run investigation privacy checks
+        shell: pwsh
+        run: ./Tools/windows/validate.ps1 -Task privacy
+
   windows-spikes:
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') }}

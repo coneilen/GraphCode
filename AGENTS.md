@@ -199,8 +199,8 @@ then `tuist install`, `make install-zmx`, `make test`, and `make check`.
 On pull requests, the Windows, macOS shared Swift, and Linux build jobs run only
 when `Tools/ci/classify-changes.sh` finds relevant changed paths, so a
 documentation-only change (for example `investigation/ui-parity-matrix.md`)
-skips them; skipped jobs still satisfy their required checks. DCO and TDD
-evidence always run. Pushes, merge queue, schedules, manual dispatches, unknown
+skips them; skipped jobs still satisfy their required checks. DCO, TDD
+evidence, and the investigation privacy scan always run. Pushes, merge queue, schedules, manual dispatches, unknown
 paths, and classifier failures all get full validation. When you add a directory
 a suite builds or reads, add it to the classifier and its tests
 (`bash Tools/ci/tests/classify-changes.test.sh`).
