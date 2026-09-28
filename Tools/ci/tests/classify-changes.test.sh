@@ -142,5 +142,14 @@ printf 'investigation/ui-parity-matrix.md\n' | GITHUB_OUTPUT="$out" bash "$class
 check "writes GITHUB_OUTPUT" "windows=false macos=false linux=false" "$(flatten <"$out")"
 rm -f "$out"
 
+# Linux runners' bash rejects CRLF scripts; .gitattributes must keep these LF.
+for script in "$classifier" "${BASH_SOURCE[0]}"; do
+  if grep -q $'\r' "$script"; then
+    check "$(basename "$script") has LF line endings" "no CR" "CR found"
+  else
+    check "$(basename "$script") has LF line endings" "no CR" "no CR"
+  fi
+done
+
 echo "classify-changes: $passed passed, $failed failed"
 [[ $failed -eq 0 && $passed -gt 0 ]]
