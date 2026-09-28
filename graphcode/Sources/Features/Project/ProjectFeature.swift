@@ -130,15 +130,19 @@ struct ProjectFeature {
     var nodePendingRename: UUID?
     var draftRenameTitle = ""
 
-    /// Set while a sketch's promotion form is up: which sketch, which shape it is
-    /// taking, and the one field that shape asks for. Flat fields to match how the
-    /// rename prompt and the creation form's `draft*` fields already work here.
+    /// Set while a promotion form is up — a sketch taking a shape, or a goal or time loop
+    /// swapping to the other: which loop, which shape it is taking, and the one field
+    /// that shape asks for. Flat fields to match how the rename prompt and the creation
+    /// form's `draft*` fields already work here.
     var nodePendingPromotion: UUID?
     var promotionTarget: LoopType = .goalBased
     var promotionGoal = ""
     var promotionPausesBeforeWritesOnly = false
     var promotionInterval: IntervalChoice = .hourly
     var promotionCustomInterval = ""
+    /// What each pass does when a goal loop turns time-based. A sketch repeats its note;
+    /// a goal loop has none, and repeating its withdrawn goal would be the wrong task.
+    var promotionTask = ""
 
     /// Loops a human said really are a beginning, despite having no edges — the answer
     /// to a card's "Mark as entry". View state, not graph state: the graph's own answer
@@ -692,18 +696,23 @@ extension ProjectFeature {
     return remembered == .composite ? .sketch : (remembered ?? .sketch)
   }
 
-  /// Resets the promotion form's one field and opens it for the chosen target — only
-  /// ever for a sketch; anything already shaped has nothing to promote.
+  /// Resets the promotion form's fields and opens it for the chosen target — for a sketch
+  /// taking any shape, or a goal or time loop taking the other one. The daemon refuses a
+  /// stopped loop, so the form never opens on one.
   private func openPromotionForm(
     _ state: inout State, nodeID: UUID, target: LoopType
   ) -> Effect<Action> {
-    guard state.graph.nodes[id: nodeID]?.loopType == .sketch else { return .none }
+    guard let node = state.graph.nodes[id: nodeID],
+      node.loopType == .sketch
+        || (node.loopType.retypeTarget == target && node.state != .stopped)
+    else { return .none }
     state.nodePendingPromotion = nodeID
     state.promotionTarget = target
     state.promotionGoal = ""
     state.promotionPausesBeforeWritesOnly = false
     state.promotionInterval = .hourly
     state.promotionCustomInterval = ""
+    state.promotionTask = ""
     return .none
   }
 

@@ -9,7 +9,7 @@ import Foundation
 /// context, and a promoted goal loop starts already knowing what was found.
 ///
 /// The same cases retype a goal loop as time-based and a time-based loop as a goal loop
-/// (`GraphStore.retypeTarget(of:)`): each is the one decision the other type never asked
+/// (`LoopType.retypeTarget`): each is the one decision the other type never asked
 /// for, and the session, edges and memory carry over the same way.
 ///
 /// Promotion is one-way by construction. There is no case that lands on `.sketch`, so

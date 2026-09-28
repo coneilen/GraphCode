@@ -330,16 +330,28 @@ extension ProjectFeature.State {
     case .turnBased:
       return .turn(pausesBeforeWritesOnly: promotionPausesBeforeWritesOnly)
     case .timeBased:
-      let note =
-        nodePendingPromotion
-        .flatMap { graph.nodes[id: $0]?.firstInstruction }?
-        .trimmingCharacters(in: .whitespaces) ?? ""
-      let task = note.isEmpty ? "Carry on with what this session has been doing." : note
+      let task: String
+      if promotionSource == .goalBased {
+        task = promotionTask.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !task.isEmpty else { return nil }
+      } else {
+        let note =
+          nodePendingPromotion
+          .flatMap { graph.nodes[id: $0]?.firstInstruction }?
+          .trimmingCharacters(in: .whitespaces) ?? ""
+        task = note.isEmpty ? "Carry on with what this session has been doing." : note
+      }
       let cadence = promotionInterval.directiveValue(custom: promotionCustomInterval)
       return .timed(triggerPrompt: "/loop \(cadence) \(task)")
     case .sketch, .composite:
       return nil
     }
+  }
+
+  /// The type the loop under the promotion form has now — `.sketch` for a promotion,
+  /// `.goalBased` or `.timeBased` for a retype.
+  var promotionSource: LoopType? {
+    nodePendingPromotion.flatMap { graph.nodes[id: $0]?.loopType }
   }
 
   /// The composed `/loop` line the promotion form shows before it is written.
