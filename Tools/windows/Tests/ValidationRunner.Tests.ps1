@@ -461,6 +461,28 @@ try {
     throw "RED: Windows shell validation does not execute the UI Automation live gate"
   }
   $uiaLiveGateSource = Get-Content (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1") -Raw
+  if ($uiaLiveGateSource -notmatch 'UIA_ROOT_ACCESS' -or
+      $uiaLiveGateSource -notmatch 'UIA_UPDATE_DIALOG_DIAGNOSTICS' -or
+      $uiaLiveGateSource -notmatch 'maxSandboxRootUtf16' -or
+      $uiaLiveGateSource -notmatch 'Require \(\[GraphCodeUiaGateState\]::WindowIsVisible\(\$shellWindow\)\)') {
+    throw "RED: UIA gate does not identify visible shell HWND, background root access, missing modal and short TEMP remedy"
+  }
+  if ($uiaLiveGateSource -notmatch 'FindTopLevel\("GraphCodeUpdateOffer", \[uint32\]\$process\.Id\)' -or
+      $uiaLiveGateSource -notmatch 'UIA_UPDATE_DIALOG_DIRECT' -or
+      $uiaLiveGateSource -notmatch 'FromHandle\(\$nativeUpdateWindow\)' -or
+      $uiaLiveGateSource -notmatch '\$updateDialog = \$directUpdate') {
+    throw "RED: UIA gate does not use the owned modal HWND when desktop-tree lookup omits it"
+  }
+  if ($uiaLiveGateSource -notmatch '(?s)\$updateDialog = \$desktop\.FindFirst\(\s*\[System\.Windows\.Automation\.TreeScope\]::Children' -or
+      $uiaLiveGateSource -notmatch 'UIA_UPDATE_DIALOG_CHILDREN found=' -or
+      $uiaLiveGateSource -notmatch 'Current\.ProcessId -ne \$process\.Id') {
+    throw "RED: UIA gate does not search top-level dialogs as desktop children scoped to the shell PID"
+  }
+  if ($uiaLiveGateSource -notmatch 'LastActivationDiagnostic' -or
+      $uiaLiveGateSource -notmatch 'SetForegroundWindow\(window\).*?Marshal.GetLastWin32Error\(\)' -or
+      $uiaLiveGateSource -notmatch 'AttachThreadInput\(currentThread, targetThread, true\).*?Marshal.GetLastWin32Error\(\)') {
+    throw "RED: UIA foreground failure hides native return values and last-error diagnostics"
+  }
   if ($uiaLiveGateSource -notmatch 'AttachThreadInput' -or
   $uiaLiveGateSource -notmatch 'keybd_event\(0x12, 0, 0, UIntPtr\.Zero\)' -or
   $uiaLiveGateSource -notmatch 'SetActiveWindow\(window\)' -or

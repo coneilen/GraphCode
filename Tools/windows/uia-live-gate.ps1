@@ -104,15 +104,15 @@ public static class GraphCodeUiaGateState {
   private static extern IntPtr SetFocus(IntPtr window);
   [DllImport("user32.dll")]
   private static extern IntPtr GetFocus();
-  [DllImport("user32.dll")]
+  [DllImport("user32.dll", SetLastError = true)]
   private static extern bool SetForegroundWindow(IntPtr window);
   [DllImport("user32.dll")]
   private static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")]
+  [DllImport("user32.dll", SetLastError = true)]
   private static extern bool BringWindowToTop(IntPtr window);
   [DllImport("kernel32.dll")]
   private static extern uint GetCurrentThreadId();
-  [DllImport("user32.dll")]
+  [DllImport("user32.dll", SetLastError = true)]
   private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   private static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
@@ -278,8 +278,12 @@ public static class GraphCodeUiaGateState {
       if (attached) AttachThreadInput(currentThread, parentThread, false);
     }
   }
+  public static string LastActivationDiagnostic = "not attempted";
   public static bool ActivateWindow(IntPtr window) {
-    if (window == IntPtr.Zero) return false;
+    if (window == IntPtr.Zero) {
+      LastActivationDiagnostic = "invalid target HWND";
+      return false;
+    }
     IntPtr foreground = GetForegroundWindow();
     uint ignoredForegroundProcessId;
     uint foregroundThread = foreground == IntPtr.Zero ? 0 :
@@ -287,22 +291,32 @@ public static class GraphCodeUiaGateState {
     uint ignoredTargetProcessId;
     uint targetThread = GetWindowThreadProcessId(window, out ignoredTargetProcessId);
     uint currentThread = GetCurrentThreadId();
-    bool attachForeground = foregroundThread != 0 &&
-      currentThread != foregroundThread &&
-      AttachThreadInput(currentThread, foregroundThread, true);
-    bool attachTarget = currentThread != targetThread &&
-      AttachThreadInput(currentThread, targetThread, true);
+    bool needsForegroundAttach = foregroundThread != 0 && currentThread != foregroundThread;
+    bool attachForeground = !needsForegroundAttach ||
+      AttachThreadInput(currentThread, foregroundThread, true); int foregroundAttachError = Marshal.GetLastWin32Error();
+    bool needsTargetAttach = currentThread != targetThread;
+    bool attachTarget = !needsTargetAttach ||
+      AttachThreadInput(currentThread, targetThread, true); int targetAttachError = Marshal.GetLastWin32Error();
     try {
       ShowWindow(window, 9);
-      BringWindowToTop(window);
+      bool broughtToTop = BringWindowToTop(window);
+      int bringError = Marshal.GetLastWin32Error();
       keybd_event(0x12, 0, 0, UIntPtr.Zero);
       keybd_event(0x12, 0, 0x0002, UIntPtr.Zero);
       SetActiveWindow(window);
-      SetForegroundWindow(window);
-      return IsForegroundWindow(window);
+      bool foregroundSet = SetForegroundWindow(window); int foregroundError = Marshal.GetLastWin32Error();
+      bool observed = IsForegroundWindow(window);
+      LastActivationDiagnostic = String.Format(
+        "AttachThreadInput(foreground)={0} GetLastError={1} AttachThreadInput(target)={2} GetLastError={3} BringWindowToTop={4} GetLastError={5} SetForegroundWindow={6} GetLastError={7} (FALSE can leave no meaningful last error) observedForeground={8}",
+        attachForeground, needsForegroundAttach && !attachForeground ? foregroundAttachError : 0,
+        attachTarget, needsTargetAttach && !attachTarget ? targetAttachError : 0,
+        broughtToTop, broughtToTop ? 0 : bringError,
+        foregroundSet, foregroundSet ? 0 : foregroundError, observed
+      );
+      return observed;
     } finally {
-      if (attachTarget) AttachThreadInput(currentThread, targetThread, false);
-      if (attachForeground) AttachThreadInput(currentThread, foregroundThread, false);
+      if (needsTargetAttach && attachTarget) AttachThreadInput(currentThread, targetThread, false);
+      if (needsForegroundAttach && attachForeground) AttachThreadInput(currentThread, foregroundThread, false);
     }
   }
   public static bool IsForegroundWindow(IntPtr window) {
@@ -376,6 +390,9 @@ public static class GraphCodeUiaGateState {
   // that has not finished tearing down.
   public static bool WindowIsEnabled(IntPtr window) {
     return IsWindowEnabled(window);
+  }
+  public static bool WindowIsVisible(IntPtr window) {
+    return window != IntPtr.Zero && IsWindowVisible(window);
   }
   // Real client-coordinate mouse messages posted directly to the target window,
   // matching the same WM_MOUSEMOVE/WM_LBUTTONDOWN/WM_LBUTTONUP messages the OS
@@ -505,7 +522,7 @@ function Get-FocusDiagnostics([IntPtr] $expectedWindow) {
   } catch {
     $focusedDescription = "error='$($_.Exception.Message)'"
   }
-  return "foreground=$(Format-WindowHandle $foreground) expected=$(Format-WindowHandle $expectedWindow) expectedIsForeground=$([GraphCodeUiaGateState]::IsForegroundWindow($expectedWindow)) foregroundPid=$foregroundProcessId foregroundProcess='$($foregroundProcess.ProcessName)' foregroundClass='$([GraphCodeUiaGateState]::WindowClass($foreground))' foregroundTitle='$([GraphCodeUiaGateState]::WindowTitle($foreground))' focused={$focusedDescription}"
+  return "foreground=$(Format-WindowHandle $foreground) expected=$(Format-WindowHandle $expectedWindow) expectedIsForeground=$([GraphCodeUiaGateState]::IsForegroundWindow($expectedWindow)) foregroundPid=$foregroundProcessId foregroundProcess='$($foregroundProcess.ProcessName)' foregroundClass='$([GraphCodeUiaGateState]::WindowClass($foreground))' foregroundTitle='$([GraphCodeUiaGateState]::WindowTitle($foreground))' focused={$focusedDescription} activation={$([GraphCodeUiaGateState]::LastActivationDiagnostic)}"
 }
 
 function Wait-ForPopupMenu(
@@ -774,6 +791,8 @@ function Ensure-ShellForeground(
   } while (-not $acquired -and [DateTime]::UtcNow -lt $deadline)
   if (-not $acquired) {
     Write-Host "UIA_FOREGROUND_DIAGNOSTICS phase=$label $(Get-FocusDiagnostics $window)"
+  } else {
+    Write-Host "UIA_FOREGROUND_ACQUIRED phase=$label window=$(Format-WindowHandle $window) $([GraphCodeUiaGateState]::LastActivationDiagnostic)"
   }
   return $acquired
 }
@@ -1305,7 +1324,15 @@ function Assert-UiaProviderPathBudget(
   $endpoint = '\\.\pipe\zmx-' + $sidComponent + '\' + $qualified + '-' + ("0" * 32)
   # 232 is the reviewed conservative gate budget, not a universal Win32 limit.
   if ($lease.Length -gt 232 -or $endpoint.Length -ge 256) {
-    throw "UIA fixture provider path budget exceeded: lease=$($lease.Length)/232, pipe=$($endpoint.Length)/255, assumed ordinary-account SID length=$sidLengthAssumption"
+    $maxSandboxRootUtf16 = $sandbox.Length + 232 - $lease.Length
+    $remedies = @()
+    if ($lease.Length -gt 232) {
+      $remedies += "set TEMP/TMP to a shorter per-session directory before launching the gate"
+    }
+    if ($endpoint.Length -ge 256) {
+      $remedies += "shorten inherited session prefixes; the pipe length does not depend on TEMP/TMP"
+    }
+    throw "UIA fixture provider path budget exceeded: lease=$($lease.Length)/232, pipe=$($endpoint.Length)/255, assumed ordinary-account SID length=$sidLengthAssumption; maxSandboxRootUtf16=$maxSandboxRootUtf16 ($($remedies -join '; '))"
   }
   return [pscustomobject]@{
     leaseUtf16 = $lease.Length
@@ -1443,7 +1470,11 @@ try {
       }
     }
   }
-  if ($null -eq $root) { throw "shell did not expose graphcode-root through WM_GETOBJECT" }
+  if ($null -eq $root) {
+    $process.Refresh()
+    Write-Host "UIA_ROOT_DIAGNOSTICS processId=$($process.Id) mainWindow=$(Format-WindowHandle $process.MainWindowHandle) topLevels=$([GraphCodeUiaGateState]::DescribeTopLevelWindows([uint32]$process.Id) -join ';')"
+    throw "shell did not expose graphcode-root through WM_GETOBJECT"
+  }
 
   $expectedRootIds = @("projects", "loops", "worktrees", "graph", "actions", "status", "workspaces")
   $rawWalker = [System.Windows.Automation.TreeWalker]::RawViewWalker
@@ -1465,9 +1496,10 @@ try {
   # rather than an assumption about which exception type will show up.
   $providerSettled = $false
   $lastSettleException = $null
+  $firstRootChild = $null
   for ($settleAttempt = 0; $settleAttempt -lt 60; $settleAttempt++) {
     try {
-      $null = @($rawWalker.GetFirstChild($root))
+      $firstRootChild = $rawWalker.GetFirstChild($root)
       $providerSettled = $true
       break
     } catch {
@@ -1481,24 +1513,63 @@ try {
     " (last: $($lastSettleException.Exception.GetType().FullName): $($lastSettleException.Exception.Message))"
   } else { "" }
   Require $providerSettled "shell UI Automation provider did not settle after graphcode-root appeared$settleFailureDetail"
+  Require ([GraphCodeUiaGateState]::WindowIsVisible($shellWindow)) `
+    "shell exposed graphcode-root but its top-level window is not visible"
+  $foregroundAtRoot = [GraphCodeUiaGateState]::CurrentForegroundWindow()
+  Write-Host "UIA_ROOT_ACCESS processId=$($process.Id) window=$(Format-WindowHandle $shellWindow) visible=True foreground=$(Format-WindowHandle $foregroundAtRoot) background=$($foregroundAtRoot -ne $shellWindow) automationId=$($root.Current.AutomationId) rawFirstChildPresent=$($null -ne $firstRootChild) topLevels=$([GraphCodeUiaGateState]::DescribeTopLevelWindows([uint32]$process.Id) -join ';')"
 
   $desktop = [System.Windows.Automation.AutomationElement]::RootElement
   $updateDialog = $desktop.FindFirst(
-    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.TreeScope]::Children,
     (New-Object System.Windows.Automation.PropertyCondition(
       [System.Windows.Automation.AutomationElement]::NameProperty,
       "GraphCode Update Available"
     ))
   )
+  if ($null -ne $updateDialog -and $updateDialog.Current.ProcessId -ne $process.Id) {
+    $updateDialog = $null
+  }
+  Write-Host "UIA_UPDATE_DIALOG_CHILDREN found=$($null -ne $updateDialog)"
+  $nativeUpdateWindow = [IntPtr]::Zero
+  if ($null -eq $updateDialog) {
+    Write-Host "UIA_UPDATE_DIALOG_DIAGNOSTICS processId=$($process.Id) topLevels=$([GraphCodeUiaGateState]::DescribeTopLevelWindows([uint32]$process.Id) -join ';') $(Get-FocusDiagnostics $shellWindow)"
+    $nativeUpdateWindow = [GraphCodeUiaGateState]::FindTopLevel("GraphCodeUpdateOffer", [uint32]$process.Id)
+    if ([GraphCodeUiaGateState]::WindowIsVisible($nativeUpdateWindow)) {
+      try {
+        $directUpdate = [System.Windows.Automation.AutomationElement]::FromHandle($nativeUpdateWindow)
+        $directName = $directUpdate.Current.Name
+        $directButton = $directUpdate.FindFirst(
+          [System.Windows.Automation.TreeScope]::Descendants,
+          (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::NameProperty, "Later"
+          ))
+        )
+        Write-Host "UIA_UPDATE_DIALOG_DIRECT handle=$(Format-WindowHandle $nativeUpdateWindow) name='$directName' laterFound=$($null -ne $directButton)"
+        if ($directName -eq "GraphCode Update Available") {
+          $updateDialog = $directUpdate
+        }
+      } catch {
+        $errorCode = $_.Exception.GetBaseException().HResult
+        throw "UIA_UPDATE_DIALOG_DIRECT handle=$(Format-WindowHandle $nativeUpdateWindow) errorType=$($_.Exception.GetBaseException().GetType().FullName) hresult=0x$($errorCode.ToString('X8')) message='$($_.Exception.GetBaseException().Message)'"
+      }
+    }
+  }
   Require ($null -ne $updateDialog) "update offer dialog did not appear"
   Start-Sleep -Milliseconds 250
-  $updateDialog = $desktop.FindFirst(
-    [System.Windows.Automation.TreeScope]::Descendants,
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::NameProperty,
-      "GraphCode Update Available"
-    ))
-  )
+  if ($nativeUpdateWindow -ne [IntPtr]::Zero) {
+    $updateDialog = [System.Windows.Automation.AutomationElement]::FromHandle($nativeUpdateWindow)
+  } else {
+    $updateDialog = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Children,
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        "GraphCode Update Available"
+      ))
+    )
+    if ($null -ne $updateDialog -and $updateDialog.Current.ProcessId -ne $process.Id) {
+      $updateDialog = $null
+    }
+  }
   $installButton = $updateDialog.FindFirst(
     [System.Windows.Automation.TreeScope]::Descendants,
     (New-Object System.Windows.Automation.PropertyCondition(
@@ -1602,12 +1673,26 @@ try {
   for ($index = 0; $index -lt 20 -and $null -eq $clickedUpdateDialog; $index++) {
     Start-Sleep -Milliseconds 100
     $clickedUpdateDialog = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.TreeScope]::Children,
       (New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::NameProperty,
         "GraphCode Update Available"
       ))
     )
+    if ($null -ne $clickedUpdateDialog -and $clickedUpdateDialog.Current.ProcessId -ne $process.Id) {
+      $clickedUpdateDialog = $null
+    }
+    if ($null -eq $clickedUpdateDialog) {
+      $clickedUpdateWindow = [GraphCodeUiaGateState]::FindTopLevel(
+        "GraphCodeUpdateOffer", [uint32]$process.Id
+      )
+      if ([GraphCodeUiaGateState]::WindowIsVisible($clickedUpdateWindow)) {
+        $candidate = [System.Windows.Automation.AutomationElement]::FromHandle($clickedUpdateWindow)
+        if ($candidate.Current.Name -eq "GraphCode Update Available") {
+          $clickedUpdateDialog = $candidate
+        }
+      }
+    }
   }
   Require ($null -ne $clickedUpdateDialog) `
     "a real click on the sidebar update banner's live geometry did not open the update offer dialog"
