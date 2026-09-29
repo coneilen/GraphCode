@@ -2112,7 +2112,7 @@ try {
   # a pass. Evidence is captured as values now, because the elements themselves
   # are dead by the time the final summary is written.
   $needsYouRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^needs-you-row-'
+    $_.Current.AutomationId -match '^needs-you-rowX-'
   })
   $needsYouHeaders = @(Get-DirectChildren $projects $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^needs-you-header-'
