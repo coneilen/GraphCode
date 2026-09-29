@@ -5016,7 +5016,7 @@ try {
 
   $renameLiveGraphTitle = ""
   $renameLiveSidebarTitle = ""
-  for ($index = 0; $index -lt 100; $index++) {
+  for ($index = 0; $index -lt 200; $index++) {
     $renameLiveGraphTitle = Get-ElementName (Find-FragmentById $renameRoot $renameGraphIdentityLive $rawWalker)
     $renameLiveSidebarTitle = Get-ElementName (Find-FragmentById $renameRoot $renameSidebarIdentityLive $rawWalker)
     if ($renameLiveGraphTitle -eq $renameFinalTitle -and
@@ -5027,10 +5027,20 @@ try {
     "graphIdentity=$renameGraphIdentityLive graph='$renameLiveGraphTitle' " +
     "sidebarIdentity=$renameSidebarIdentityLive sidebar='$renameLiveSidebarTitle' " +
     "expected='$renameFinalTitle' connection=live-stub-daemon")
+  # Read the stub's own state while it is still alive so a propagation timeout is
+  # self-diagnosing: it shows whether the stub ever applied/republished the rename
+  # at all, rather than leaving that unanswered until after the shell has exited.
+  $renamePropagationStubDiagnostic = "stub result unavailable"
+  if (Test-Path -LiteralPath $renameStubResultPath) {
+    $renamePropagationStubDiagnostic = "stub result: " +
+      (Get-Content -LiteralPath $renameStubResultPath -Raw)
+  }
   Require ($renameLiveGraphTitle -eq $renameFinalTitle) `
-    "daemon rename result never reached the graph card (read '$renameLiveGraphTitle')"
+    ("daemon rename result never reached the graph card (read '$renameLiveGraphTitle'); " +
+     "$renamePropagationStubDiagnostic; stub stderr: " + (Read-UiaTextFile $renameStubErrorPath))
   Require ($renameLiveSidebarTitle -eq $renameFinalTitle) `
-    "daemon rename result never reached the sidebar row (read '$renameLiveSidebarTitle')"
+    ("daemon rename result never reached the sidebar row (read '$renameLiveSidebarTitle'); " +
+     "$renamePropagationStubDiagnostic; stub stderr: " + (Read-UiaTextFile $renameStubErrorPath))
 
   Require ([GraphCodeUiaGateState]::PostCommand($renameShellWindow, 0x5002)) `
     "connected-daemon shell rejected the tray Exit command"
