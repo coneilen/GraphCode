@@ -34,9 +34,51 @@ public enum GraphStoreCommandResult: Equatable, Sendable {
   case applied(graph: LoopGraph)
   case rejected(message: String, graph: LoopGraph)
 }
+
+/// An invalidated project-open lifetime can never be reactivated by a suspended open.
+final class ProjectTransferLease: @unchecked Sendable {
+  private let lock = NSLock()
+  private var active = true
+
+  var isActive: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return active
+  }
+
+  func invalidate() {
+    lock.lock()
+    active = false
+    lock.unlock()
+  }
+
+  @discardableResult
+  func withActive(_ operation: () -> Void) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard active else { return false }
+    operation()
+    return true
+  }
+}
+
 public actor GraphStore {
   public private(set) var graph: LoopGraph
   private var connections: [UUID: DaemonConnectionChannel] = [:]
+  private var projectTransferLease: ProjectTransferLease?
+  private struct TransferAuthorization {
+    let token: UUID
+    let graphID: UUID
+    let channel: DaemonConnectionChannel
+    let lease: ProjectTransferLease
+  }
+  private var transferAuthorizations: [UUID: TransferAuthorization] = [:]
+  private struct CheckedImport {
+    let graphID: UUID
+    let token: UUID
+    let connectionID: UUID
+    let channel: DaemonConnectionChannel?
+  }
   /// What each connection announced it can read (`DaemonCommand.announce`) — what
   /// decides whether a presence tick reaches it as a delta or as the whole snapshot.
   private var connectionCapabilities: [UUID: Set<String>] = [:]
@@ -734,6 +776,7 @@ public actor GraphStore {
     channel: DaemonConnectionChannel,
     capabilities: Set<String> = []
   ) async -> LoopGraph {
+    transferAuthorizations.removeValue(forKey: id)
     connections[id] = channel
     connectionCapabilities[id] = capabilities
     await channel.join(projectPath: graph.project.path)
@@ -761,6 +804,7 @@ public actor GraphStore {
 
   @discardableResult
   public func removeConnection(_ id: UUID, leaveReplay: Bool = false) async -> LoopGraph? {
+    transferAuthorizations.removeValue(forKey: id)
     guard let channel = connections.removeValue(forKey: id) else { return graph }
     connectionCapabilities.removeValue(forKey: id)
     let snapshot = graph
@@ -777,6 +821,104 @@ public actor GraphStore {
     connectionCapabilities[id] = capabilities
   }
 
+  func activateProjectTransfer(using lease: ProjectTransferLease) -> Bool {
+    guard subGraphDepth == 0, case .project(let project) = graph.scope,
+      RemoteProjectLocation.parse(projectPath: project.path) == nil
+    else { return false }
+    return lease.withActive {
+      guard projectTransferLease !== lease else { return }
+      projectTransferLease = lease
+      transferAuthorizations.removeAll()
+    }
+  }
+
+  func invalidateProjectTransfer() {
+    projectTransferLease?.invalidate()
+    projectTransferLease = nil
+    transferAuthorizations.removeAll()
+  }
+
+  public func snapshotForProjectTransfer(
+    connectionID: UUID, token: UUID, channel expectedChannel: DaemonConnectionChannel? = nil
+  ) -> GraphStoreCommandResult {
+    let refusal = GraphStoreCommandResult.rejected(
+      message: "Project transfer requires a live joined v2 root.", graph: graph)
+    guard subGraphDepth == 0, let lease = projectTransferLease,
+      let channel = connections[connectionID], case .v2 = channel.mode,
+      expectedChannel == nil || expectedChannel === channel
+    else { return refusal }
+    let snapshot = graph.wireSnapshot(revision: revision)
+    guard Self.v2GraphChangeFits(snapshot, limit: FramedMessageIO.v2MaxPayloadBytes) else {
+      return .rejected(message: "Project snapshot exceeds the v2 payload limit.", graph: graph)
+    }
+    var authorized = false
+    _ = lease.withActive {
+      transferAuthorizations[connectionID] = TransferAuthorization(
+        token: token, graphID: graph.id, channel: channel, lease: lease)
+      authorized = true
+    }
+    return authorized ? .applied(graph: snapshot) : refusal
+  }
+
+  public func validateProjectTransfer(
+    expectedGraphID: UUID, snapshotToken: UUID, connectionID: UUID,
+    channel: DaemonConnectionChannel? = nil
+  ) -> GraphStoreCommandResult {
+    let checked = CheckedImport(
+      graphID: expectedGraphID, token: snapshotToken, connectionID: connectionID,
+      channel: channel)
+    guard hasTransferAuthorization(checked) else {
+      return .rejected(message: "Project transfer snapshot is no longer current.", graph: graph)
+    }
+    let snapshot = graph.wireSnapshot(revision: revision)
+    guard Self.v2GraphChangeFits(snapshot, limit: FramedMessageIO.v2MaxPayloadBytes) else {
+      return .rejected(message: "Project validation exceeds the v2 payload limit.", graph: graph)
+    }
+    guard projectTransferLease?.withActive({}) == true else {
+      return .rejected(message: "Project transfer snapshot is no longer current.", graph: graph)
+    }
+    return .applied(graph: snapshot)
+  }
+
+  public func importProjectChecked(
+    _ request: GraphImportRequest, expectedGraphID: UUID, snapshotToken: UUID,
+    connectionID: UUID, channel: DaemonConnectionChannel? = nil
+  ) async -> GraphStoreCommandResult {
+    let wireRequest = DaemonWireEnvelope.request(
+      id: UUID(),
+      command: .importProjectChecked(
+        path: graph.project.path, expectedGraphID: expectedGraphID,
+        snapshotToken: snapshotToken, request: request))
+    do {
+      guard try JSONEncoder().encode(wireRequest).count <= FramedMessageIO.v2MaxPayloadBytes
+      else {
+        return .rejected(
+          message: "Project import request exceeds the v2 payload limit.", graph: graph)
+      }
+    } catch {
+      return .rejected(
+        message: "Project import request could not be encoded: \(error)", graph: graph)
+    }
+    return await enqueueCommand(
+      .importNodes(request), from: connectionID, serializeCommands: true,
+      broadcastErrors: false, v2PayloadLimit: FramedMessageIO.v2MaxPayloadBytes,
+      checkedImport: CheckedImport(
+        graphID: expectedGraphID, token: snapshotToken, connectionID: connectionID,
+        channel: channel))
+  }
+
+  private func hasTransferAuthorization(_ checked: CheckedImport) -> Bool {
+    guard subGraphDepth == 0, let lease = projectTransferLease, lease.isActive,
+      graph.id == checked.graphID,
+      let channel = connections[checked.connectionID], case .v2 = channel.mode,
+      checked.channel == nil || checked.channel === channel,
+      let authorization = transferAuthorizations[checked.connectionID],
+      authorization.token == checked.token, authorization.graphID == graph.id,
+      authorization.channel === channel, authorization.lease === lease
+    else { return false }
+    return true
+  }
+
   // MARK: - Commands
 
   public func handle(
@@ -785,6 +927,16 @@ public actor GraphStore {
     serializeCommands: Bool = true,
     broadcastErrors: Bool = true,
     v2PayloadLimit: Int? = nil
+  ) async -> GraphStoreCommandResult {
+    await enqueueCommand(
+      command, from: connectionID, serializeCommands: serializeCommands,
+      broadcastErrors: broadcastErrors, v2PayloadLimit: v2PayloadLimit)
+  }
+
+  private func enqueueCommand(
+    _ command: GraphCommand, from connectionID: UUID?,
+    serializeCommands: Bool, broadcastErrors: Bool, v2PayloadLimit: Int?,
+    checkedImport: CheckedImport? = nil
   ) async -> GraphStoreCommandResult {
     // A loop inside a composite addresses itself by its own id; route it through the
     // composite that owns it before previewing or applying the command.
@@ -817,7 +969,8 @@ public actor GraphStore {
         }
       }
       return await self.applyCommand(
-        command, from: connectionID, broadcastErrors: broadcastErrors)
+        command, from: connectionID, broadcastErrors: broadcastErrors,
+        checkedImport: checkedImport)
     }
     commandTail = operation
     commandTailID = commandID
@@ -827,6 +980,10 @@ public actor GraphStore {
       commandTailID = nil
     }
     return result
+  }
+
+  func finishQueuedCommands() async {
+    _ = await commandTail?.value
   }
 
   private static func allowsDrainRecoveryWhileHandling(_ command: GraphCommand) -> Bool {
@@ -865,7 +1022,8 @@ public actor GraphStore {
   private func applyCommand(
     _ command: GraphCommand,
     from connectionID: UUID? = nil,
-    broadcastErrors: Bool = true
+    broadcastErrors: Bool = true,
+    checkedImport: CheckedImport? = nil
   ) async -> GraphStoreCommandResult {
     switch command {
     case .createNode(var draft):
@@ -1121,7 +1279,43 @@ public actor GraphStore {
       armComposite(nodeID)
 
     case .importNodes(let request):
-      importNodes(request)
+      if let checkedImport {
+        guard request.asChildOf == nil, hasTransferAuthorization(checkedImport) else {
+          return .rejected(message: "Project import snapshot is no longer current.", graph: graph)
+        }
+        let plan: GraphImportPlanner.Plan
+        switch prepareImport(request) {
+        case .accepted(let accepted): plan = accepted
+        case .rejected(let message):
+          onAnnounceError?(message)
+          return .rejected(message: message, graph: graph)
+        }
+        var projected = plan.mergedGraph
+        for newID in plan.idMapping.values {
+          projected.nodes[id: newID]?.lastMailroomRead = nil
+        }
+        guard
+          Self.v2GraphChangeFits(
+            projected.wireSnapshot(revision: revision), limit: FramedMessageIO.v2MaxPayloadBytes)
+        else {
+          return .rejected(message: "Project import exceeds the v2 payload limit.", graph: graph)
+        }
+        guard let lease = projectTransferLease else {
+          return .rejected(message: "Project import snapshot is no longer current.", graph: graph)
+        }
+        var committed = false
+        _ = lease.withActive {
+          transferAuthorizations.removeValue(forKey: checkedImport.connectionID)
+          graph = projected
+          committed = true
+        }
+        guard committed else {
+          return .rejected(message: "Project import snapshot is no longer current.", graph: graph)
+        }
+        applyImportEffects(request, plan: plan)
+      } else {
+        importNodes(request)
+      }
 
     case .refreshUsage:
       // The same command polls all three labels: they come off one session, over one
@@ -2682,21 +2876,37 @@ public actor GraphStore {
   /// arrive already timestamped from their source loop; re-stamping on append is fine
   /// because the original line, timestamp included, is the entry's text.
   private func importNodes(_ request: GraphImportRequest) {
+    switch prepareImport(request) {
+    case .accepted(let plan):
+      commitImportGraph(plan)
+      applyImportEffects(request, plan: plan)
+    case .rejected(let message):
+      announceError(message)
+    }
+  }
+
+  private enum PreparedImport {
+    case accepted(GraphImportPlanner.Plan)
+    case rejected(String)
+  }
+
+  private func prepareImport(_ request: GraphImportRequest) -> PreparedImport {
     let arriving = request.snapshot.nodes.count
     guard graph.nodes.count + arriving <= Self.maxNodesPerGraph else {
-      announceError(
+      return .rejected(
         "import refused: \(arriving) arriving loops would exceed this graph's limit "
           + "of \(Self.maxNodesPerGraph) (currently \(graph.nodes.count))")
-      return
     }
     if let parent = request.asChildOf, graph.nodes[id: parent] == nil {
-      announceError("import refused: no loop \(parent) in this graph to import under")
-      return
+      return .rejected("import refused: no loop \(parent) in this graph to import under")
     }
     guard let plan = GraphImportPlanner.merge(request, into: graph) else {
-      announceError("import refused: the bundle contains no loops")
-      return
+      return .rejected("import refused: the bundle contains no loops")
     }
+    return .accepted(plan)
+  }
+
+  private func commitImportGraph(_ plan: GraphImportPlanner.Plan) {
     graph = plan.mergedGraph
     // An imported loop's cursor describes the board it came from. On this board it is
     // worse than meaningless: until this graph's ids overtake that number, sync keeps
@@ -2706,6 +2916,9 @@ public actor GraphStore {
     for newID in plan.idMapping.values {
       graph.nodes[id: newID]?.lastMailroomRead = nil
     }
+  }
+
+  private func applyImportEffects(_ request: GraphImportRequest, plan: GraphImportPlanner.Plan) {
     for (oldID, entries) in request.memoryByNodeID {
       guard let newID = plan.idMapping[oldID] else { continue }
       for entry in entries {
@@ -4775,6 +4988,7 @@ public actor GraphStore {
   }
 
   private func evictConnection(_ connectionID: UUID) {
+    transferAuthorizations.removeValue(forKey: connectionID)
     guard connections.removeValue(forKey: connectionID) != nil else { return }
     connectionCapabilities.removeValue(forKey: connectionID)
     onConnectionFailure?(connectionID)
