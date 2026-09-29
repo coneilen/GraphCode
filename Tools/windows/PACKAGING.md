@@ -258,7 +258,7 @@ The current accepted public provider commits are:
 | Provider | Pinned commit | Retained branch |
 |---|---|---|
 | [coneilen/winghostty](https://github.com/coneilen/winghostty/commit/f5abc059e4ca58b376eb209313aca7784659c679) | `f5abc059e4ca58b376eb209313aca7784659c679` | `graphcode-host` |
-| [coneilen/zmx](https://github.com/coneilen/zmx/commit/11e20c738b4ebd88031c7a01f1a9d938ee123234) | `11e20c738b4ebd88031c7a01f1a9d938ee123234` | `graphcode-quickchat-hang` |
+| [coneilen/zmx](https://github.com/coneilen/zmx/commit/dcf61203cd390d43451c25636776d7d64ecfd629) | `dcf61203cd390d43451c25636776d7d64ecfd629` | `graphcode-quickchat-hang` |
 
 The annotated `graphcode-windows-baseline-2026-09-17` tags remain historical
 source-retention references:
