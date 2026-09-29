@@ -1016,6 +1016,14 @@ pub const App = struct {
     }
 
     fn onFrame(self: *App, frame: []const u8) void {
+        self.onFrameWithAccessibilityPublish(frame, publishAccessibility);
+    }
+
+    fn publishAccessibility(app: *App) void {
+        app.syncAccessibility();
+    }
+
+    fn onFrameWithAccessibilityPublish(self: *App, frame: []const u8, publish: anytype) void {
         var incoming_project_path: ?[]u8 = null;
         defer if (incoming_project_path) |path| self.allocator.free(path);
         if (self.pending_rebind_path.len != 0 and Wire.eventKind(frame) == .graph_changed) {
@@ -1186,6 +1194,7 @@ pub const App = struct {
             },
             else => {},
         }
+        if (event == .graph_changed) publish(self);
     }
 
     fn refreshWorkspace(self: *App) void {
@@ -9118,6 +9127,63 @@ test "Show in Graph shared action publishes project UIA after native effects com
     Probe.publish(&app);
     try std.testing.expectEqual(@as(usize, 0), Probe.workspace_chrome);
     try std.testing.expect(Probe.selected_card);
+}
+
+test "graphChanged republishes renamed project card and sidebar accessibility names" {
+    const Probe = struct {
+        var sink: @This() = .{};
+        var updates: usize = 0;
+        var card_name: ?[]const u8 = null;
+        var sidebar_name: ?[]const u8 = null;
+
+        fn publish(app: *App) void {
+            app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+        }
+
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+        fn syncElements(_: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy) void {
+            updates += 1;
+            for (elements) |element| {
+                if (std.mem.eql(u8, element.identity, "project-card:A:loop")) card_name = element.name;
+                if (std.mem.eql(u8, element.identity, "loop:A:loop")) sidebar_name = element.name;
+            }
+        }
+    };
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = .{ .allocator = allocator, .frame_buffer = try @import("FrameBuffer.zig").FrameBuffer.init(allocator, .v2) },
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer app.client.deinit();
+    defer app.model.deinit();
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+    defer if (app.selected_node_id.len != 0) allocator.free(app.selected_node_id);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"loop","title":"Old title","state":"running"}],"edges":[]}}}
+    );
+    app.last_project_opened = "A";
+    Probe.updates = 0;
+    Probe.card_name = null;
+    Probe.sidebar_name = null;
+
+    const renamed_frame =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"g","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"loop","title":"Renamed loop","state":"running"}],"edges":[]}}}
+    ;
+    app.onFrameWithAccessibilityPublish(renamed_frame, Probe.publish);
+
+    try std.testing.expectEqual(@as(usize, 1), Probe.updates);
+    try std.testing.expectEqualStrings("Renamed loop", Probe.card_name.?);
+    try std.testing.expectEqualStrings("Renamed loop", Probe.sidebar_name.?);
+    try std.testing.expectEqualStrings("Renamed loop", app.model.graph.?.nodes.items[0].title);
+    try std.testing.expectEqualStrings("Renamed loop", app.model.graphFor("A").?.nodes.items[0].title);
 }
 
 fn noticeTestApp() !App {
