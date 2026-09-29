@@ -49,6 +49,8 @@ function Assert-ShellHostPrerequisite([string] $source) {
 }
 
 function Get-WorkflowJobs([string] $text) {
+  # Windows checkouts may convert workflow files to CRLF.
+  $text = $text.Replace("`r`n", "`n")
   $jobsAt = [regex]::Match($text, '(?m)^jobs:\s*$')
   if (-not $jobsAt.Success) { throw "Workflow has no jobs block" }
   $body = $text.Substring($jobsAt.Index + $jobsAt.Length)
