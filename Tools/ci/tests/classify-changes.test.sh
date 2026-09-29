@@ -113,6 +113,8 @@ expect "Windows shell workflow" true false false \
   .github/workflows/windows-shell.yml
 expect "Windows port workflow" true false false \
   .github/workflows/windows-port-validation.yml
+expect "Windows cache warmer workflow" true false false \
+  .github/workflows/windows-cache-warmer.yml
 expect "Windows hardening workflow" true false false \
   .github/workflows/windows-hardening.yml
 expect "macOS workflow" false true false \

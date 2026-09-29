@@ -616,6 +616,39 @@ try {
   $windowsShellWorkflow = Get-Content (Join-Path $repoRoot ".github\workflows\windows-shell.yml") -Raw
   $windowsPortWorkflow = Get-Content `
     (Join-Path $repoRoot ".github\workflows\windows-port-validation.yml") -Raw
+  $windowsCacheWarmerPath = Join-Path $repoRoot ".github\workflows\windows-cache-warmer.yml"
+  if (-not (Test-Path -LiteralPath $windowsCacheWarmerPath -PathType Leaf)) {
+    throw "RED: Windows CI has no main-scoped cache warmer"
+  }
+  $windowsCacheWarmerWorkflow = Get-Content $windowsCacheWarmerPath -Raw
+  $shellJobs = Get-WorkflowJobs $windowsShellWorkflow
+  $portJobs = Get-WorkflowJobs $windowsPortWorkflow
+  foreach ($expected in @(
+      @{ Text = $portJobs["spikes-swift"]; Job = "windows-spikes Swift"; Timeout = 45; Steps = 5 },
+      @{ Text = $portJobs["spikes-other"]; Job = "windows-spikes terminal and contracts"; Timeout = 40; Steps = 6 },
+      @{ Text = $shellJobs["packaging-real"]; Job = "windows-shell packaging (real products)"; Timeout = 50; Steps = 6 })) {
+    if ($expected.Text -notmatch "(?m)^    timeout-minutes: $($expected.Timeout)$") {
+      throw "RED: $($expected.Job) does not retain measured cold-cache headroom"
+    }
+    $stepTimeouts = [regex]::Matches($expected.Text, '(?m)^        timeout-minutes: \d+$').Count
+    if ($stepTimeouts -lt $expected.Steps) {
+      throw "RED: $($expected.Job) leaves a long-running phase without a step timeout"
+    }
+  }
+  foreach ($key in @(
+      "windows-zig-v1-`${{ hashFiles('Tools/windows/bootstrap.ps1') }}",
+      "windows-providers-v1-`${{ hashFiles('graphcode-windows/provider-pins.json', 'Tools/windows/bootstrap.ps1') }}-emit-win32-host-x86_64-windows-gnu")) {
+    if ($windowsCacheWarmerWorkflow -notmatch [regex]::Escape($key)) {
+      throw "RED: Windows cache warmer does not write the exact production key: $key"
+    }
+  }
+  if ($windowsCacheWarmerWorkflow -notmatch '(?m)^  push:\s*$' -or
+      $windowsCacheWarmerWorkflow -notmatch '(?m)^    branches: \[main\]\s*$' -or
+      $windowsCacheWarmerWorkflow -notmatch '(?m)^  schedule:\s*$' -or
+      $windowsCacheWarmerWorkflow -notmatch '(?m)^  workflow_dispatch:\s*$' -or
+      $windowsCacheWarmerWorkflow -notmatch '(?s)validate\.ps1 -Task terminal-gate.*?actions/cache/save@') {
+    throw "RED: Windows cache warmer does not cover main, weekly, manual, and canonical provider builds"
+  }
   foreach ($workflow in @($windowsShellWorkflow, $windowsPortWorkflow)) {
     if ($workflow -notmatch
         '(?s)if: failure\(\).*?actions/upload-artifact@.*?gu-\*.*?logs\\\*\.json') {
