@@ -10,7 +10,7 @@
   "zmx": {
     "repository": "coneilen/zmx",
     "remoteUrl": "https://github.com/coneilen/zmx.git",
-    "sha": "11e20c738b4ebd88031c7a01f1a9d938ee123234",
+    "sha": "dcf61203cd390d43451c25636776d7d64ecfd629",
     "artifact": "zig-out/bin/zmx.exe",
     "minimumZig": "0.16.0"
   },
