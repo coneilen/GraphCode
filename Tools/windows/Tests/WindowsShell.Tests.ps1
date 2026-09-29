@@ -549,6 +549,32 @@ Invoke-Native "Daemon client startup tests" {
     & $zig test src\DaemonClient.zig -target x86_64-windows-msvc -lc -ladvapi32 "-I$include"
   } finally { Pop-Location }
 }
+Invoke-Native "Daemon round-trip helper executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  if (-not (Test-Path -LiteralPath $include -PathType Container)) {
+    throw "Winghostty headers are required for daemon round-trip helper tests."
+  }
+  Push-Location $shellRoot
+  try {
+    $output = @(& $zig test src\DaemonRoundTripTests.zig `
+      -target x86_64-windows-msvc -lc -ladvapi32 "-I$include" `
+      --test-filter "daemon round-trip support helper" 2>&1)
+    $exitCode = $LASTEXITCODE
+    $output | ForEach-Object { Write-Host $_ }
+    if ($exitCode -ne 0) {
+      throw "Daemon round-trip helper tests failed with exit code $exitCode"
+    }
+    $text = $output -join "`n"
+    if ($text -notmatch '(?m)All\s+[1-9]\d*\s+tests?\s+passed') {
+      throw "Daemon round-trip helper test did not report a positive executed test count"
+    }
+  } finally { Pop-Location }
+}
 Invoke-Native "Daemon supervisor handoff tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
