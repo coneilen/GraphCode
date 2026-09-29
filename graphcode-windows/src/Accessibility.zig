@@ -227,7 +227,7 @@ pub const Provider = struct {
             bounds[index * 4 + 2] = element.right;
             bounds[index * 4 + 3] = element.bottom;
         }
-        _ = gc_uia_update(
+        const result = gc_uia_update(
             native,
             status_z.ptr,
             if (identities.len == 0) null else identities.ptr,
@@ -241,6 +241,9 @@ pub const Provider = struct {
             if (policy.allow_reclaim) 1 else 0,
             if (policy.confirm_each_reclaim) 1 else 0,
         );
+        // The provider rejects a malformed update as a whole and keeps the previous
+        // tree, so a rejection must be visible rather than silently leaving it stale.
+        if (result < 0) std.debug.print("UIA accessibility update rejected; previous tree retained: 0x{x:0>8}\n", .{@as(u32, @bitCast(result))});
     }
     pub fn syncStatus(self: *Provider, status: []const u8) void {
         if (!builtin.link_libc) return;

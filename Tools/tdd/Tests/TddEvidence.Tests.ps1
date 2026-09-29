@@ -45,6 +45,20 @@ REGRESSION: <command(s)> -> pass
   if ($LASTEXITCODE -eq 0) {
     throw "Placeholder TDD evidence was accepted"
   }
+
+  # The shipped pull request template must never satisfy the gate on its own. It is
+  # meant to fail until an author replaces the evidence lines. This also catches a
+  # guidance comment that puts an example label at the start of a line, because the
+  # validator matches the first RED:/GREEN:/REGRESSION: anywhere in the body and would
+  # then read the comment as the author's evidence.
+  $template = Join-Path $PSScriptRoot "..\..\..\.github\PULL_REQUEST_TEMPLATE.md"
+  if (-not (Test-Path $template)) {
+    throw "Pull request template not found at $template"
+  }
+  & $pwsh -NoProfile -File $validator -BodyPath $template *> $null
+  if ($LASTEXITCODE -eq 0) {
+    throw "Unedited pull request template was accepted as TDD evidence"
+  }
 } finally {
   Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force
 }
