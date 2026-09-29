@@ -19,7 +19,41 @@ param(
     "packaging",
     "hardening"
   )]
-  [string] $Task = "all",
+  [string[]] $Task = @("all"),
+  # Removes tasks from the selection, for example tasks that a sibling required
+  # workflow already runs. The remaining tasks keep their canonical order.
+  [ValidateSet(
+    "swift-portable",
+    "swift-contracts",
+    "swift-production",
+    "swift-paths",
+    "swift-process",
+    "swift-named-pipe",
+    "remote-bridge",
+    "remote-e2e",
+    "swift-format",
+    "visual-baseline",
+    "tdd-evidence",
+    "privacy",
+    "terminal-gate",
+    "windows-shell",
+    "packaging",
+    "hardening"
+  )]
+  [string[]] $SkipTask = @(),
+  # windows-shell parts: "unit" runs the contract and Zig executable sections
+  # (optionally one shard of them); "integration" runs the release build, live
+  # smoke, tray, and UI Automation gate. "all" runs both, in the original order.
+  [ValidateSet("all", "unit", "integration")]
+  [string] $ShellPart = "all",
+  [int] $ShellTestShard = 0,
+  [int] $ShellTestShardCount = 1,
+  [string] $ShellTestManifest,
+  # packaging parts: "contracts" are the fixture-only release, signing, scheduler,
+  # rollback, and standalone contracts; "real" builds its own release inputs and
+  # packages the real products.
+  [ValidateSet("all", "contracts", "real")]
+  [string] $PackagingPart = "all",
   [switch] $List,
   [switch] $DryRun,
   [switch] $SkipTrayLive,
@@ -228,6 +262,85 @@ function Invoke-Native([string] $description, [scriptblock] $command) {
   }
 }
 
+# Builds the release graphcoded/graphcode products and stages the pinned Swift
+# runtime DLLs beside them. Both the shell integration smoke and real packaging
+# consume this, so a packaging-only run no longer depends on a prior shell run.
+function Build-SwiftReleaseRuntime([string] $swift, [string] $purpose) {
+  $swiftBin = Split-Path $swift
+  foreach ($product in @("graphcoded", "graphcode")) {
+    Invoke-Native "Swift release build for ${purpose}: $product" {
+      & (Join-Path $swiftBin "swift-build.exe") `
+        --package-path $repoRoot `
+        --configuration release `
+        --product $product
+    } | Out-Host
+  }
+  $binPath = & (Join-Path $swiftBin "swift-build.exe") `
+    --package-path $repoRoot `
+    --configuration release `
+    --show-bin-path
+  if ($LASTEXITCODE -ne 0) {
+    throw "Swift release bin path lookup for $purpose failed"
+  }
+  $binPath = $binPath | Select-Object -Last 1
+  $swiftRuntime = Resolve-SwiftRuntimeDirectory $swift
+  Get-ChildItem -LiteralPath $swiftRuntime -Filter *.dll |
+    Copy-Item -Destination $binPath -Force
+  return $binPath
+}
+
+function Assert-PinnedProvider([string] $root, [string] $expectedSha, [string] $label) {
+  if (-not (Test-Path -LiteralPath (Join-Path $root ".git"))) {
+    throw "$label provider root is not a Git worktree: $root"
+  }
+  $status = @(git -C $root status --porcelain --untracked-files=all)
+  if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) {
+    throw "$label provider status failed or the worktree is dirty"
+  }
+  $actual = git -C $root rev-parse HEAD
+  if ($LASTEXITCODE -ne 0 -or $actual -ne $expectedSha) {
+    throw "$label provider does not match the pinned commit"
+  }
+}
+
+# Real packaging consumes the Swift release products, the pinned Winghostty host
+# library, and the pinned zmx package directory. Build them here so the real
+# packaging part can run on its own runner in parallel with the shell task.
+function Initialize-PackagingInputs {
+  $swift = Resolve-SwiftExecutable
+  Initialize-SwiftEnvironment $swift
+  [void] (Build-SwiftReleaseRuntime $swift "packaging")
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = if ($env:GRAPHCODE_WINGHOSTTY_ROOT) { $env:GRAPHCODE_WINGHOSTTY_ROOT } else {
+    Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $zmxRoot = if ($env:GRAPHCODE_ZMX_ROOT) { $env:GRAPHCODE_ZMX_ROOT } else {
+    Join-Path $depotRoot "zmx-worktrees\quickchat-hang"
+  }
+  $pins = Get-Content (Join-Path $repoRoot "graphcode-windows\provider-pins.json") -Raw |
+    ConvertFrom-Json
+  Assert-PinnedProvider $winghosttyRoot $pins.winghostty.sha "Winghostty"
+  Assert-PinnedProvider $zmxRoot $pins.zmx.sha "zmx"
+  $zig0152 = Resolve-ZigVersion "0.15.2" "GRAPHCODE_ZIG0152"
+  $zig0160 = Resolve-ZigVersion "0.16.0" "GRAPHCODE_ZIG0160"
+  Invoke-Native "Pinned Winghostty host build for packaging" {
+    Push-Location $winghosttyRoot
+    try { & $zig0152 build -Demit-win32-host=true } finally { Pop-Location }
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $winghosttyRoot "zig-out\lib\winghostty-win32-host.lib") -PathType Leaf)) {
+    throw "Pinned Winghostty host build did not produce the packaging library"
+  }
+  # Packaging.Tests.ps1 copies zig-pkg into an isolated zmx clone and builds it
+  # there; fetching the hash-pinned dependencies is all it needs from this root.
+  Invoke-Native "Pinned zmx provider dependency fetch for packaging" {
+    Push-Location $zmxRoot
+    try { & $zig0160 build --fetch } finally { Pop-Location }
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $zmxRoot "zig-pkg") -PathType Container)) {
+    throw "Pinned zmx provider fetch did not produce zig-pkg"
+  }
+}
+
 function Invoke-ZigResolverProbe([string] $candidate, [string] $operation) {
   $output = [Collections.Generic.List[object]]::new()
   $errors = [Collections.Generic.List[string]]::new()
@@ -396,7 +509,10 @@ function Resolve-ZigVersion([string] $version, [string] $environmentName) {
 
 function Invoke-Task([string] $name) {
   if ($DryRun) {
-    Write-Output "task=$name"
+    $detail = ""
+    if ($name -eq "windows-shell") { $detail = " part=$ShellPart shard=$ShellTestShard/$ShellTestShardCount" }
+    if ($name -eq "packaging") { $detail = " part=$PackagingPart" }
+    Write-Output "task=$name$detail"
     return
   }
   Write-Host "task=$name"
@@ -763,28 +879,13 @@ function Invoke-Task([string] $name) {
           }
         }) -Compress -Depth 4))
       $zig0152 = Resolve-ZigVersion "0.15.2" "GRAPHCODE_ZIG0152"
-      $swift = Resolve-SwiftExecutable
-      Initialize-SwiftEnvironment $swift
-      $swiftBin = Split-Path $swift
-      foreach ($product in @("graphcoded", "graphcode")) {
-        Invoke-Native "Swift release build for shell daemon handoff: $product" {
-          & (Join-Path $swiftBin "swift-build.exe") `
-            --package-path $repoRoot `
-            --configuration release `
-            --product $product
-        }
+      $runShellUnit = $ShellPart -ne "integration"
+      $runShellIntegration = $ShellPart -ne "unit"
+      if ($runShellIntegration) {
+        $swift = Resolve-SwiftExecutable
+        Initialize-SwiftEnvironment $swift
+        $daemonRuntime = Build-SwiftReleaseRuntime $swift "shell daemon handoff"
       }
-      $daemonRuntime = & (Join-Path $swiftBin "swift-build.exe") `
-        --package-path $repoRoot `
-        --configuration release `
-        --show-bin-path
-      if ($LASTEXITCODE -ne 0) {
-        throw "Swift release bin path lookup for shell daemon handoff failed"
-      }
-      $daemonRuntime = $daemonRuntime | Select-Object -Last 1
-      $swiftRuntime = Resolve-SwiftRuntimeDirectory $swift
-      Get-ChildItem -LiteralPath $swiftRuntime -Filter *.dll |
-        Copy-Item -Destination $daemonRuntime -Force
       $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
       $winghosttyRoot = [Environment]::GetEnvironmentVariable(
         "GRAPHCODE_WINGHOSTTY_ROOT"
@@ -821,11 +922,18 @@ function Invoke-Task([string] $name) {
       if (-not (Test-Path -LiteralPath $winghosttyLib -PathType Leaf)) {
         throw "Pinned Winghostty host build did not produce the App test library"
       }
-      & (Join-Path $repoRoot "Tools\windows\Tests\WindowsShell.Tests.ps1") `
-        -ZigExecutable $zig0152
-      if ($LASTEXITCODE -ne 0) {
-        throw "Windows shell scaffold contract failed with exit code $LASTEXITCODE"
+      if ($runShellUnit) {
+        & (Join-Path $repoRoot "Tools\windows\Tests\WindowsShell.Tests.ps1") `
+          -ZigExecutable $zig0152 `
+          -Shard $ShellTestShard `
+          -ShardCount $ShellTestShardCount `
+          -SectionManifest $ShellTestManifest
+        if ($LASTEXITCODE -ne 0) {
+          throw "Windows shell scaffold contract failed with exit code $LASTEXITCODE"
+        }
       }
+      # The unit part ends here; `break` leaves this switch clause only.
+      if (-not $runShellIntegration) { break }
       $zig0160 = Resolve-ZigVersion "0.16.0" "GRAPHCODE_ZIG0160"
       Invoke-Native "Pinned GraphCode Windows shell build and smoke" {
         & (Join-Path $repoRoot "Tools\windows\windows-shell.ps1") `
@@ -910,15 +1018,20 @@ function Invoke-Task([string] $name) {
       }
     }
     "packaging" {
-      & (Join-Path $repoRoot "Tools\windows\Tests\Release.Tests.ps1")
-      & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Signing.Tests.ps1")
-      & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.ScriptSigning.Tests.ps1")
-      & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Scheduler.Tests.ps1")
-      & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Rollback.Tests.ps1")
-      & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Standalone.Tests.ps1")
-      & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Tests.ps1")
-      if ($LASTEXITCODE -ne 0) {
-        throw "Windows packaging tests failed with exit code $LASTEXITCODE"
+      if ($PackagingPart -ne "real") {
+        & (Join-Path $repoRoot "Tools\windows\Tests\Release.Tests.ps1")
+        & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Signing.Tests.ps1")
+        & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.ScriptSigning.Tests.ps1")
+        & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Scheduler.Tests.ps1")
+        & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Rollback.Tests.ps1")
+        & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Standalone.Tests.ps1")
+      }
+      if ($PackagingPart -ne "contracts") {
+        Initialize-PackagingInputs
+        & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Tests.ps1")
+        if ($LASTEXITCODE -ne 0) {
+          throw "Windows packaging tests failed with exit code $LASTEXITCODE"
+        }
       }
     }
     "hardening" {
@@ -934,7 +1047,12 @@ function Invoke-Task([string] $name) {
   }
 }
 
-$selected = if ($Task -eq "all") { $tasks } else { @($Task) }
+$selected = @($tasks | Where-Object {
+    ($Task -contains "all" -or $Task -contains $_) -and $SkipTask -notcontains $_
+  })
+if ($selected.Count -eq 0) {
+  throw "No validation tasks remain after applying -Task $($Task -join ',') and -SkipTask $($SkipTask -join ',')"
+}
 try {
   foreach ($name in $selected) {
     Invoke-Task $name
