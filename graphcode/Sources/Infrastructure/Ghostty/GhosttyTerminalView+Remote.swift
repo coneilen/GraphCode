@@ -45,14 +45,21 @@ extension GhosttyTerminalView {
       remoteCommand: location.remoteLoginShellCommand(script), interactive: true)
     let reconnect = location.sshCommandLine(
       remoteCommand: location.remoteLoginShellCommand(reconnectScript), interactive: true)
+    let stamp = ZmxSessionLauncher.redialStamp(for: location)
+    try? FileManager.default.createDirectory(
+      at: stamp.deletingLastPathComponent(), withIntermediateDirectories: true)
     guard location.isCodespace else {
-      return ["/bin/sh", "-c", SSHReconnectLoop.script(connect: connect, reconnect: reconnect)]
+      return [
+        "/bin/sh", "-c",
+        SSHReconnectLoop.script(connect: connect, reconnect: reconnect, redialStamp: stamp.path),
+      ]
     }
     return [
       "/bin/sh", "-c",
       SSHReconnectLoop.codespaceScript(
         connect: connect, reconnect: reconnect,
-        pauseMarker: CodespaceDialBreaker.reconnectMarker(for: location).path),
+        pauseMarker: CodespaceDialBreaker.reconnectMarker(for: location).path,
+        redialStamp: stamp.path),
     ]
   }
 

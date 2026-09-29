@@ -468,3 +468,188 @@ struct RemoteSessionResumeTests {
     #expect(started.value.isEmpty)
   }
 }
+
+/// A finished unattended loop across a remote reboot: its session comes back as the
+/// conversation it was, never as another pass at the task.
+@Suite
+struct RemoteRebootRestoreTests {
+  private let location = RemoteProjectLocation(
+    user: "dev", host: "codespace", port: 2222, remotePath: "/workspaces/widget")
+
+  private func goalNode() -> LoopNode {
+    LoopNode(
+      title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"),
+      state: .running)
+  }
+
+  @Test
+  func theSweepRestoresFinishedLoopsTheRebootKilledAndLeavesThemFinished() async {
+    // A finished unattended loop whose pane was still open dialed "waiting for graphcoded"
+    // forever after a codespace restart: the pane leaves every unattended loop to the
+    // daemon, and the sweep skipped every resolved one.
+    let started = LockIsolated<[LoopNode]>([])
+    let restored = LockIsolated<[LoopNode]>([])
+    let succeeded = LoopNode(
+      title: "Done", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"),
+      state: .succeeded)
+    let stopped = LoopNode(
+      title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check", state: .stopped)
+    var missingCLI = LoopNode(
+      title: "NoCLI", loopType: .goalBased, goal: GoalSpec(summary: "ship"), state: .stopped)
+    missingCLI.launchFailure = LaunchFailure(executable: "claude", backend: .claudeCode)
+    let turn = LoopNode(
+      title: "Read", loopType: .turnBased, checkDescription: "Sound?", state: .succeeded)
+    let running = goalNode()
+    let store = GraphStore(
+      graph: LoopGraph(
+        scope: LoopGraphScope(projectPath: location.projectPath, name: "widget"),
+        nodes: [succeeded, stopped, missingCLI, turn, running]),
+      onEnsureSession: { node, _ in started.withValue { $0.append(node) } },
+      onRestoreRebootedSessions: { nodes, _ in restored.withValue { $0 += nodes } })
+
+    await store.ensureUnattendedSessionsAlive()
+    try? await Task.sleep(for: .milliseconds(200))
+
+    #expect(started.value.map(\.id) == [running.id])
+    #expect(Set(restored.value.map(\.id)) == [succeeded.id, stopped.id])
+    for copy in restored.value {
+      let prompt = copy.sessionPrompt(forProjectPath: location.projectPath) ?? ""
+      #expect(!prompt.contains("tests pass"))
+      #expect(!prompt.contains("/loop"))
+    }
+    let states = await store.graph.nodes.map(\.state)
+    #expect(states == [.succeeded, .stopped, .stopped, .succeeded, .running])
+  }
+
+  @Test
+  func theRestoreOnlyRunsWhenTheBootChangedAndResumesQuietly() throws {
+    let node = LoopNode(
+      title: "Done", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"),
+      state: .succeeded)
+    let quiet = GraphStore.rebootRestoreCopy(of: node)
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(
+        forNode: quiet, at: location, onlyAfterReboot: true))
+    let script = try #require(invocation.last)
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    #expect(script.contains(RemoteBootMarker.captureFragment))
+    #expect(script.contains("cat \(RemoteBootMarker.markerExpression(forSessionName: name))"))
+    #expect(script.contains("[ \"$gc_boot\" != \"$gc_last\" ]"))
+    #expect(script.contains("'--resume'"))
+    #expect(!script.contains("tests pass"))
+    let gate = try #require(script.range(of: "[ \"$gc_boot\" != \"$gc_last\" ]"))
+    let run = try #require(script.range(of: "'run'"))
+    #expect(gate.lowerBound < run.lowerBound)
+  }
+
+  @Test
+  func everyDaemonEnsureRecordsTheBootItSawTheSessionIn() throws {
+    // The marker is what tells a pane, and now the sweep, that a missing session died
+    // with the machine. Only a pane attach wrote it, so a session the daemon started and
+    // no pane ever joined had no marker, and one the daemon restored kept a stale one.
+    let node = goalNode()
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location))
+    let script = try #require(invocation.last)
+    // Quote-free, so the login shell's re-quoting of the script cannot hide it.
+    let write = ">\(RemoteBootMarker.markerExpression(forSessionName: name))"
+    #expect(script.components(separatedBy: write).count == 3)
+  }
+
+  @Test
+  func aDaemonKillForgetsTheBootSoTheSessionIsNotRestored() throws {
+    // Ended on purpose (a finished loop freed, a stop, a delete): after a later reboot
+    // the sweep must not bring it back, and a pane must read "ended", not "rebooted".
+    let node = goalNode()
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let script = try #require(
+      ZmxSessionLauncher.remoteKillInvocation(forNode: node, at: location).last)
+    #expect(script.contains("rm -f \(RemoteBootMarker.markerExpression(forSessionName: name))"))
+  }
+
+  @Test
+  func theRebootProbeNamesOnlyMissingSessionsFromAnEarlierBoot() throws {
+    let home = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reboot-probe-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let bin = home.appendingPathComponent("bin", isDirectory: true)
+    let boots = home.appendingPathComponent(".graphcode/boots", isDirectory: true)
+    try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: boots, withIntermediateDirectories: true)
+    let zmx = bin.appendingPathComponent("zmx")
+    let listing =
+      "  name=alive\\tpid=1\\tclients=0\\n  name=husk\\tpid=2\\tended=5\\texit_code=0\\n"
+    try "#!/bin/sh\nprintf '\(listing)'\n".write(to: zmx, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: zmx.path)
+    let bootProbe = Process()
+    bootProbe.executableURL = URL(fileURLWithPath: "/bin/sh")
+    bootProbe.arguments = ["-c", RemoteBootMarker.captureFragment + "; printf %s \"$gc_boot\""]
+    let bootPipe = Pipe()
+    bootProbe.standardOutput = bootPipe
+    try bootProbe.run()
+    bootProbe.waitUntilExit()
+    let boot = String(decoding: bootPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    try #require(!boot.isEmpty)
+    for (name, marker) in [
+      ("rebooted", "an-earlier-boot"), ("sameboot", boot), ("alive", "an-earlier-boot"),
+      ("husk", "an-earlier-boot"),
+    ] {
+      try marker.write(
+        to: boots.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = [
+      "-c",
+      ZmxSessionLauncher.rebootProbeScript(
+        forSessionNames: ["rebooted", "sameboot", "alive", "husk", "unmarked"]),
+    ]
+    process.environment = ["HOME": home.path, "PATH": bin.path + ":/usr/bin:/bin:/usr/sbin"]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    try process.run()
+    process.waitUntilExit()
+    let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+
+    #expect(process.terminationStatus == 0)
+    #expect(ZmxSessionLauncher.parseRebootProbe(output) == ["rebooted", "husk"])
+  }
+
+  @Test
+  func aHealthyHostIsNeverProbed() async throws {
+    // The probe is a dial, and on a codespace a dial spends the human's API quota. Only
+    // a pane redialing its host is worth one; a host nobody is redialing costs nothing.
+    let stamp = FileManager.default.temporaryDirectory
+      .appendingPathComponent("redial-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: stamp) }
+    let gate = ZmxSessionLauncher.RebootProbeGate(stampFor: { _ in stamp })
+
+    #expect(await !gate.panesRedialed(location))
+
+    FileManager.default.createFile(atPath: stamp.path, contents: nil)
+    #expect(await gate.panesRedialed(location))
+
+    await gate.probed(location, at: Date().addingTimeInterval(1))
+    #expect(await !gate.panesRedialed(location))
+
+    try FileManager.default.setAttributes(
+      [.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: stamp.path)
+    #expect(await gate.panesRedialed(location))
+  }
+
+  @Test(arguments: [false, true])
+  func aPaneStampsItsHostBeforeEveryRedial(codespace: Bool) throws {
+    let script =
+      codespace
+      ? SSHReconnectLoop.codespaceScript(
+        connect: "CONNECT", reconnect: "RECONNECT", pauseMarker: "/tmp/p",
+        redialStamp: "/tmp/stamp")
+      : SSHReconnectLoop.script(
+        connect: "CONNECT", reconnect: "RECONNECT", redialStamp: "/tmp/stamp")
+    let touch = try #require(script.range(of: "touch '/tmp/stamp' 2>/dev/null; RECONNECT"))
+    let connect = try #require(script.range(of: "CONNECT"))
+    #expect(connect.upperBound <= touch.lowerBound)
+  }
+}

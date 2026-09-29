@@ -52,6 +52,7 @@ public actor GraphStore {
   private let onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])?
   private let onConnectionFailure: (@Sendable (UUID) -> Void)?
   private let onEnsureSession: (@Sendable (LoopNode, String?) -> Void)?
+  private let onRestoreRebootedSessions: (@Sendable ([LoopNode], String) async -> Void)?
   private let onTerminateSession: (@Sendable (LoopNode, String?) -> Void)?
   /// Kills a loop's session and, for an unattended loop, relaunches it on the same
   /// transcript. Awaited, unlike the two above: the answer is whether the old session
@@ -321,6 +322,7 @@ public actor GraphStore {
     onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])? = nil,
     onConnectionFailure: (@Sendable (UUID) -> Void)? = nil,
     onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
+    onRestoreRebootedSessions: (@Sendable ([LoopNode], String) async -> Void)? = nil,
     onFindMissingProvider: (@Sendable (LoopNode, String?) async -> LaunchFailure?)? = nil,
     onTerminateSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
     onRestartSession: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
@@ -364,6 +366,7 @@ public actor GraphStore {
     self.onGraphEvent = onGraphEvent
     self.onConnectionFailure = onConnectionFailure
     self.onEnsureSession = onEnsureSession
+    self.onRestoreRebootedSessions = onRestoreRebootedSessions
     self.onFindMissingProvider = onFindMissingProvider
     self.onTerminateSession = onTerminateSession
     self.onRestartSession = onRestartSession
@@ -4474,14 +4477,41 @@ public actor GraphStore {
   ///   sweep would restart each poller's interval and a goal polled less often than the
   ///   sweep would never fire at all. The pollers are already running; they are in-memory
   ///   and a remote reboot doesn't touch them.
-  /// - **Resolved nodes are skipped whatever their loop type.** The load-time version
-  ///   restarts a `.stopped` time-based node, which is defensible once at boot and wrong
-  ///   every minute: a human who stopped a remote loop would watch it come back.
+  /// - **Resolved nodes are never ensured, whatever their loop type.** The load-time
+  ///   version restarts a `.stopped` time-based node, which is defensible once at boot and
+  ///   wrong every minute: a human who stopped a remote loop would watch it come back.
+  ///
+  /// A resolved node's session is still brought back when the host's reboot killed it
+  /// (`onRestoreRebootedSessions`): a pane leaves every unattended loop to this daemon,
+  /// so a finished loop's open pane otherwise dialed "waiting for graphcoded" forever. The
+  /// restore is the conversation only (`rebootRestoreCopy`): no task, no poller or
+  /// heartbeat, no state change. Attended loops are not here — their pane restores them.
   public func ensureUnattendedSessionsAlive() async {
     for node in graph.nodes where node.runsUnattended && !node.isResolved {
       ensureSession(node)
     }
+    let finished = graph.nodes.filter {
+      $0.runsUnattended && $0.isResolved && $0.launchFailure == nil
+    }
+    if let onRestoreRebootedSessions, !finished.isEmpty {
+      let path = graph.project.path
+      let copies = finished.map(Self.rebootRestoreCopy)
+      Task.detached { await onRestoreRebootedSessions(copies, path) }
+    }
     await broadcastIfTemplatesRefreshed()
+  }
+
+  /// A finished loop as its reboot restore launches it: the banked conversation resumed,
+  /// or, with nothing banked, a session opening on this note instead of the loop's task —
+  /// the same shape `resumeResolvedSession` gives a finished loop a human opens.
+  static func rebootRestoreCopy(of node: LoopNode) -> LoopNode {
+    var quiet = node
+    quiet.loopType = .sketch
+    quiet.attachments = []
+    quiet.firstInstruction =
+      "[graphcode] The machine this loop runs on restarted, and its earlier conversation "
+      + "could not be resumed. This loop has finished; wait for the human's question."
+    return quiet
   }
 
   // MARK: - Broadcast
