@@ -91,7 +91,7 @@ jobs:
 
       - name: Bootstrap exact Windows dependencies
         shell: pwsh
-        timeout-minutes: 15
+        timeout-minutes: 30
         run: ./Tools/windows/bootstrap.ps1 -ToolRoot .ci-tools -ProviderRoot .ci-providers
 
       - name: Verify validation runner contract
@@ -137,7 +137,7 @@ jobs:
 
       - name: Bootstrap exact Windows dependencies
         shell: pwsh
-        timeout-minutes: 15
+        timeout-minutes: 30
         run: ./Tools/windows/bootstrap.ps1 -ToolRoot .ci-tools -ProviderRoot .ci-providers -SkipSwift
 
       - name: Verify provider pins after cache restore

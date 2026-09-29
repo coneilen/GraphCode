@@ -634,6 +634,9 @@ try {
     if ($stepTimeouts -lt $expected.Steps) {
       throw "RED: $($expected.Job) leaves a long-running phase without a step timeout"
     }
+    if ($expected.Text -notmatch '(?s)name: Bootstrap exact Windows dependencies.*?timeout-minutes: 30') {
+      throw "RED: $($expected.Job) bootstrap cap cannot cover the observed cold download and clone time"
+    }
   }
   foreach ($key in @(
       "windows-zig-v1-`${{ hashFiles('Tools/windows/bootstrap.ps1') }}",
@@ -646,6 +649,7 @@ try {
       $windowsCacheWarmerWorkflow -notmatch '(?m)^    branches: \[main\]\s*$' -or
       $windowsCacheWarmerWorkflow -notmatch '(?m)^  schedule:\s*$' -or
       $windowsCacheWarmerWorkflow -notmatch '(?m)^  workflow_dispatch:\s*$' -or
+      $windowsCacheWarmerWorkflow -notmatch '(?s)name: Bootstrap exact Windows dependencies.*?timeout-minutes: 30' -or
       $windowsCacheWarmerWorkflow -notmatch '(?s)validate\.ps1 -Task terminal-gate.*?actions/cache/save@') {
     throw "RED: Windows cache warmer does not cover main, weekly, manual, and canonical provider builds"
   }
