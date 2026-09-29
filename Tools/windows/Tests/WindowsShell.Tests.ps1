@@ -2,7 +2,14 @@
 param(
   [switch] $List,
   [switch] $WorkspaceTabSelectorOnly,
-  [string] $ZigExecutable
+  [string] $ZigExecutable,
+  # Hosted CI splits the executable sections across runners. Shard/ShardCount
+  # select one part of a deterministic, complete partition; the defaults run
+  # every section, exactly as a local run always has.
+  [int] $Shard = 0,
+  [int] $ShardCount = 1,
+  [string] $SectionManifest,
+  [switch] $PlanOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +29,127 @@ if ($List) {
   )
   exit 0
 }
+
+# The section catalog is derived from this script's own top-level
+# `Invoke-Native "<name>"` calls, so a new section is sharded automatically and
+# a shard can never silently omit one: the union of every shard's assignment is
+# the catalog by construction, and each shard records what it executed.
+function Get-ShellSectionCatalog([string] $path) {
+  $tokens = $null
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+  if ($errors.Count -ne 0) { throw "Windows shell contract: WindowsShell.Tests.ps1 must parse" }
+  $calls = @($ast.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq "Invoke-Native"
+    }, $true))
+  $names = [Collections.Generic.List[string]]::new()
+  foreach ($call in $calls) {
+    $nameElement = $call.CommandElements[1]
+    if ($nameElement -isnot [Management.Automation.Language.StringConstantExpressionAst]) {
+      throw "Windows shell contract: Invoke-Native sections need a literal name: $($call.Extent.Text.Split("`n")[0])"
+    }
+    for ($parent = $call.Parent; $null -ne $parent; $parent = $parent.Parent) {
+      if ($parent -is [Management.Automation.Language.CommandAst] -and
+          $parent.GetCommandName() -eq "Invoke-Native") {
+        throw "Windows shell contract: section '$($nameElement.Value)' is nested inside another section; shards schedule top-level sections only"
+      }
+    }
+    if ($names.Contains($nameElement.Value)) {
+      throw "Windows shell contract: duplicate section name '$($nameElement.Value)'"
+    }
+    $names.Add($nameElement.Value)
+  }
+  if ($names.Count -eq 0) { throw "Windows shell contract: no executable sections were found" }
+  return , $names.ToArray()
+}
+
+# Measured hosted-runner seconds (windows-2022). Almost all of a heavy section is
+# test execution (allocation-failure sweeps), not compilation, so the hints only
+# balance the partition; they never decide whether a section runs.
+$sectionCostHints = @{
+  "Wire executable tests" = 56
+  "Codespace ingress dialog executable tests" = 8
+  "Forms and navigation executable tests" = 56
+  "Native dialog message-loop executable tests" = 60
+  "Context menu and gate fixture message executable tests" = 62
+  "Frame buffer executable tests" = 56
+  "Daemon client startup tests" = 59
+  "Terminal VT preparation and memory tests" = 81
+  "Graph model executable tests" = 57
+  "Graph canvas executable tests" = 56
+  "Worktree Git process regression tests" = 19
+  "Template library executable tests" = 56
+  "Custody child data-only executable tests" = 20
+  "Workspace teardown executable tests" = 59
+  "Sidebar executable tests" = 60
+  "App shell executable tests" = 75
+}
+# Sections that consume zig-out\lib\ghostty-vt-static.lib must share a shard
+# with the section that prepares it, and run after it (catalog order).
+$sectionAffinity = @{
+  "Terminal input queue tests" = "Terminal VT preparation and memory tests"
+  "App shell executable tests" = "Terminal VT preparation and memory tests"
+}
+
+function Get-ShellSectionPlan([string[]] $catalog, [int] $count) {
+  $groups = [ordered]@{}
+  foreach ($name in $catalog) {
+    $anchor = if ($sectionAffinity.ContainsKey($name)) { $sectionAffinity[$name] } else { $name }
+    if ($catalog -notcontains $anchor) {
+      throw "Windows shell contract: affinity anchor '$anchor' for '$name' is not a section"
+    }
+    if (-not $groups.Contains($anchor)) {
+      $groups[$anchor] = [pscustomobject]@{
+        Anchor = $anchor
+        Order = [Array]::IndexOf($catalog, $anchor)
+        Cost = 0
+        Members = [Collections.Generic.List[string]]::new()
+      }
+    }
+    $cost = if ($sectionCostHints.ContainsKey($name)) { $sectionCostHints[$name] } else { 3 }
+    $groups[$anchor].Cost += $cost
+    $groups[$anchor].Members.Add($name)
+  }
+  foreach ($name in @($sectionCostHints.Keys) + @($sectionAffinity.Keys) + @($sectionAffinity.Values)) {
+    if ($catalog -notcontains $name) {
+      throw "Windows shell contract: shard plan names a section that no longer exists: $name"
+    }
+  }
+  $loads = [int[]]::new($count)
+  $assignment = @{}
+  foreach ($group in @($groups.Values | Sort-Object @{ Expression = "Cost"; Descending = $true }, Order)) {
+    $target = 0
+    for ($index = 1; $index -lt $count; $index++) {
+      if ($loads[$index] -lt $loads[$target]) { $target = $index }
+    }
+    $loads[$target] += $group.Cost
+    foreach ($member in $group.Members) { $assignment[$member] = $target }
+  }
+  [pscustomobject]@{ Assignment = $assignment; Loads = $loads }
+}
+
+if ($ShardCount -lt 1 -or $ShardCount -gt 8 -or $Shard -lt 0 -or $Shard -ge $ShardCount) {
+  throw "Windows shell contract: shard $Shard of $ShardCount is not a valid selection"
+}
+$sectionCatalog = Get-ShellSectionCatalog $PSCommandPath
+$sectionPlan = Get-ShellSectionPlan $sectionCatalog $ShardCount
+$assignedSections = @($sectionCatalog | Where-Object { $sectionPlan.Assignment[$_] -eq $Shard })
+$executedSections = [Collections.Generic.List[object]]::new()
+if ($PlanOnly) {
+  [ordered]@{
+    shard = $Shard
+    shardCount = $ShardCount
+    catalog = $sectionCatalog
+    assigned = $assignedSections
+    estimatedSeconds = $sectionPlan.Loads[$Shard]
+  } | ConvertTo-Json -Depth 4
+  exit 0
+}
+Write-Host ("WINDOWS_SHELL_SECTION_SHARD shard=$Shard count=$ShardCount " +
+  "sections=$($assignedSections.Count)/$($sectionCatalog.Count) " +
+  "estimatedSeconds=$($sectionPlan.Loads[$Shard])")
 
 function Assert-Contract([object] $condition, [string] $message) {
   $values = @($condition)
@@ -213,11 +341,39 @@ Assert-Contract ($inputSource -match "ctrl and shift and key == 'I'.*inspect_wor
   "Inspect worktrees is not routed from Ctrl+Shift+I"
 
 function Invoke-Native([string] $description, [scriptblock] $command) {
+  if ($sectionCatalog -notcontains $description) {
+    throw "Windows shell contract: section '$description' is not in the derived catalog"
+  }
+  if ($sectionPlan.Assignment[$description] -ne $Shard) {
+    Write-Host "--> $description (shard $($sectionPlan.Assignment[$description]) of $ShardCount)"
+    return
+  }
   Write-Host "==> $description"
-  & $command
+  # A --test-filter that matches nothing still exits 0, so every `zig test` in a
+  # section must report a positive passed count of its own.
+  $expectedSummaries = [regex]::Matches($command.ToString(), '\$zig test ').Count
+  $positiveSummaries = 0
+  $started = [Diagnostics.Stopwatch]::StartNew()
+  & $command *>&1 | ForEach-Object {
+    $line = "$_"
+    Write-Host $line
+    if ($line -match '^All ([0-9]+) tests passed\.$' -or
+        $line -match '^([0-9]+) passed; [0-9]+ skipped; 0 failed\.$') {
+      if ([int64] $Matches[1] -gt 0) { $positiveSummaries++ }
+    }
+  }
   if ($LASTEXITCODE -ne 0) {
     throw "$description failed with exit code $LASTEXITCODE"
   }
+  if ($positiveSummaries -lt $expectedSummaries) {
+    throw "$description reported $positiveSummaries positive test summaries for $expectedSummaries zig test invocations"
+  }
+  $executedSections.Add([ordered]@{
+    name = $description
+    seconds = [Math]::Round($started.Elapsed.TotalSeconds, 1)
+    zigTestInvocations = $expectedSummaries
+    positiveSummaries = $positiveSummaries
+  })
 }
 
 function Resolve-TestZig {
@@ -703,23 +859,23 @@ Invoke-Native "Graph model executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\GraphModel.zig } finally { Pop-Location }
 }
-Invoke-Native "Graph canvas executable tests" {
+Invoke-Native "Graph canvas input executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
   if (-not $winghosttyRoot) {
     $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
   }
-  Invoke-Native "Graph canvas input executable tests" {
-    $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
-    $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
-    if (-not $winghosttyRoot) {
-      $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
-    }
-    $include = Join-Path $winghosttyRoot "include"
-    Push-Location $shellRoot
-    try {
-      & $zig test src\CanvasInput.zig -target x86_64-windows-msvc -lc "-I$include"
-    } finally { Pop-Location }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\CanvasInput.zig -target x86_64-windows-msvc -lc "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "Graph canvas executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
   }
   $include = Join-Path $winghosttyRoot "include"
   if (-not (Test-Path -LiteralPath $include -PathType Container)) {
@@ -735,8 +891,10 @@ Invoke-Native "Worktree status executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\WorktreeStatus.zig } finally { Pop-Location }
 }
-& (Join-Path $PSScriptRoot "WorktreeGitProcess.Tests.ps1") -Zig $zig `
-  -EvidenceDirectory (Join-Path $shellRoot (".zig-cache\worktree-process-" + [guid]::NewGuid().ToString("N")))
+Invoke-Native "Worktree Git process regression tests" {
+  & (Join-Path $PSScriptRoot "WorktreeGitProcess.Tests.ps1") -Zig $zig `
+    -EvidenceDirectory (Join-Path $shellRoot (".zig-cache\worktree-process-" + [guid]::NewGuid().ToString("N")))
+}
 Invoke-Native "Draft attachments executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\DraftAttachments.zig } finally { Pop-Location }
@@ -948,5 +1106,23 @@ if ($missingTestFiles.Count -ne 0) {
   throw "Windows shell contract: the following src\*.zig files contain test blocks but are not wired into any zig test invocation in WindowsShell.Tests.ps1 (see issue #424): $($missingTestFiles -join ', ')"
 }
 
-Write-Output "Windows shell scaffold contract: PASS ($($wiredTestFiles.Count) source files executed)"
+$executedNames = @($executedSections | ForEach-Object { $_.name })
+if (($executedNames -join "`n") -cne ($assignedSections -join "`n")) {
+  throw "Windows shell contract: shard $Shard executed [$($executedNames -join ', ')] but was assigned [$($assignedSections -join ', ')]"
+}
+if ($SectionManifest) {
+  $manifestDirectory = Split-Path -Parent $SectionManifest
+  if ($manifestDirectory) { New-Item -ItemType Directory -Force $manifestDirectory | Out-Null }
+  [ordered]@{
+    schemaVersion = 1
+    shard = $Shard
+    shardCount = $ShardCount
+    catalog = $sectionCatalog
+    assigned = $assignedSections
+    executed = @($executedSections)
+    wiredTestFiles = $wiredTestFiles
+  } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $SectionManifest -Encoding utf8
+}
+
+Write-Output "Windows shell scaffold contract: PASS ($($wiredTestFiles.Count) source files wired; shard $Shard of $ShardCount executed $($executedNames.Count) of $($sectionCatalog.Count) sections)"
 exit 0
