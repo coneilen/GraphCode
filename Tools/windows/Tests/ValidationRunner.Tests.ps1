@@ -48,6 +48,225 @@ function Assert-ShellHostPrerequisite([string] $source) {
   }
 }
 
+function Get-WorkflowJobs([string] $text) {
+  # Windows checkouts may convert workflow files to CRLF.
+  $text = $text.Replace("`r`n", "`n")
+  $jobsAt = [regex]::Match($text, '(?m)^jobs:\s*$')
+  if (-not $jobsAt.Success) { throw "Workflow has no jobs block" }
+  $body = $text.Substring($jobsAt.Index + $jobsAt.Length)
+  $heads = @([regex]::Matches($body, '(?m)^  ([A-Za-z0-9_-]+):[ \t]*$'))
+  $jobs = [ordered]@{}
+  for ($index = 0; $index -lt $heads.Count; $index++) {
+    $end = if ($index + 1 -lt $heads.Count) { $heads[$index + 1].Index } else { $body.Length }
+    $jobs[$heads[$index].Groups[1].Value] = $body.Substring($heads[$index].Index, $end - $heads[$index].Index)
+  }
+  $jobs
+}
+
+# Every validate.ps1 invocation a pull request runs, expanded over its matrix,
+# must together cover exactly what `validate.ps1 -Task all` covers: every task,
+# every Windows shell unit shard plus the integration part, and both packaging
+# parts. Jobs gated to schedule/dispatch (a positive event_name test) are not
+# pull request coverage.
+function Test-CiPartitionCoverage([string] $runner, [string] $pwsh, [string] $repoRoot) {
+  $expectedTasks = @(& $runner -List)
+  $lines = [Collections.Generic.List[string]]::new()
+  foreach ($file in @("windows-shell.yml", "windows-port-validation.yml", "windows-hardening.yml")) {
+    $jobs = Get-WorkflowJobs (Get-Content (Join-Path $repoRoot ".github\workflows\$file") -Raw)
+    foreach ($job in $jobs.GetEnumerator()) {
+      if ($job.Value -match '(?m)^    if:.*github\.event_name ==') { continue }
+      $shards = @("")
+      $matrix = [regex]::Match($job.Value, '(?m)^\s+shard:\s*\[([0-9, ]+)\]')
+      if ($matrix.Success) { $shards = @($matrix.Groups[1].Value -split ',\s*') }
+      foreach ($run in [regex]::Matches($job.Value, '(?m)^\s*run:\s*\./Tools/windows/validate\.ps1 (.+)$')) {
+        foreach ($shard in $shards) {
+          $arguments = $run.Groups[1].Value.Replace('${{ matrix.shard }}', $shard)
+          if ($arguments -match '\$\{\{') { throw "Unsupported workflow expression in validate.ps1 arguments: $arguments" }
+          $output = @(& $pwsh -NoProfile -Command "& '$runner' $arguments -DryRun")
+          if ($LASTEXITCODE -ne 0) { throw "Workflow validate.ps1 arguments failed a dry run: $arguments" }
+          foreach ($line in $output) { if ("$line" -match '^task=') { $lines.Add("$line") } }
+        }
+      }
+    }
+  }
+  $coveredTasks = @($lines | ForEach-Object { ($_ -split ' ')[0].Substring(5) } | Sort-Object -Unique)
+  $missingTasks = @($expectedTasks | Where-Object { $coveredTasks -notcontains $_ })
+  if ($missingTasks.Count -ne 0) {
+    throw "RED: pull request CI no longer runs validation tasks: $($missingTasks -join ', ')"
+  }
+  Assert-PartCoverage $lines
+}
+
+function Assert-PartCoverage([string[]] $lines) {
+  $shell = @($lines | Where-Object { $_ -like "task=windows-shell *" } | ForEach-Object {
+      $match = [regex]::Match($_, 'part=(\w+) shard=(\d+)/(\d+)')
+      [pscustomobject]@{ Part = $match.Groups[1].Value; Shard = [int]$match.Groups[2].Value; Count = [int]$match.Groups[3].Value }
+    })
+  if (-not @($shell | Where-Object { $_.Part -ne "unit" }).Count) {
+    throw "RED: pull request CI does not run the Windows shell integration part"
+  }
+  $unitComplete = $false
+  foreach ($group in @($shell | Where-Object { $_.Part -ne "integration" } | Group-Object Count)) {
+    $count = [int]$group.Name
+    $seen = @($group.Group | ForEach-Object { $_.Shard } | Sort-Object -Unique)
+    if ($seen.Count -eq $count -and ($seen -join ',') -eq ((0..($count - 1)) -join ',')) { $unitComplete = $true }
+  }
+  if (-not $unitComplete) { throw "RED: pull request CI does not run every Windows shell unit shard" }
+  $packaging = @($lines | Where-Object { $_ -like "task=packaging *" } | ForEach-Object { ($_ -split 'part=')[1] })
+  if ($packaging -notcontains "all" -and ($packaging -notcontains "contracts" -or $packaging -notcontains "real")) {
+    throw "RED: pull request CI does not run both packaging parts"
+  }
+}
+
+function Test-CiAggregateGates([string] $repoRoot, [string] $pwsh) {
+  foreach ($gate in @(
+      @{ File = "windows-shell.yml"; Job = "windows-shell"; Exempt = @() },
+      @{ File = "windows-port-validation.yml"; Job = "windows-spikes"; Exempt = @("investigation-privacy") })) {
+    $jobs = Get-WorkflowJobs (Get-Content (Join-Path $repoRoot ".github\workflows\$($gate.File)") -Raw)
+    if (-not $jobs.Contains($gate.Job)) { throw "RED: required check job '$($gate.Job)' is missing" }
+    $aggregate = $jobs[$gate.Job]
+    if ($aggregate -match '(?m)^    name:') { throw "RED: '$($gate.Job)' must keep its job id as the required check name" }
+    $needs = [regex]::Match($aggregate, '(?m)^    needs:\s*\[([^\]]+)\]')
+    if (-not $needs.Success) { throw "RED: '$($gate.Job)' does not need its parts" }
+    $needed = @($needs.Groups[1].Value -split ',\s*' | ForEach-Object { $_.Trim() })
+    foreach ($name in $jobs.Keys) {
+      if ($name -ne $gate.Job -and $gate.Exempt -notcontains $name -and $needed -notcontains $name) {
+        throw "RED: '$($gate.Job)' does not wait for part '$name'"
+      }
+    }
+    if ($aggregate -notmatch '(?m)^    if: \$\{\{ !cancelled\(\) \}\}\s*$' -or
+        $aggregate -notmatch 'NEEDS_JSON: \$\{\{ toJSON\(needs\) \}\}' -or
+        $aggregate -notmatch 'Assert-CiPartResults\.ps1 -NeedsJson \$env:NEEDS_JSON -Required \$env:WINDOWS_REQUIRED') {
+      throw "RED: '$($gate.Job)' does not fail unless every part succeeded"
+    }
+  }
+  $gateScript = Join-Path $repoRoot "Tools\windows\Assert-CiPartResults.ps1"
+  foreach ($case in @(
+      @{ Required = "true"; Results = @{ changes = "success"; a = "success"; b = "success" }; Pass = $true },
+      @{ Required = "true"; Results = @{ changes = "success"; a = "success"; b = "skipped" }; Pass = $false },
+      @{ Required = "true"; Results = @{ changes = "failure"; a = "success"; b = "failure" }; Pass = $false },
+      @{ Required = "true"; Results = @{ changes = "success"; a = "cancelled"; b = "success" }; Pass = $false },
+      @{ Required = "false"; Results = @{ changes = "success"; a = "skipped"; b = "skipped" }; Pass = $true },
+      @{ Required = "false"; Results = @{ changes = "success"; a = "failure"; b = "skipped" }; Pass = $false },
+      @{ Required = "false"; Results = @{ changes = "failure"; a = "skipped"; b = "skipped" }; Pass = $false })) {
+    $needsJson = [ordered]@{}
+    foreach ($entry in $case.Results.GetEnumerator()) { $needsJson[$entry.Key] = @{ result = $entry.Value; outputs = @{} } }
+    & $pwsh -NoProfile -File $gateScript -NeedsJson ($needsJson | ConvertTo-Json -Compress -Depth 4) -Required $case.Required *> $null
+    if (($LASTEXITCODE -eq 0) -ne $case.Pass) {
+      throw "RED: aggregate gate decided wrongly for required=$($case.Required) $($case.Results | ConvertTo-Json -Compress)"
+    }
+  }
+}
+
+# The Windows shell Zig sections are sharded across runners. A section passes
+# only with a positive test count per `zig test` (a filter that matches nothing
+# still exits 0), the shard plan is a complete disjoint partition, and the
+# aggregate manifest check rejects missing, duplicated, or empty sections.
+function Test-ShellSectionGate([string] $repoRoot, [string] $pwsh) {
+  $shellTests = Join-Path $repoRoot "Tools\windows\Tests\WindowsShell.Tests.ps1"
+  & {
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($shellTests, [ref]$tokens, [ref]$errors)
+    $definition = $ast.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq "Invoke-Native"
+      }, $true)
+    if (-not $definition) { throw "RED: WindowsShell.Tests.ps1 has no Invoke-Native section runner" }
+    . ([scriptblock]::Create($definition.Extent.Text))
+    $sectionCatalog = @("Probe section")
+    $sectionPlan = [pscustomobject]@{ Assignment = @{ "Probe section" = 0 } }
+    $Shard = 0
+    $ShardCount = 1
+    $executedSections = [Collections.Generic.List[object]]::new()
+    foreach ($summary in @("All 0 tests passed.", "0 passed; 0 skipped; 1 failed.", "0 passed; 2 skipped; 0 failed.")) {
+      $accepted = $true
+      try {
+        Invoke-Native "Probe section" ([scriptblock]::Create(
+            "# `$zig test src\Probe.zig --test-filter nothing`nWrite-Output '$summary'; `$global:LASTEXITCODE = 0")) 6> $null
+      } catch { $accepted = $false }
+      if ($accepted) { throw "RED: a Windows shell section passed with no executed tests ($summary)" }
+    }
+    Invoke-Native "Probe section" {
+      # $zig test src\Probe.zig
+      # $zig test src\Other.zig
+      Write-Output "All 3 tests passed."
+      Write-Output "2 passed; 1 skipped; 0 failed."
+      $global:LASTEXITCODE = 0
+    } 6> $null
+    if ($executedSections.Count -ne 1 -or $executedSections[0].positiveSummaries -ne 2 -or
+        $executedSections[0].zigTestInvocations -ne 2) {
+      throw "A Windows shell section with positive test counts was not recorded"
+    }
+  }
+
+  $plans = @(0..2 | ForEach-Object {
+      & $pwsh -NoProfile -File $shellTests -PlanOnly -Shard $_ -ShardCount 3 | Out-String | ConvertFrom-Json
+    })
+  $whole = & $pwsh -NoProfile -File $shellTests -PlanOnly | Out-String | ConvertFrom-Json
+  $catalog = @($whole.catalog)
+  if ($catalog.Count -lt 40 -or (@($whole.assigned) -join "`n") -cne ($catalog -join "`n")) {
+    throw "RED: an unsharded Windows shell run does not execute the whole section catalog"
+  }
+  $assigned = @($plans | ForEach-Object { @($_.assigned) })
+  if ($assigned.Count -ne $catalog.Count -or @($assigned | Sort-Object -Unique).Count -ne $catalog.Count -or
+      @($catalog | Where-Object { $assigned -cnotcontains $_ }).Count -ne 0 -or
+      @($plans | Where-Object { @($_.assigned).Count -eq 0 }).Count -ne 0) {
+    throw "RED: the Windows shell shard plan is not a complete disjoint partition"
+  }
+  $shellWorkflow = Get-Content (Join-Path $repoRoot ".github\workflows\windows-shell.yml") -Raw
+  if ($shellWorkflow -notmatch '(?m)^\s+shard: \[0, 1, 2\]\s*$' -or
+      $shellWorkflow -notmatch '-ShellTestShardCount 3 ' -or
+      $shellWorkflow -notmatch 'Test-ShellSectionManifests\.ps1 -Directory \.ci-sections -ShardCount 3') {
+    throw "RED: the Windows shell shard matrix, plan, and coverage check disagree on the shard count"
+  }
+
+  $verifier = Join-Path $repoRoot "Tools\windows\Test-ShellSectionManifests.ps1"
+  $scratch = Join-Path ([IO.Path]::GetTempPath()) "graphcode-shell-sections-$([guid]::NewGuid())"
+  try {
+    $mutations = @(
+      @{ Name = "complete"; Pass = $true; Edit = { param($manifests) } },
+      @{ Name = "missing section"; Pass = $false; Edit = { param($manifests)
+          $manifests[1].executed = @($manifests[1].executed | Select-Object -Skip 1)
+          $manifests[1].assigned = @($manifests[1].assigned | Select-Object -Skip 1) } },
+      @{ Name = "duplicate section"; Pass = $false; Edit = { param($manifests)
+          $manifests[0].executed = @($manifests[0].executed) + @($manifests[1].executed[0])
+          $manifests[0].assigned = @($manifests[0].assigned) + @($manifests[1].assigned[0]) } },
+      @{ Name = "zero tests"; Pass = $false; Edit = { param($manifests)
+          $manifests[2].executed[0].positiveSummaries = 0 } },
+      @{ Name = "skipped assignment"; Pass = $false; Edit = { param($manifests)
+          $manifests[2].executed = @($manifests[2].executed | Select-Object -SkipLast 1) } },
+      @{ Name = "missing shard"; Pass = $false; Edit = { param($manifests) $manifests[2] = $null } }
+    )
+    foreach ($mutation in $mutations) {
+      $directory = Join-Path $scratch ($mutation.Name -replace ' ', '-')
+      New-Item -ItemType Directory -Force $directory | Out-Null
+      $manifests = @($plans | ForEach-Object {
+          [pscustomobject]@{
+            schemaVersion = 1
+            shard = $_.shard
+            shardCount = 3
+            catalog = @($_.catalog)
+            assigned = @($_.assigned)
+            executed = @($_.assigned | ForEach-Object {
+                [pscustomobject]@{ name = $_; seconds = 1; zigTestInvocations = 1; positiveSummaries = 1 }
+              })
+          }
+        })
+      & $mutation.Edit $manifests
+      foreach ($manifest in @($manifests | Where-Object { $null -ne $_ })) {
+        $manifest | ConvertTo-Json -Depth 6 |
+          Set-Content -LiteralPath (Join-Path $directory "shard-$($manifest.shard).json")
+      }
+      & $pwsh -NoProfile -File $verifier -Directory $directory -ShardCount 3 *> $null
+      if (($LASTEXITCODE -eq 0) -ne $mutation.Pass) {
+        throw "RED: Windows shell section coverage decided wrongly for the $($mutation.Name) case"
+      }
+    }
+  } finally {
+    Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
 function Test-ZigResolverDiagnostics([string] $source) {
   $tokens = $null
   $errors = $null
@@ -445,20 +664,26 @@ try {
     try { Assert-ShellHostPrerequisite $mutation } catch { $rejected = $true }
     if (-not $rejected) { throw "Host prerequisite contract accepted a deliberate missing-build control" }
   }
-  if ($runnerSource -notmatch '(?s)"packaging" \{\s*& .*?Packaging\.Signing\.Tests\.ps1.*?Packaging\.Tests\.ps1') {
+  if ($runnerSource -notmatch '(?s)"packaging" \{\s*if \(\$PackagingPart -ne "real"\) \{\s*& .*?Packaging\.Signing\.Tests\.ps1.*?Packaging\.Tests\.ps1') {
     throw "RED: packaging validation does not run signed catalog integrity contracts"
   }
-  if ($runnerSource -notmatch '(?s)"packaging" \{\s*& .*?Packaging\.Rollback\.Tests\.ps1.*?Packaging\.Tests\.ps1') {
+  if ($runnerSource -notmatch '(?s)"packaging" \{\s*if \(\$PackagingPart -ne "real"\) \{\s*& .*?Packaging\.Rollback\.Tests\.ps1.*?Packaging\.Tests\.ps1') {
     throw "RED: packaging validation does not run rollback preservation contracts"
   }
-  if ($runnerSource -notmatch '(?s)"packaging" \{\s*& .*?Packaging\.Standalone\.Tests\.ps1.*?Packaging\.Tests\.ps1') {
+  if ($runnerSource -notmatch '(?s)"packaging" \{\s*if \(\$PackagingPart -ne "real"\) \{\s*& .*?Packaging\.Standalone\.Tests\.ps1.*?Packaging\.Tests\.ps1') {
     throw "RED: packaging validation does not run standalone setup contracts"
   }
   foreach ($contract in @("Packaging.ScriptSigning.Tests.ps1", "Packaging.Scheduler.Tests.ps1")) {
-    if ($runnerSource -notmatch ('(?s)"packaging" \{\s*& .*?' + [regex]::Escape($contract) + '.*?Packaging\.Tests\.ps1')) {
+    if ($runnerSource -notmatch ('(?s)"packaging" \{\s*if \(\$PackagingPart -ne "real"\) \{\s*& .*?' + [regex]::Escape($contract) + '.*?Packaging\.Tests\.ps1')) {
       throw "RED: packaging validation does not run $contract"
     }
   }
+  if ($runnerSource -notmatch '(?s)if \(\$PackagingPart -ne "contracts"\) \{\s*Initialize-PackagingInputs\s*& \(Join-Path \$repoRoot "Tools\\windows\\Tests\\Packaging\.Tests\.ps1"\)') {
+    throw "RED: real packaging does not rebuild its own inputs before Packaging.Tests.ps1"
+  }
+  Test-CiPartitionCoverage $runner $pwsh $repoRoot
+  Test-ShellSectionGate $repoRoot $pwsh
+  Test-CiAggregateGates $repoRoot $pwsh
   if ($runnerSource -notmatch '(?s)"terminal-gate" \{\s*& .*?ProviderPins\.Tests\.ps1.*?TerminalGate\.Tests\.ps1') {
     throw "RED: terminal validation does not run provider pin no-divergence contracts"
   }
