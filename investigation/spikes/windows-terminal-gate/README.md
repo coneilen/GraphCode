@@ -11,7 +11,7 @@ session/ConPTY lifetime.
 `provider-pins.json` records the accepted provider commits:
 
 - Winghostty `f5abc059e4ca58b376eb209313aca7784659c679`
-- zmx `11e20c738b4ebd88031c7a01f1a9d938ee123234`
+- zmx `dcf61203cd390d43451c25636776d7d64ecfd629`
 
 Both commits are published on dedicated branches in the public `coneilen`
 provider repositories. The bootstrap creates detached, exact-revision
