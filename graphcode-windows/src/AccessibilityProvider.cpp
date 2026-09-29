@@ -78,6 +78,11 @@ static std::wstring wide(const char *value) {
   return result;
 }
 
+static bool validUtf8(const char *value) {
+  return value && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                     value, -1, nullptr, 0) > 0;
+}
+
 static uint64_t hashPath(const std::string &path) {
   uint64_t hash = 1469598103934665603ULL;
   for (unsigned char value : path) {
@@ -1138,7 +1143,13 @@ extern "C" HRESULT gc_uia_update(IRawElementProviderSimple *provider, const char
                                   const int *eligible, const int *invokable,
                                   const int *bounds, int count, int allow_reclaim,
                                   int confirm_each_reclaim) {
-  if (!provider || count < 0) return E_INVALIDARG;
+  if (!provider || count < 0 || !validUtf8(status) ||
+      (count > 0 && (!identities || !names || !parents || !selected ||
+                     !eligible || !invokable))) return E_INVALIDARG;
+  for (int index = 0; index < count; ++index) {
+    if (!validUtf8(identities[index]) || !validUtf8(names[index]))
+      return E_INVALIDARG;
+  }
   auto *root = static_cast<Node *>(provider);
   root->update(status, identities, names, parents, selected, eligible,
                invokable, bounds, count,
