@@ -4948,6 +4948,35 @@ try {
   $renameSidebarIdentityLive = $renameSidebarBefore.Current.AutomationId
   Write-Host "UIA_CONNECTED_DAEMON_MODEL sidebar='$($renameSidebarBefore.Current.Name)' identity=$renameSidebarIdentityLive"
 
+  # A CI run's retained diagnostics showed the shell can still be mid-reconnect
+  # (a fresh connectionCount bump plus a repeated listRecentProjects/restoreOpenProjects
+  # handshake) right as the daemon-supplied sidebar row first renders. Firing the
+  # rename while that handshake is in flight let a genuine daemon-applied rename
+  # go unobserved by the shell's own model. Wait for the stub's connectionCount to
+  # stop moving before driving the rename, so the request lands on a settled
+  # connection instead of racing a reconnect.
+  $renameStubConnectionCountStable = $false
+  $renameStubConnectionCountLast = -1
+  $renameStubConnectionCountStreak = 0
+  for ($index = 0; $index -lt 100 -and -not $renameStubConnectionCountStable; $index++) {
+    $renameStubSnapshot = $null
+    if (Test-Path -LiteralPath $renameStubResultPath) {
+      $renameStubSnapshot = Get-Content -LiteralPath $renameStubResultPath -Raw |
+        ConvertFrom-Json -ErrorAction SilentlyContinue
+    }
+    $renameStubConnectionCountNow = if ($null -ne $renameStubSnapshot) { [int]$renameStubSnapshot.connectionCount } else { -1 }
+    if ($renameStubConnectionCountNow -eq $renameStubConnectionCountLast) {
+      $renameStubConnectionCountStreak++
+    } else {
+      $renameStubConnectionCountStreak = 0
+      $renameStubConnectionCountLast = $renameStubConnectionCountNow
+    }
+    if ($renameStubConnectionCountStreak -ge 5) { $renameStubConnectionCountStable = $true }
+    if (-not $renameStubConnectionCountStable) { Start-Sleep -Milliseconds 100 }
+  }
+  Write-Host ("UIA_CONNECTED_RENAME_CONNECTION_SETTLED connectionCount=$renameStubConnectionCountLast " +
+    "stable=$renameStubConnectionCountStable")
+
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($renameShellWindow, 7)) `
     "connected-daemon Rename Loop command was rejected"
   $renameLiveCondition = New-Object System.Windows.Automation.AndCondition(
