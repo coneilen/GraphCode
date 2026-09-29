@@ -567,6 +567,28 @@ function Require([bool] $condition, [string] $message) {
   if (-not $condition) { throw $message }
 }
 
+# Diagnostic reader for a redirected child stream: never throws, so it can be
+# folded into a failure message without masking the original failure.
+function Read-UiaTextFile([string] $path) {
+  try {
+    if (-not (Test-Path -LiteralPath $path)) { return "<missing $path>" }
+    $stream = [IO.FileStream]::new(
+      $path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+      [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+    )
+    try {
+      $reader = [IO.StreamReader]::new($stream)
+      $text = $reader.ReadToEnd()
+    } finally {
+      $stream.Dispose()
+    }
+    if ([string]::IsNullOrWhiteSpace($text)) { return "<empty $path>" }
+    return $text.Trim()
+  } catch {
+    return "<unreadable $path : $($_.Exception.Message)>"
+  }
+}
+
 # The shell's UIA command recorder truncates then writes daemon-command.json, so
 # the file can exist while its writer handle is still open. File.ReadAllText
 # demands FileShare.Read and throws a sharing violation against that handle;
@@ -4847,12 +4869,27 @@ try {
       $renameInitialTitle,
       "-ApplyGraphCommands"
     )
+  # Enumerating the pipe namespace is only a diagnostic: the shell reconnects on
+  # its own schedule, exactly as windows-shell.ps1 relies on, so a pipe that has
+  # not appeared yet is not a failure. What must hold is that the stub process
+  # is still alive to serve it.
   $renamePipeReady = $false
   for ($index = 0; $index -lt 100 -and -not $renamePipeReady; $index++) {
     Start-Sleep -Milliseconds 100
-    $renamePipeReady = @([IO.Directory]::GetFiles("\\.\pipe\")) -contains "\\.\pipe\$renamePipeName"
+    try {
+      $renamePipeReady = @([IO.Directory]::GetFiles("\\.\pipe\")) -contains "\\.\pipe\$renamePipeName"
+    } catch {
+      $renamePipeReady = $false
+    }
+    $renameStubProcess.Refresh()
+    if ($renameStubProcess.HasExited) { break }
   }
-  Require $renamePipeReady "rename stub daemon never published its named pipe"
+  $renameStubProcess.Refresh()
+  Write-Host ("UIA_CONNECTED_RENAME_PIPE_WAIT pipe=$renamePipeName enumerated=$renamePipeReady " +
+    "stubAlive=$(-not $renameStubProcess.HasExited)")
+  Require (-not $renameStubProcess.HasExited) `
+    ("rename stub daemon exited with code $($renameStubProcess.ExitCode) before serving its pipe: " +
+     (Read-UiaTextFile $renameStubErrorPath))
   $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\$renamePipeName"
   $env:GRAPHCODE_UIA_DAEMON_COMMAND_LOG = $renameCommandLogPath
   # The daemon supplies the model here, so the fixture rows and the forced
@@ -4883,7 +4920,9 @@ try {
       if ($candidate.Current.AutomationId -eq "graphcode-root") { $renameRoot = $candidate }
     }
   }
-  Require ($null -ne $renameRoot) "connected-daemon shell did not expose graphcode-root"
+  Require ($null -ne $renameRoot) `
+    ("connected-daemon shell did not expose graphcode-root; shell stderr: " +
+     (Read-UiaTextFile $renameShellErrorPath))
   $renameShellWindow = $renameProcess.MainWindowHandle
 
   # Nothing was seeded locally, so a sidebar row carrying the daemon's title is
@@ -4899,7 +4938,10 @@ try {
     if ($null -eq $renameSidebarBefore) { Start-Sleep -Milliseconds 100 }
   }
   Require ($null -ne $renameSidebarBefore) `
-    "daemon-supplied loop '$renameInitialTitle' never reached the sidebar"
+    ("daemon-supplied loop '$renameInitialTitle' never reached the sidebar; stub stderr: " +
+     (Read-UiaTextFile $renameStubErrorPath) + "; stub result: " +
+     (Read-UiaTextFile $renameStubResultPath) + "; shell stderr: " +
+     (Read-UiaTextFile $renameShellErrorPath))
   $renameSidebarIdentityLive = $renameSidebarBefore.Current.AutomationId
   Write-Host "UIA_CONNECTED_DAEMON_MODEL sidebar='$($renameSidebarBefore.Current.Name)' identity=$renameSidebarIdentityLive"
 
@@ -4933,7 +4975,10 @@ try {
     if ($null -eq $renameGraphCardBefore) { Start-Sleep -Milliseconds 100 }
   }
   Require ($null -ne $renameGraphCardBefore) `
-    "daemon-supplied loop '$renameInitialTitle' never rendered as a graph card"
+    ("daemon-supplied loop '$renameInitialTitle' never rendered as a graph card; graph children: " +
+     ((@(Get-DirectChildren $renameLiveGraph $rawWalker | ForEach-Object {
+        "$($_.Current.AutomationId)='$($_.Current.Name)'"
+      })) -join ", "))
   $renameGraphIdentityLive = $renameGraphCardBefore.Current.AutomationId
   $renameLiveElements = @($renameLiveDialog.FindAll(
     [System.Windows.Automation.TreeScope]::Descendants,
