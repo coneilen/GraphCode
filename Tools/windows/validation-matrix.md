@@ -38,9 +38,65 @@ Workflow-level path/branch filters must not prevent their required check context
 from being reported. `ValidationRunner.Tests.ps1` guards the unfiltered triggers.
 This deliberately trades additional CI usage for reliable branch protection.
 
-Check names and job behavior are unchanged. Full-pinned and owned-environment
-hardening remain dispatch/schedule-gated as defined in the workflow; they are
-separate evidence, not required PR contexts. No merge-queue support is introduced.
+Full-pinned and owned-environment hardening remain dispatch/schedule-gated as
+defined in the workflow; they are separate evidence, not required PR contexts.
+No merge-queue support is introduced.
+
+### Parallel CI layout
+
+The required `windows-shell` and `windows-spikes` checks are aggregate jobs.
+Each needs every part of its workflow and fails unless each part succeeded
+(`Tools/windows/Assert-CiPartResults.ps1`). The one exception is when the path
+classifier skipped the whole suite, in which case every part must be skipped.
+Between them, the parts run exactly what `validate.ps1 -Task all` runs.
+`ValidationRunner.Tests.ps1` dry-runs every pull-request `validate.ps1`
+invocation and fails if the union loses a task, a shell shard, or a packaging
+part.
+
+| Required check | Part | Command |
+|---|---|---|
+| `windows-shell` | unit shard k of 3 | `validate.ps1 -Task windows-shell -ShellPart unit -ShellTestShard k -ShellTestShardCount 3 -ShellTestManifest ...` |
+| `windows-shell` | integration: release build, smoke, tray, UIA | `validate.ps1 -Task windows-shell -SkipTrayLive -ShellPart integration` |
+| `windows-shell` | packaging contracts | `validate.ps1 -Task packaging -PackagingPart contracts` |
+| `windows-shell` | real-product packaging | `validate.ps1 -Task packaging -PackagingPart real` |
+| `windows-spikes` | Swift spikes, production, format | `validate.ps1 -Task swift-portable,swift-contracts,swift-production,swift-paths,swift-process,swift-named-pipe,swift-format` |
+| `windows-spikes` | remaining tasks | `validate.ps1 -Task all -SkipTrayLive -SkipWslRemoteE2E -SkipTask <the Swift tasks>,windows-shell,packaging,hardening` |
+| `Deterministic hardening (...)` | hardening | `validate.ps1 -Task hardening` |
+
+`windows-spikes` no longer re-runs `windows-shell`, `packaging` or `hardening`.
+Those tasks already run in the `windows-shell` and `Deterministic hardening`
+required checks on every Windows-relevant pull request.
+
+**Shell unit shards.**
+- `WindowsShell.Tests.ps1` derives its section catalog from its own top-level
+  `Invoke-Native "<name>"` calls.
+- It splits the sections into a deterministic longest-first partition using
+  measured cost hints. Sections that consume the prepared terminal VT library
+  stay in the same shard as the section that prepares it.
+- Every `zig test` in a section must print a positive passed count.
+- Each shard writes a manifest. `Test-ShellSectionManifests.ps1` then proves
+  that every catalog section ran exactly once across the shards.
+- Local runs without `-Shard` still run every section serially.
+
+**Packaging.** Real packaging rebuilds its own inputs on its runner: the Swift
+release products and runtime, the pinned Winghostty host library, and the zmx
+package fetch. It does not download artifacts from the shell integration job,
+so the two run in parallel.
+
+**Caches.**
+- The pinned Zig toolchains are cached, keyed on `bootstrap.ps1`.
+- Provider checkouts and the Zig global cache are cached, keyed on
+  `provider-pins.json`, `bootstrap.ps1` and the build flags. Only the shell
+  integration job saves this cache.
+- Bootstrap still fetches and checks out each pin.
+- `Assert-ProviderCheckout.ps1` re-verifies each provider's pinned SHA and
+  clean tree after a restore.
+
+**Timeouts and cancellation.**
+- Every Windows job has a `timeout-minutes`.
+- A newer push to the same pull request cancels the older in-flight run.
+- Runs for any other event use a unique concurrency group, so they are never
+  cancelled.
 
 ## Winghostty fork
 
