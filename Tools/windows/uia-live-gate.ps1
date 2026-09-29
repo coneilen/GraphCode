@@ -2107,56 +2107,42 @@ try {
     Require (($projectRow.Current.BoundingRectangle.Width -gt 0) -and
              ($projectRow.Current.BoundingRectangle.Height -gt 0)) "open project row has empty bounds"
   }
+  # The fixture's "UIA loop B" is awaitingInput, so Needs-you must be populated
+  # here. Reaching the detail checks is mandatory: an empty set is a failure, not
+  # a pass. Evidence is captured as values now, because the elements themselves
+  # are dead by the time the final summary is written.
   $needsYouRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^needs-you-row-'
-  })
-  $activityRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^activity-row-'
-  })
-  $activityControls = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^activity-control-'
   })
   $needsYouHeaders = @(Get-DirectChildren $projects $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^needs-you-header-'
   })
-  $activityHeaders = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^activity-header-'
-  })
-  if ($needsYouRows.Count -gt 0 -or $needsYouHeaders.Count -gt 0) {
-    Require ($needsYouHeaders.Count -eq 1) "Needs-you rows omitted their stable header"
-    Require ($needsYouHeaders[0].Current.Name -eq "Needs you") "Needs-you header name changed"
+  Require ($needsYouRows.Count -ge 1) `
+    "Needs-you exposed no sidebar rows although the fixture has an awaiting-input loop (count=$($needsYouRows.Count))"
+  Require ($needsYouHeaders.Count -eq 1) "Needs-you rows omitted their stable header (count=$($needsYouHeaders.Count))"
+  Require ($needsYouHeaders[0].Current.Name -eq "Needs you") "Needs-you header name changed"
+  Require ($needsYouRows.Count -le 4) "Needs-you exposed more than four sidebar rows"
+  $needsYouIds = @($needsYouRows | ForEach-Object { $_.Current.AutomationId })
+  Require (($needsYouIds | Where-Object { $_ -notmatch '^needs-you-row-[0-9]+$' }).Count -eq 0) `
+    "Needs-you rows did not use stable dynamic IDs"
+  $needsYouRowsChecked = 0
+  foreach ($row in $needsYouRows) {
+    Require ($row.Current.Name.Length -gt 0) "Needs-you row omitted its name"
+    Require (($row.Current.BoundingRectangle.Width -gt 0) -and
+             ($row.Current.BoundingRectangle.Height -gt 0)) "Needs-you row has empty bounds"
+    $needsYouRowsChecked++
   }
-  if ($activityRows.Count -gt 0 -or $activityControls.Count -gt 0 -or $activityHeaders.Count -gt 0) {
-    Require ($activityHeaders.Count -eq 1) "Activity controls omitted their stable header"
-    Require ($activityHeaders[0].Current.Name -eq "Activity") "Activity header name changed"
+  Require ($needsYouRowsChecked -eq $needsYouRows.Count) "Needs-you row checks did not cover every row"
+  $needsYouEvidence = [ordered]@{
+    rowCount = $needsYouRows.Count
+    rowsChecked = $needsYouRowsChecked
+    rowIds = $needsYouIds
+    rowNames = @($needsYouRows | ForEach-Object { [string]$_.Current.Name })
+    headerCount = $needsYouHeaders.Count
+    headerIds = @($needsYouHeaders | ForEach-Object { [string]$_.Current.AutomationId })
+    headerName = [string]$needsYouHeaders[0].Current.Name
   }
-  if ($needsYouRows.Count -gt 0) {
-    Require ($needsYouRows.Count -le 4) "Needs-you exposed more than four sidebar rows"
-    $needsYouIds = @($needsYouRows | ForEach-Object { $_.Current.AutomationId })
-    Require (($needsYouIds | Where-Object { $_ -notmatch '^needs-you-row-[0-9]+$' }).Count -eq 0) `
-      "Needs-you rows did not use stable dynamic IDs"
-    foreach ($row in $needsYouRows) {
-      Require ($row.Current.Name.Length -gt 0) "Needs-you row omitted its name"
-      Require (($row.Current.BoundingRectangle.Width -gt 0) -and
-               ($row.Current.BoundingRectangle.Height -gt 0)) "Needs-you row has empty bounds"
-    }
-  }
-  if ($activityRows.Count -gt 0) {
-    Require ($activityRows.Count -le 4) "Activity exposed more than four sidebar rows"
-    $activityIds = @($activityRows | ForEach-Object { $_.Current.AutomationId })
-    Require (($activityIds | Where-Object { $_ -notmatch '^activity-row-[0-9]+$' }).Count -eq 0) `
-      "Activity rows did not use stable dynamic IDs"
-    foreach ($row in $activityRows) {
-      Require ($row.Current.Name.Length -gt 0) "Activity row omitted its name"
-      Require (($row.Current.BoundingRectangle.Width -gt 0) -and
-               ($row.Current.BoundingRectangle.Height -gt 0)) "Activity row has empty bounds"
-    }
-  }
-  foreach ($control in $activityControls) {
-    Require (($control.Current.BoundingRectangle.Width -gt 0) -and
-             ($control.Current.BoundingRectangle.Height -gt 0)) "Activity control has empty bounds"
-    $null = $control.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-  }
+  Write-Host ("UIA_NEEDS_YOU_EVIDENCE=" + ($needsYouEvidence | ConvertTo-Json -Compress -Depth 4))
   $null = $projects.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
   $null = $projectRows[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   $projectRowInvoke = $projectRows[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
@@ -4538,6 +4524,58 @@ try {
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 18)) `
     "activity fixture mutation was rejected"
   Start-Sleep -Milliseconds 200
+  # Mutation 18 is the first point at which the model holds state transitions, so
+  # it is where the Activity strip's structural checks must run. Reaching them is
+  # mandatory: an empty set is a failure, not a pass.
+  $activityHeaders = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-header-'
+  })
+  $activityRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-row-'
+  })
+  $activityControls = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-control-'
+  })
+  Require ($activityHeaders.Count -eq 1) "Activity strip omitted its stable header (count=$($activityHeaders.Count))"
+  Require ($activityHeaders[0].Current.Name -eq "Activity") `
+    "Activity header name changed: '$($activityHeaders[0].Current.Name)'"
+  Require ($activityRows.Count -ge 1) `
+    "Activity exposed no sidebar rows after the activity fixture recorded state changes (count=$($activityRows.Count))"
+  Require ($activityRows.Count -le 4) "Activity exposed more than four sidebar rows"
+  $activityIds = @($activityRows | ForEach-Object { $_.Current.AutomationId })
+  Require (($activityIds | Where-Object { $_ -notmatch '^activity-row-[0-9]+$' }).Count -eq 0) `
+    "Activity rows did not use stable dynamic IDs"
+  $activityRowsChecked = 0
+  foreach ($row in $activityRows) {
+    Require ($row.Current.Name.Length -gt 0) "Activity row omitted its name"
+    Require (($row.Current.BoundingRectangle.Width -gt 0) -and
+             ($row.Current.BoundingRectangle.Height -gt 0)) "Activity row has empty bounds"
+    $activityRowsChecked++
+  }
+  Require ($activityRowsChecked -eq $activityRows.Count) "Activity row checks did not cover every row"
+  Require ($activityControls.Count -ge 1) "Activity strip exposed no scroll controls (count=$($activityControls.Count))"
+  $activityControlsChecked = 0
+  foreach ($control in $activityControls) {
+    Require (($control.Current.BoundingRectangle.Width -gt 0) -and
+             ($control.Current.BoundingRectangle.Height -gt 0)) "Activity control has empty bounds"
+    $null = $control.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    $activityControlsChecked++
+  }
+  Require ($activityControlsChecked -eq $activityControls.Count) "Activity control checks did not cover every control"
+  $activityEvidence = [ordered]@{
+    rowCount = $activityRows.Count
+    rowsChecked = $activityRowsChecked
+    rowIds = $activityIds
+    rowNames = @($activityRows | ForEach-Object { [string]$_.Current.Name })
+    headerCount = $activityHeaders.Count
+    headerIds = @($activityHeaders | ForEach-Object { [string]$_.Current.AutomationId })
+    headerName = [string]$activityHeaders[0].Current.Name
+    controlCount = $activityControls.Count
+    controlsChecked = $activityControlsChecked
+    controlIds = @($activityControls | ForEach-Object { [string]$_.Current.AutomationId })
+    controlNames = @($activityControls | ForEach-Object { [string]$_.Current.Name })
+  }
+  Write-Host ("UIA_ACTIVITY_EVIDENCE=" + ($activityEvidence | ConvertTo-Json -Compress -Depth 4))
   $activityFilter = @(Get-DirectChildren $projects $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^activity-filter-'
   }) | Select-Object -First 1
@@ -5127,11 +5165,8 @@ try {
     actionPatterns = @($actions.Keys | Sort-Object)
     surfaceActionPatterns = @($surfaceActionPatterns.Keys | Sort-Object)
     dynamicProjectRows = $projectRowIds
-    needsYouRows = @($needsYouRows | ForEach-Object { $_.Current.AutomationId })
-    needsYouHeader = @($needsYouHeaders | ForEach-Object { $_.Current.AutomationId })
-    activityRows = @($activityRows | ForEach-Object { $_.Current.AutomationId })
-    activityHeader = @($activityHeaders | ForEach-Object { $_.Current.AutomationId })
-    activityControls = @($activityControls | ForEach-Object { $_.Current.AutomationId })
+    needsYou = $needsYouEvidence
+    activity = $activityEvidence
     dynamicLoopRows = $loopIds
     dynamicProjectCards = $projectCardIds
     dynamicQuickChatCards = $quickChatCardIds
