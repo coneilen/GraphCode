@@ -486,6 +486,54 @@ public static class GraphCodeUiaGateState {
   [System.Windows.Automation.AutomationEventArgs].Assembly.Location
 )
 
+Add-Type -TypeDefinition @"
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class GraphCodeUiaHostInfo {
+  private const int UOI_NAME = 2;
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetProcessWindowStation();
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetThreadDesktop(uint threadId);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool GetUserObjectInformation(
+    IntPtr handle, int index, StringBuilder info, uint length, out uint needed
+  );
+  [DllImport("kernel32.dll")]
+  private static extern uint GetCurrentThreadId();
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
+  [DllImport("user32.dll")]
+  private static extern uint GetGuiResources(IntPtr process, uint flags);
+  private static string ObjectName(IntPtr handle) {
+    if (handle == IntPtr.Zero) return null;
+    var name = new StringBuilder(256);
+    uint needed;
+    if (!GetUserObjectInformation(handle, UOI_NAME, name, (uint)(name.Capacity * 2), out needed))
+      return null;
+    return name.ToString();
+  }
+  public static string CurrentWindowStationName() {
+    return ObjectName(GetProcessWindowStation());
+  }
+  public static string CurrentDesktopName() {
+    return ObjectName(GetThreadDesktop(GetCurrentThreadId()));
+  }
+  public static uint CurrentSessionId() {
+    uint sessionId;
+    if (!ProcessIdToSessionId((uint)Process.GetCurrentProcess().Id, out sessionId))
+      throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    return sessionId;
+  }
+  public static uint GuiResourceCount(int processId, uint flags) {
+    using (var process = Process.GetProcessById(processId))
+      return GetGuiResources(process.Handle, flags);
+  }
+}
+"@
+
 function Require([bool] $condition, [string] $message) {
   if (-not $condition) { throw $message }
 }
@@ -1205,14 +1253,17 @@ function Assert-UiaSandboxPath([string] $sandbox, [string] $path) {
   return $candidate
 }
 
-function Protect-UiaStartupDiagnosticText([string] $value) {
+function Protect-UiaStartupDiagnosticText(
+  [string] $value,
+  [int] $maxCharacters = 1024
+) {
   $safe = [regex]::Replace($value,
     '(?im)^.*\b(?:GH_[A-Z0-9_]*|GITHUB_[A-Z0-9_]*|GIT_CONFIG_[A-Z0-9_]*|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|authorization|password|secret|token|credential|api[_-]?key|bearer)\b.*$',
     '[redacted sensitive line]')
   $safe = [regex]::Replace($safe, '(?i)([a-z][a-z0-9+.-]*://)[^/\s]*@', '$1[redacted]@')
   $safe = [regex]::Replace($safe, '(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)', '[redacted]')
   $safe = [regex]::Replace($safe, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '?')
-  return $safe.Substring(0, [Math]::Min($safe.Length, 1024))
+  return $safe.Substring(0, [Math]::Min($safe.Length, $maxCharacters))
 }
 
 function Get-UiaStartupDiagnosticValue([scriptblock] $readValue) {
@@ -1226,6 +1277,203 @@ function Get-UiaStartupDiagnosticValue([scriptblock] $readValue) {
       errorType = $_.Exception.GetBaseException().GetType().Name
     }
   }
+}
+
+function Get-UiaStartupFileDiagnostic(
+  [string] $path,
+  [string] $relativeTarget,
+  [int] $maxBytes = 16384
+) {
+  $result = [ordered]@{
+    state = "unavailable"
+    relativeTarget = $relativeTarget
+    content = ""
+    readBytes = 0
+    limitBytes = $maxBytes
+  }
+  $stream = $null
+  try {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+      $result.state = "missing"
+      return [pscustomobject]$result
+    }
+    $stream = [IO.File]::Open(
+      $path,
+      [IO.FileMode]::Open,
+      [IO.FileAccess]::Read,
+      [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+    )
+    $length = $stream.Length
+    $result.lengthBytes = $length
+    $count = [int][Math]::Min($length, $maxBytes)
+    $bytes = [byte[]]::new($count)
+    $stream.Position = $length - $count
+    $read = 0
+    while ($read -lt $count) {
+      $received = $stream.Read($bytes, $read, $count - $read)
+      if ($received -le 0) { throw [IO.IOException]::new("Incomplete startup diagnostic read") }
+      $read += $received
+    }
+    $result.readBytes = $read
+    $result.state = if ($length -gt $maxBytes) { "truncated" } else { "available" }
+    $content = [Text.Encoding]::UTF8.GetString($bytes)
+    $result.content = Protect-UiaStartupDiagnosticText $content 8192
+  } catch {
+    $result.state = "unavailable"
+    $result.errorType = $_.Exception.GetBaseException().GetType().Name
+  } finally {
+    if ($null -ne $stream) { $stream.Dispose() }
+  }
+  return [pscustomobject]$result
+}
+
+function Get-UiaPrelaunchDiagnostics {
+  $processInventory = [ordered]@{ state = "available"; processes = @() }
+  try {
+    $processes = @(Get-CimInstance Win32_Process -Filter `
+      "Name = 'graphcode-windows.exe' OR Name = 'graphcoded.exe'" -ErrorAction Stop)
+    $processInventory.processes = @($processes | Sort-Object ProcessId | ForEach-Object {
+      $candidateProcessId = [int]$_.ProcessId
+      [ordered]@{
+        processId = $candidateProcessId
+        parentProcessId = [int]$_.ParentProcessId
+        name = $_.Name
+        executablePath = Protect-UiaStartupDiagnosticText ([string]$_.ExecutablePath)
+        creationDate = if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString("o") } else { $null }
+        sessionId = [int]$_.SessionId
+        userObjects = Get-UiaStartupDiagnosticValue {
+          [GraphCodeUiaHostInfo]::GuiResourceCount($candidateProcessId, 1)
+        }
+        gdiObjects = Get-UiaStartupDiagnosticValue {
+          [GraphCodeUiaHostInfo]::GuiResourceCount($candidateProcessId, 0)
+        }
+      }
+    })
+  } catch {
+    $processInventory.state = "unavailable"
+    $processInventory.errorType = $_.Exception.GetBaseException().GetType().Name
+  }
+
+  $desktopHeap = [ordered]@{
+    state = "usage_unavailable"
+    detail = "Supported user-mode APIs do not expose current per-desktop heap usage; USER/GDI counts are recorded separately."
+  }
+  try {
+    $subsystems = Get-ItemPropertyValue `
+      -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems" `
+      -Name Windows -ErrorAction Stop
+    $sharedSection = [regex]::Match([string]$subsystems, 'SharedSection=(\d+),(\d+),(\d+)')
+    if ($sharedSection.Success) {
+      $desktopHeap.sharedSectionConfiguration = $sharedSection.Value
+    } else {
+      $desktopHeap.configurationState = "SharedSection_not_found"
+    }
+  } catch {
+    $desktopHeap.configurationState = "unavailable"
+    $desktopHeap.configurationErrorType = $_.Exception.GetBaseException().GetType().Name
+  }
+
+  return [ordered]@{
+    processInventory = $processInventory
+    currentProcessId = $PID
+    sessionId = Get-UiaStartupDiagnosticValue { [GraphCodeUiaHostInfo]::CurrentSessionId() }
+    windowStation = Get-UiaStartupDiagnosticValue { [GraphCodeUiaHostInfo]::CurrentWindowStationName() }
+    desktop = Get-UiaStartupDiagnosticValue { [GraphCodeUiaHostInfo]::CurrentDesktopName() }
+    desktopHeap = $desktopHeap
+  }
+}
+
+function Get-UiaOwnedProcessDescendants([int[]] $rootProcessIds) {
+  $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+  $known = [Collections.Generic.HashSet[int]]::new()
+  foreach ($rootProcessId in $rootProcessIds) { [void]$known.Add($rootProcessId) }
+  $descendants = [Collections.Generic.List[object]]::new()
+  $depthById = @{}
+  foreach ($rootProcessId in $rootProcessIds) { $depthById[$rootProcessId] = 0 }
+  $changed = $true
+  while ($changed) {
+    $changed = $false
+    foreach ($candidate in $all) {
+      $processId = [int]$candidate.ProcessId
+      $parentProcessId = [int]$candidate.ParentProcessId
+      if ($known.Contains($processId) -or -not $known.Contains($parentProcessId)) { continue }
+      [void]$known.Add($processId)
+      $depthById[$processId] = $depthById[$parentProcessId] + 1
+      $descendants.Add([pscustomobject]@{
+        ProcessId = $processId
+        ParentProcessId = $parentProcessId
+        Name = [string]$candidate.Name
+        ExecutablePath = [string]$candidate.ExecutablePath
+        CreationDate = $candidate.CreationDate
+        Depth = $depthById[$processId]
+      })
+      $changed = $true
+    }
+  }
+  return @($descendants | Sort-Object Depth -Descending)
+}
+
+function Stop-UiaOwnedProcessTrees([Diagnostics.Process[]] $rootProcesses) {
+  $roots = @($rootProcesses | Where-Object { $null -ne $_ })
+  if ($roots.Count -eq 0) { return }
+  $rootIds = @($roots | ForEach-Object { $_.Id })
+  $descendants = @(Get-UiaOwnedProcessDescendants $rootIds)
+  Write-Host ("UIA_OWNED_PROCESS_TREE=" + (@($descendants | ForEach-Object {
+    [ordered]@{
+      processId = $_.ProcessId
+      parentProcessId = $_.ParentProcessId
+      name = $_.Name
+      executablePath = Protect-UiaStartupDiagnosticText $_.ExecutablePath
+      depth = $_.Depth
+    }
+  } | ConvertTo-Json -Compress -Depth 4)))
+  foreach ($descendant in $descendants) {
+    $current = Get-CimInstance Win32_Process -Filter `
+      "ProcessId = $($descendant.ProcessId)" -ErrorAction Stop
+    if ($null -eq $current) { continue }
+    if ([string]$current.Name -cne $descendant.Name -or
+        [string]$current.CreationDate -cne [string]$descendant.CreationDate) {
+      continue
+    }
+    $child = Get-Process -Id $descendant.ProcessId -ErrorAction SilentlyContinue
+    if ($child) {
+      try {
+        if (-not $child.HasExited) { $child.Kill() }
+      } catch [InvalidOperationException] {
+        if (-not $child.HasExited) { throw }
+      }
+      if (-not $child.WaitForExit(5000)) {
+        throw "Owned descendant process $($descendant.ProcessId) did not exit after termination"
+      }
+      $child.Dispose()
+    }
+  }
+  foreach ($root in $roots) {
+    try {
+      if (-not $root.HasExited) { $root.Kill() }
+    } catch [InvalidOperationException] {
+      if (-not $root.HasExited) { throw }
+    }
+    if (-not $root.HasExited) {
+      if (-not $root.WaitForExit(5000)) {
+        throw "Owned UIA shell process $($root.Id) did not exit after termination"
+      }
+    }
+  }
+  $remaining = @()
+  foreach ($descendant in $descendants) {
+    $current = Get-CimInstance Win32_Process -Filter `
+      "ProcessId = $($descendant.ProcessId)" -ErrorAction Stop
+    if ($null -ne $current -and
+        [string]$current.Name -ceq $descendant.Name -and
+        [string]$current.CreationDate -ceq [string]$descendant.CreationDate) {
+      $remaining += $descendant.ProcessId
+    }
+  }
+  if ($remaining.Count -gt 0) {
+    throw "Owned UIA descendants remained after teardown: $($remaining -join ',')"
+  }
+  Write-Host "UIA_PROCESS_TREE_CLEANUP=verified roots=$($rootIds -join ',') descendants=$($descendants.Count)"
 }
 
 function Get-UiaStartupImageHash([string] $path, [scriptblock] $openRead) {
@@ -1277,6 +1525,8 @@ function Write-UiaStartupFailureDiagnostic(
   [int] $exitCode,
   [string] $executable,
   [string] $workingDirectory,
+  [string] $logDirectory,
+  [string] $supportDirectory,
   [scriptblock] $openImage = {
     param($filePath)
     [IO.File]::Open($filePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -1290,11 +1540,18 @@ function Write-UiaStartupFailureDiagnostic(
     executablePath = Protect-UiaStartupDiagnosticText $executable
     executableSha256 = Get-UiaStartupImageHash $executable $openImage
     workingDirectory = Protect-UiaStartupDiagnosticText $workingDirectory
-    stderr = @{ state = "ownership_unavailable"; content = "not_read"; readBytes = 0; relativeTarget = "logs\shell-stderr.log" }
-    stdout = @{ state = "not_captured" }
-    applicationLog = @{ state = "ownership_unavailable"; content = "not_read"; readBytes = 0; relativeTarget = "support\graphcode-windows.log" }
+    stderr = Get-UiaStartupFileDiagnostic (Join-Path $logDirectory "shell-stderr.log") "logs\shell-stderr.log"
+    stdout = Get-UiaStartupFileDiagnostic (Join-Path $logDirectory "shell-stdout.log") "logs\shell-stdout.log"
+    applicationLog = Get-UiaStartupFileDiagnostic `
+      (Join-Path $supportDirectory "graphcode-windows.log") "support\graphcode-windows.log"
   }
-  Write-Host ("UIA_STARTUP_FAILURE=" + ($record | ConvertTo-Json -Depth 5 -Compress))
+  $json = $record | ConvertTo-Json -Depth 5 -Compress
+  [IO.File]::WriteAllText(
+    (Join-Path $logDirectory "startup-failure.json"),
+    $json,
+    [Text.UTF8Encoding]::new($false)
+  )
+  Write-Host ("UIA_STARTUP_FAILURE=" + $json)
 }
 
 function Assert-UiaProviderPathBudget(
@@ -1386,7 +1643,12 @@ $daemonCommandLogPath = $null
 $shellExecuteLogPath = $null
 $templateDirectory = $null
 try {
-  $sandboxPath = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) `
+  $tempRoot = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+    [IO.Path]::GetTempPath()
+  } else {
+    $env:RUNNER_TEMP
+  }
+  $sandboxPath = [IO.Path]::GetFullPath((Join-Path $tempRoot `
     ("gu-" + [guid]::NewGuid().ToString("N"))))
   New-Item -ItemType Directory -Path $sandboxPath -ErrorAction Stop | Out-Null
   $sandboxCreated = $true
@@ -1440,12 +1702,21 @@ try {
   $policyDirectory = Assert-UiaSandboxPath $sandboxPath (Join-Path $fixtureProjectPath ".graphcode")
   $policyPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $policyDirectory "worktree-policy.json")
   $shellErrorPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "shell-stderr.log")
+  $shellOutputPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "shell-stdout.log")
+  $prelaunchDiagnostics = Get-UiaPrelaunchDiagnostics
+  $prelaunchJson = $prelaunchDiagnostics | ConvertTo-Json -Depth 8 -Compress
+  [IO.File]::WriteAllText(
+    (Join-Path $logDirectory "prelaunch-diagnostics.json"),
+    $prelaunchJson,
+    [Text.UTF8Encoding]::new($false)
+  )
+  Write-Host ("UIA_PRELAUNCH_DIAGNOSTICS=" + $prelaunchJson)
   if ($ArgumentList.Count -gt 0) {
     $process = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru -WindowStyle Normal `
-      -RedirectStandardError $shellErrorPath
+      -RedirectStandardOutput $shellOutputPath -RedirectStandardError $shellErrorPath
   } else {
     $process = Start-Process -FilePath $Shell -PassThru -WindowStyle Normal `
-      -RedirectStandardError $shellErrorPath
+      -RedirectStandardOutput $shellOutputPath -RedirectStandardError $shellErrorPath
   }
 
   $root = $null
@@ -1456,9 +1727,16 @@ try {
       $startupExitCode = $process.ExitCode
       try {
         Write-UiaStartupFailureDiagnostic $process $startupExitCode $Shell `
-          (Get-Location).ProviderPath
+          (Get-Location).ProviderPath $logDirectory $settingsDirectory
       } catch {
-        try { Write-Host "UIA_STARTUP_DIAGNOSTIC_ERROR=secondary diagnostic collection or output failed" } catch {}
+        $diagnosticException = $_.Exception.GetBaseException()
+        try {
+          $detail = Protect-UiaStartupDiagnosticText `
+            "$($diagnosticException.GetType().Name): $($diagnosticException.Message)"
+          Write-Host "UIA_STARTUP_DIAGNOSTIC_ERROR=$detail"
+        } catch {
+          try { Write-Host "UIA_STARTUP_DIAGNOSTIC_ERROR=diagnostic output failed" } catch {}
+        }
       }
       throw "shell exited with code $startupExitCode"
     }
@@ -4432,28 +4710,7 @@ try {
   if ($focusEventRegistered) {
     [System.Windows.Automation.Automation]::RemoveAutomationFocusChangedEventHandler($focusHandler)
   }
-  if ($process) {
-    # The shell spawns zmx.exe subprocesses for its terminal backend, but
-    # Kill() only terminates the shell itself - Windows does not cascade to
-    # children. Left uncleaned, every aborted/crashed run (this gate or a
-    # concurrent one on a shared machine) leaks a zmx.exe that never exits,
-    # and those orphans accumulate across runs/sessions until UIA calls
-    # against the *current* shell start failing under the resulting
-    # foreground/process-token contention. Capture the shell's real children
-    # before killing it so we can reap them too.
-    $orphanCandidates = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($process.Id) AND Name='zmx.exe'" -ErrorAction SilentlyContinue)
-    if (-not $process.HasExited) {
-      $process.Kill()
-      $process.WaitForExit()
-    }
-    foreach ($orphan in $orphanCandidates) {
-      Stop-Process -Id $orphan.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-  }
-  if ($settingsProcess -and -not $settingsProcess.HasExited) {
-    $settingsProcess.Kill()
-    $settingsProcess.WaitForExit()
-  }
+  Stop-UiaOwnedProcessTrees @($process, $settingsProcess)
   } catch {
     $sandboxCleanupError = $_
     if ($sandboxCreated) { Write-Host "UIA_FAILED_SANDBOX_RETAINED=$sandboxPath" }
@@ -4502,7 +4759,9 @@ try {
   } else { $env:LOCALAPPDATA = $oldLocalAppData }
   if ($sandboxCreated) {
     Write-Host "UIA_SANDBOX_RETAINED=$sandboxPath"
-    Write-Host "UIA_SANDBOX_CLEANUP_UNVERIFIED=legacy process teardown does not verify all owned descendants; sandbox and logs retained regardless of assertion outcome"
+    if (-not $process -and -not $settingsProcess) {
+      Write-Host "UIA_PROCESS_TREE_CLEANUP=not_needed no UIA shell was launched"
+    }
   }
   }
   if ($sandboxCleanupError -and $null -eq $gateFailure) { throw $sandboxCleanupError }

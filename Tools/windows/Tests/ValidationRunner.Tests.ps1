@@ -397,6 +397,12 @@ try {
   $windowsShellWorkflow = Get-Content (Join-Path $repoRoot ".github\workflows\windows-shell.yml") -Raw
   $windowsPortWorkflow = Get-Content `
     (Join-Path $repoRoot ".github\workflows\windows-port-validation.yml") -Raw
+  foreach ($workflow in @($windowsShellWorkflow, $windowsPortWorkflow)) {
+    if ($workflow -notmatch
+        '(?s)if: failure\(\).*?actions/upload-artifact@.*?gu-\*.*?logs\\\*\.json') {
+      throw "RED: Windows CI does not retain failed UIA sandbox diagnostics as an artifact"
+    }
+  }
   foreach ($workflow in @($windowsWorkflow, $windowsShellWorkflow, $windowsPortWorkflow)) {
     if ($workflow -notmatch
         "compnerd/gha-setup-swift@397094e75494a93fa8d81db0268dbc8f5d6cf7c6" -or
@@ -418,6 +424,10 @@ try {
     throw "RED: Windows shell CI does not invoke the shell task containing live UI Automation"
   }
   $runnerSource = Get-Content $runner -Raw
+  if ($runnerSource -notmatch
+      '(?s)WINDOWS_SHELL_PRE_UIA_PROCESS_SNAPSHOT=.*?Stop-Process -Id.*?WINDOWS_SHELL_PRE_UIA_CLEANUP=verified.*?Native UI Automation live gate') {
+    throw "RED: Windows shell validation does not snapshot and reap run-owned product processes before UIA"
+  }
   Test-ZigResolverDiagnostics $runnerSource
   Assert-ShellHostPrerequisite $runnerSource
   $contractCall = [regex]::Match($runnerSource,
@@ -461,6 +471,163 @@ try {
     throw "RED: Windows shell validation does not execute the UI Automation live gate"
   }
   $uiaLiveGateSource = Get-Content (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1") -Raw
+  if ($uiaLiveGateSource -notmatch 'function Get-UiaStartupFileDiagnostic' -or
+      $uiaLiveGateSource -notmatch 'RedirectStandardOutput' -or
+      $uiaLiveGateSource -notmatch 'function Get-UiaPrelaunchDiagnostics' -or
+      $uiaLiveGateSource -notmatch 'prelaunch-diagnostics\.json' -or
+      $uiaLiveGateSource -notmatch 'startup-failure\.json') {
+    throw "RED: UIA startup failure does not capture both child streams, app log, and prelaunch host diagnostics"
+  }
+  $prelaunchDiagnostic = $uiaLiveGateSource.LastIndexOf('Get-UiaPrelaunchDiagnostics')
+  $shellLaunch = $uiaLiveGateSource.IndexOf('Start-Process -FilePath $Shell')
+  if ($prelaunchDiagnostic -lt 0 -or $shellLaunch -lt 0 -or
+      $prelaunchDiagnostic -gt $shellLaunch -or
+      $uiaLiveGateSource -notmatch 'GetCurrentWindowStationName|WindowStation' -or
+      $uiaLiveGateSource -notmatch 'GetCurrentDesktopName|DesktopName' -or
+      $uiaLiveGateSource -notmatch 'desktopHeap' -or
+      $uiaLiveGateSource -notmatch 'sessionId') {
+    throw "RED: UIA prelaunch diagnostics omit process, desktop heap, window station, or session evidence"
+  }
+  if ($uiaLiveGateSource -notmatch 'function Get-UiaOwnedProcessDescendants' -or
+      $uiaLiveGateSource -notmatch 'UIA_PROCESS_TREE_CLEANUP=verified') {
+    throw "RED: UIA teardown does not enumerate, reap, and verify all owned descendants"
+  }
+  $uiaTokens = $null
+  $uiaParseErrors = $null
+  $uiaAst = [Management.Automation.Language.Parser]::ParseInput(
+    $uiaLiveGateSource, [ref]$uiaTokens, [ref]$uiaParseErrors)
+  if ($uiaParseErrors.Count -ne 0) {
+    throw "RED: UIA live gate no longer parses after startup diagnostic changes"
+  }
+  foreach ($helperName in @(
+      "Protect-UiaStartupDiagnosticText",
+      "Get-UiaStartupDiagnosticValue",
+      "Get-UiaStartupFileDiagnostic",
+      "Get-UiaStartupImageHash",
+      "Write-UiaStartupFailureDiagnostic",
+      "Get-UiaPrelaunchDiagnostics",
+      "Get-UiaOwnedProcessDescendants",
+      "Stop-UiaOwnedProcessTrees"
+    )) {
+    $helper = $uiaAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+          $node.Name -eq $helperName
+      }, $true)
+    if ($null -eq $helper) { throw "RED: UIA startup capture helper is missing: $helperName" }
+    . ([scriptblock]::Create($helper.Extent.Text))
+  }
+  $startupCapturePath = Join-Path $env:TEMP "uia-startup-capture-$PID.log"
+  try {
+    [IO.File]::WriteAllText($startupCapturePath, "loader failed`npassword=private-canary`n")
+    $capture = Get-UiaStartupFileDiagnostic $startupCapturePath "logs\shell-stderr.log"
+    if ($capture.state -ne "available" -or
+        $capture.content -notmatch "loader failed" -or
+        $capture.content -match "private-canary" -or
+        $capture.readBytes -ne $capture.lengthBytes) {
+      throw "RED: UIA startup capture does not retain bounded, redacted child output"
+    }
+    $truncatedCapture = Get-UiaStartupFileDiagnostic $startupCapturePath `
+      "logs\shell-stderr.log" 8
+    if ($truncatedCapture.state -ne "truncated" -or
+        $truncatedCapture.readBytes -ne 8 -or $truncatedCapture.lengthBytes -le 8) {
+      throw "RED: UIA startup capture does not bound oversized diagnostics"
+    }
+    $missingCapture = Get-UiaStartupFileDiagnostic `
+      (Join-Path $env:TEMP "uia-missing-$PID.log") "logs\missing.log"
+    if ($missingCapture.state -ne "missing") {
+      throw "RED: UIA startup capture does not distinguish a missing child log"
+    }
+    $startupLogDirectory = Join-Path $env:TEMP "uia-startup-logs-$PID"
+    $startupSupportDirectory = Join-Path $env:TEMP "uia-startup-support-$PID"
+    New-Item -ItemType Directory -Path $startupLogDirectory -Force | Out-Null
+    New-Item -ItemType Directory -Path $startupSupportDirectory -Force | Out-Null
+    [IO.File]::WriteAllText(
+      (Join-Path $startupLogDirectory "shell-stderr.log"),
+      "loader failed`npassword=stderr-canary`n"
+    )
+    [IO.File]::WriteAllText(
+      (Join-Path $startupLogDirectory "shell-stdout.log"),
+      "child output captured"
+    )
+    [IO.File]::WriteAllText(
+      (Join-Path $startupSupportDirectory "graphcode-windows.log"),
+      "app initialization failed`nsecret=app-canary`n"
+    )
+    Write-UiaStartupFailureDiagnostic (Get-Process -Id $PID) 0 `
+      $startupCapturePath $env:TEMP $startupLogDirectory $startupSupportDirectory
+    $startupRecord = Get-Content -LiteralPath `
+      (Join-Path $startupLogDirectory "startup-failure.json") -Raw | ConvertFrom-Json
+    if ($startupRecord.stderr.content -notmatch "loader failed" -or
+        $startupRecord.stdout.content -notmatch "child output captured" -or
+        $startupRecord.applicationLog.content -notmatch "app initialization failed" -or
+        $startupRecord.stderr.content -match "stderr-canary" -or
+        $startupRecord.applicationLog.content -match "app-canary") {
+      throw "RED: retained UIA startup report omits or exposes captured child and app output"
+    }
+  } finally {
+    Remove-Item -LiteralPath (Join-Path $env:TEMP "uia-startup-logs-$PID") `
+      -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $env:TEMP "uia-startup-support-$PID") `
+      -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $startupCapturePath -Force -ErrorAction SilentlyContinue
+  }
+  $hostInfoClassAt = $uiaLiveGateSource.IndexOf("public static class GraphCodeUiaHostInfo")
+  if ($hostInfoClassAt -lt 0) {
+    throw "RED: UIA host context native diagnostics type is missing"
+  }
+  $hostInfoAddTypeAt = $uiaLiveGateSource.LastIndexOf(
+    'Add-Type -TypeDefinition @"', $hostInfoClassAt
+  )
+  $hostInfoBodyAt = $uiaLiveGateSource.IndexOf("`n", $hostInfoAddTypeAt) + 1
+  $hostInfoCloseAt = $uiaLiveGateSource.IndexOf('"@', $hostInfoClassAt)
+  if ($hostInfoAddTypeAt -lt 0 -or $hostInfoBodyAt -le 0 -or
+      $hostInfoCloseAt -lt 0) {
+    throw "RED: UIA host context native diagnostics type is missing"
+  }
+  $hostInfoBody = $uiaLiveGateSource.Substring(
+    $hostInfoBodyAt, $hostInfoCloseAt - $hostInfoBodyAt
+  ).TrimEnd("`r", "`n")
+  Add-Type -TypeDefinition $hostInfoBody
+  $hostSessionId = [GraphCodeUiaHostInfo]::CurrentSessionId()
+  if ($hostSessionId -isnot [uint32]) {
+    throw "RED: UIA host context did not resolve the current Windows session"
+  }
+  $hostDiagnostics = Get-UiaPrelaunchDiagnostics
+  if ($hostDiagnostics.sessionId.state -ne "available" -or
+      $hostDiagnostics.currentProcessId -ne $PID -or
+      $hostDiagnostics.desktopHeap.state -ne "usage_unavailable") {
+    throw "RED: UIA host context diagnostics omitted explicit session or desktop-heap status"
+  }
+  $treeFixturePath = Join-Path $env:TEMP "uia-process-tree-$PID.ps1"
+  $treeRoot = $null
+  try {
+    [IO.File]::WriteAllText($treeFixturePath, @'
+$start = [Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME "pwsh.exe"))
+$start.ArgumentList.Add("-NoProfile")
+$start.ArgumentList.Add("-Command")
+$start.ArgumentList.Add("Start-Sleep -Seconds 60")
+[void][Diagnostics.Process]::Start($start)
+Start-Sleep -Seconds 60
+'@)
+    $treeRoot = Start-Process -FilePath (Join-Path $PSHOME "pwsh.exe") `
+      -ArgumentList @("-NoProfile", "-File", $treeFixturePath) -PassThru
+    $treeObserved = $false
+    for ($attempt = 0; $attempt -lt 20 -and -not $treeObserved; $attempt++) {
+      Start-Sleep -Milliseconds 100
+      $treeObserved = @(Get-UiaOwnedProcessDescendants @($treeRoot.Id)).Count -gt 0
+    }
+    if (-not $treeObserved) { throw "RED: UIA owned-process traversal missed a controlled child" }
+    Stop-UiaOwnedProcessTrees @($treeRoot)
+    if (-not $treeRoot.HasExited) {
+      throw "RED: UIA owned-process teardown returned before the controlled root exited"
+    }
+  } finally {
+    if ($treeRoot -and -not $treeRoot.HasExited) {
+      Stop-UiaOwnedProcessTrees @($treeRoot)
+    }
+    Remove-Item -LiteralPath $treeFixturePath -Force -ErrorAction SilentlyContinue
+  }
   if ($uiaLiveGateSource -notmatch 'UIA_ROOT_ACCESS' -or
       $uiaLiveGateSource -notmatch 'UIA_UPDATE_DIALOG_DIAGNOSTICS' -or
       $uiaLiveGateSource -notmatch 'maxSandboxRootUtf16' -or

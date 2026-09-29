@@ -110,15 +110,16 @@ for path in "${paths[@]}"; do
   esac
 
   # macOS shared Swift regression: the app, kit, daemon, CLI, the portable Swift
-  # package, Tuist/SwiftPM/lint configuration, submodules, and the scripts that
-  # make and the portable setup run.
+  # package, Tuist/SwiftPM/lint configuration, submodules, icon sources, and the
+  # scripts that make and the portable setup run.
   case "$path" in
     graphcode/* | GraphcodeKit/* | MailroomKit/* | graphcoded/* | graphcode-cli/* | \
       investigation/spikes/swift-portable/* | \
       Package.swift | Package.resolved | Project.swift | Tuist.swift | Tuist/* | \
       Makefile | mise.toml | .swiftlint.yml | .swift-format | .gitattributes | \
       .gitmodules | ThirdParty/* | scripts/* | Tools/portable-prepare.py | \
-      Tools/zig-sdk-shim/* | .github/workflows/macos-shared-regression.yml)
+      Tools/icon/* | Tools/zig-sdk-shim/* | \
+      .github/workflows/macos-shared-regression.yml)
       macos=true; matched=1 ;;
   esac
 
@@ -133,9 +134,11 @@ for path in "${paths[@]}"; do
 
   [[ $matched -eq 1 ]] && continue
 
-  # Paths no gated suite reads. DCO and TDD-evidence still run on every PR.
+  # Paths no gated suite reads. The source screenshots are still privacy-scanned
+  # by the ungated investigation job. DCO and TDD-evidence run on every PR.
   case "$path" in
     *.md | docs/* | screenshots/* | investigation/contracts/* | \
+      investigation/macos-parity-evidence/evidence/* | \
       LICENSE | DCO | .env.example | .github/PULL_REQUEST_TEMPLATE.md | \
       .github/ISSUE_TEMPLATE/* | .github/workflows/dco.yml | \
       .github/workflows/tdd-evidence.yml)
