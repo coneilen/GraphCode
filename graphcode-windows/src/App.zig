@@ -4122,6 +4122,10 @@ pub const App = struct {
         }
         if (mutation == 7) {
             self.closeCompositeGroup();
+            self.surface = .project;
+            self.workspace_controls.panel_visible = false;
+            self.layoutWorkspace();
+            self.syncAccessibility();
             _ = self.model.setSelectedID("11111111-1111-4111-8111-111111111111");
             self.editSelectedNode();
             return;
@@ -4269,6 +4273,11 @@ pub const App = struct {
             self.layoutEmptyStateControls();
             self.syncAccessibility();
             _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            return;
+        }
+        if (mutation == 21) {
+            _ = self.model.setSelectedID("11111111-1111-4111-8111-111111111111");
+            self.editSelectedNodeDetails();
             return;
         }
         const dialog = if (self.worktree_dialog) |*value| value else return;

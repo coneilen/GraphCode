@@ -640,6 +640,28 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '\$updateDialog = \$directUpdate') {
     throw "RED: UIA gate does not use the owned modal HWND when desktop-tree lookup omits it"
   }
+  if ($uiaLiveGateSource -notmatch 'UIA_RENAME_DISPATCH' -or
+      $uiaLiveGateSource -notmatch 'UIA_RENAME_INPUT' -or
+      $uiaLiveGateSource -notmatch 'UIA_RENAME_OUTCOME' -or
+      $uiaLiveGateSource -notmatch 'SetEditTextById' -or
+      $uiaLiveGateSource -notmatch 'Native Title edit control \(id 9904\)' -or
+      $uiaLiveGateSource -notmatch 'Goal summary edit control \(id 9100\)' -or
+      $uiaLiveGateSource -notmatch 'Update node dialog did not open' -or
+      $uiaLiveGateSource -notmatch 'Update node cancellation left the dialog open' -or
+      $uiaLiveGateSource -notmatch 'UIA_UPDATE_NODE_SUBMIT_STATE' -or
+      $uiaLiveGateSource -notmatch 'UIA_UPDATE_NODE_DISPATCH') {
+    throw "RED: UIA gate does not verify rename dispatch/result or Edit Details open, cancel, and submit"
+  }
+  if ($uiaLiveGateSource -notmatch 'SendMessageString\(edit, 0x000C' -or
+      $uiaLiveGateSource -notmatch 'SendMessageText\(edit, 0x000D' -or
+      $uiaLiveGateSource -match '(?s)SetEditTextById\(IntPtr parent, int controlId, string text\) \{[^}]*SetWindowText\(') {
+    throw "RED: UIA gate writes or reads cross-process edit text through the window caption instead of WM_SETTEXT/WM_GETTEXT"
+  }
+  if ($uiaLiveGateSource -notmatch 'function Read-DaemonCommandLog' -or
+      $uiaLiveGateSource -notmatch '\[IO\.FileShare\]::ReadWrite -bor \[IO\.FileShare\]::Delete' -or
+      $uiaLiveGateSource -match 'ReadAllText\(\$daemonCommandLogPath\)') {
+    throw "RED: UIA gate reads the daemon command log without tolerating the recorder's open write handle"
+  }
   if ($uiaLiveGateSource -notmatch '(?s)\$updateDialog = \$desktop\.FindFirst\(\s*\[System\.Windows\.Automation\.TreeScope\]::Children' -or
       $uiaLiveGateSource -notmatch 'UIA_UPDATE_DIALOG_CHILDREN found=' -or
       $uiaLiveGateSource -notmatch 'Current\.ProcessId -ne \$process\.Id') {
