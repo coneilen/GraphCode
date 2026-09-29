@@ -7,10 +7,26 @@ on:
 permissions:
   contents: read
 
+# Superseded pull request pushes cancel their in-flight run. Every other event
+# gets a unique group, so runs on main, dispatches, and merge queues are never
+# cancelled or replaced while pending.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Zig's global package/compiler cache, kept beside the bootstrap tools so it
+  # can be restored with the pinned providers (it is content-addressed).
+  ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.ci-tools\zig-global
+
+# The required `windows-shell` check is the aggregate job at the end. It needs
+# every part below and fails unless each one succeeded, except when the path
+# classifier legitimately skipped the whole workflow for this pull request.
 jobs:
   changes:
     name: Classify changed paths
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       windows: ${{ steps.classify.outputs.windows }}
       macos: ${{ steps.classify.outputs.macos }}
@@ -28,10 +44,65 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash Tools/ci/classify-changes.sh --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA"
 
-  windows-shell:
+  # Shell contracts and the Zig executable sections of WindowsShell.Tests.ps1,
+  # split into a deterministic, complete partition (see Test-ShellSectionManifests.ps1).
+  shell-unit:
+    name: "windows-shell unit (shard ${{ matrix.shard }} of 3)"
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') }}
     runs-on: windows-2022
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Restore pinned Zig toolchains
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .ci-tools/zig-0.15.2
+            .ci-tools/zig-0.16.0
+          key: windows-zig-v1-${{ hashFiles('Tools/windows/bootstrap.ps1') }}
+
+      - name: Restore pinned provider build caches
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .ci-providers
+            .ci-tools/zig-global
+          key: windows-providers-v1-${{ hashFiles('graphcode-windows/provider-pins.json', 'Tools/windows/bootstrap.ps1') }}-emit-win32-host-x86_64-windows-gnu
+
+      - name: Bootstrap exact Windows dependencies
+        shell: pwsh
+        run: ./Tools/windows/bootstrap.ps1 -ToolRoot .ci-tools -ProviderRoot .ci-providers -SkipSwift
+
+      - name: Verify provider pins after cache restore
+        shell: pwsh
+        run: ./Tools/windows/Assert-ProviderCheckout.ps1 -ProviderRoot .ci-providers
+
+      - name: Run shell contracts and executable sections
+        shell: pwsh
+        run: ./Tools/windows/validate.ps1 -Task windows-shell -ShellPart unit -ShellTestShard ${{ matrix.shard }} -ShellTestShardCount 3 -ShellTestManifest .ci-sections/shard-${{ matrix.shard }}.json
+
+      - name: Upload section manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-shell-sections-${{ matrix.shard }}
+          path: .ci-sections/shard-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Release build, pinned-provider smoke/restart/handoff, tray, and the native
+  # UI Automation live gate. The UIA gate runs only here, serially.
+  shell-integration:
+    name: windows-shell integration
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') }}
+    runs-on: windows-2022
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
@@ -41,17 +112,45 @@ jobs:
           swift-build: 6.3.3-RELEASE
           cache: true
 
+      - name: Restore pinned Zig toolchains
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .ci-tools/zig-0.15.2
+            .ci-tools/zig-0.16.0
+          key: windows-zig-v1-${{ hashFiles('Tools/windows/bootstrap.ps1') }}
+
+      - name: Restore pinned provider build caches
+        id: provider-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .ci-providers
+            .ci-tools/zig-global
+          key: windows-providers-v1-${{ hashFiles('graphcode-windows/provider-pins.json', 'Tools/windows/bootstrap.ps1') }}-emit-win32-host-x86_64-windows-gnu
+
       - name: Bootstrap exact Windows dependencies
         shell: pwsh
         run: ./Tools/windows/bootstrap.ps1 -ToolRoot .ci-tools -ProviderRoot .ci-providers
 
-      - name: Verify shell contracts and pinned-provider smoke
+      - name: Verify provider pins after cache restore
         shell: pwsh
-        run: ./Tools/windows/validate.ps1 -Task windows-shell -SkipTrayLive
+        run: ./Tools/windows/Assert-ProviderCheckout.ps1 -ProviderRoot .ci-providers
 
-      - name: Validate release packaging
+      - name: Verify shell build, pinned-provider smoke, and live UI Automation
         shell: pwsh
-        run: ./Tools/windows/validate.ps1 -Task packaging
+        run: ./Tools/windows/validate.ps1 -Task windows-shell -SkipTrayLive -ShellPart integration
+
+      # Only this job builds both providers with the canonical flags, so it is
+      # the single writer of the provider cache.
+      - name: Save pinned provider build caches
+        if: success() && steps.provider-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .ci-providers
+            .ci-tools/zig-global
+          key: ${{ steps.provider-cache.outputs.cache-primary-key }}
 
       - name: Retain UIA failure diagnostics
         if: failure()
@@ -61,3 +160,92 @@ jobs:
           path: ${{ runner.temp }}\gu-*\logs\*.json
           if-no-files-found: warn
           retention-days: 7
+
+  # Fixture-only release, signing, script-signing, scheduler, rollback, and
+  # standalone (PowerShell 5.1 and 7) contracts. They consume no build output.
+  packaging-contracts:
+    name: windows-shell packaging contracts
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') }}
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Validate release packaging contracts
+        shell: pwsh
+        run: ./Tools/windows/validate.ps1 -Task packaging -PackagingPart contracts
+
+  # Real packaging rebuilds its own inputs (Swift release products and runtime,
+  # pinned Winghostty host library, pinned zmx dependencies) on this runner, so
+  # it runs in parallel with the shell integration instead of after it.
+  packaging-real:
+    name: windows-shell packaging (real products)
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') }}
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - uses: compnerd/gha-setup-swift@397094e75494a93fa8d81db0268dbc8f5d6cf7c6 # v0.4.1
+        with:
+          swift-version: swift-6.3.3-release
+          swift-build: 6.3.3-RELEASE
+          cache: true
+
+      - name: Restore pinned Zig toolchains
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .ci-tools/zig-0.15.2
+            .ci-tools/zig-0.16.0
+          key: windows-zig-v1-${{ hashFiles('Tools/windows/bootstrap.ps1') }}
+
+      - name: Restore pinned provider build caches
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .ci-providers
+            .ci-tools/zig-global
+          key: windows-providers-v1-${{ hashFiles('graphcode-windows/provider-pins.json', 'Tools/windows/bootstrap.ps1') }}-emit-win32-host-x86_64-windows-gnu
+
+      - name: Bootstrap exact Windows dependencies
+        shell: pwsh
+        run: ./Tools/windows/bootstrap.ps1 -ToolRoot .ci-tools -ProviderRoot .ci-providers
+
+      - name: Verify provider pins after cache restore
+        shell: pwsh
+        run: ./Tools/windows/Assert-ProviderCheckout.ps1 -ProviderRoot .ci-providers
+
+      - name: Validate release packaging with real products
+        shell: pwsh
+        run: ./Tools/windows/validate.ps1 -Task packaging -PackagingPart real
+
+  windows-shell:
+    needs: [changes, shell-unit, shell-integration, packaging-contracts, packaging-real]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      WINDOWS_REQUIRED: ${{ github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true' }}
+      NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Require every Windows shell part
+        shell: pwsh
+        run: ./Tools/windows/Assert-CiPartResults.ps1 -NeedsJson $env:NEEDS_JSON -Required $env:WINDOWS_REQUIRED
+
+      - name: Download section manifests
+        if: env.WINDOWS_REQUIRED == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: windows-shell-sections-*
+          path: .ci-sections
+          merge-multiple: true
+
+      - name: Verify every executable section ran exactly once
+        if: env.WINDOWS_REQUIRED == 'true'
+        shell: pwsh
+        run: ./Tools/windows/Test-ShellSectionManifests.ps1 -Directory .ci-sections -ShardCount 3

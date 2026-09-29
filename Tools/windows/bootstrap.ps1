@@ -6,6 +6,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# Progress rendering dominates Invoke-WebRequest and Expand-Archive on hosted
+# runners (about two minutes for the two Zig archives); it carries no evidence.
+$ProgressPreference = "SilentlyContinue"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 if (-not $ToolRoot) {
   $ToolRoot = Join-Path $repoRoot ".graphcode-tools"
@@ -35,7 +38,24 @@ function Install-Zig([string] $Version, [string] $Sha256) {
   if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $Sha256) {
     throw "Zig $Version archive checksum mismatch"
   }
-  Expand-Archive -LiteralPath $archive -DestinationPath $ToolRoot -Force
+  $extracted = Join-Path $ToolRoot "zig-x86_64-windows-$Version"
+  if (Test-Path -LiteralPath $extracted) {
+    Remove-Item -LiteralPath $extracted -Recurse -Force
+  }
+  # The Windows inbox bsdtar extracts the checksum-verified archive an order of
+  # magnitude faster than Expand-Archive; fall back when it is unavailable.
+  $tar = Join-Path $env:SystemRoot "System32\tar.exe"
+  $expanded = $false
+  if (Test-Path -LiteralPath $tar -PathType Leaf) {
+    & $tar -xf $archive -C $ToolRoot
+    $expanded = $LASTEXITCODE -eq 0
+    if (-not $expanded -and (Test-Path -LiteralPath $extracted)) {
+      Remove-Item -LiteralPath $extracted -Recurse -Force
+    }
+  }
+  if (-not $expanded) {
+    Expand-Archive -LiteralPath $archive -DestinationPath $ToolRoot -Force
+  }
   Move-Item `
     -LiteralPath (Join-Path $ToolRoot "zig-x86_64-windows-$Version") `
     -Destination $destination
