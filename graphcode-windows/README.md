@@ -226,6 +226,26 @@ the selected loop in the graph rather than opening its terminal. Native forms
 keep their own text editing, Tab navigation, and acceptance/cancellation;
 Enter in an already-open menu activates its highlighted item.
 
+Help > **Keyboard Shortcuts** lists the remaining keyboard routes: sending a
+loop, context-sensitive `Ctrl+E`, project or node identity navigation,
+worktree-row selection, terminal focus, clone cancellation, terminal paste,
+focused-toolbar navigation, and jump-palette navigation. The Loop, View, and
+File menu items also show `Ctrl+Shift+G` for Show in Graph, `Ctrl+R` for
+Reconnect, and `Ctrl+Shift+P` for Project Worktree Policy. `Ctrl+P` remains
+unlisted because it duplicates the `Ctrl+J` jump-palette route;
+`Ctrl+Shift+I` remains unlisted because it duplicates the `Ctrl+Shift+W`
+Worktrees route. `Ctrl+Shift+C` is shown only for Clone Repository: the
+terminal context also uses it to copy a selection, so Help does not present
+the context-dependent collision as a second shortcut.
+
+Canvas and pointer actions still have no visible gesture hints: clicking
+selects/opens canvas items; dragging blank canvas pans, dragging a node moves
+it, and dragging a connector to another node creates an edge; wheel and
+touchscreen pinch zoom the canvas; right-click opens item-specific context
+menus; and dragging a top-level sidebar loop reorders it. Closing this gap
+requires hints in the owning `GraphCanvas.zig` and `Sidebar.zig` rendering
+surfaces, both outside this change's scope.
+
 Custom canvas, sidebar, header, and detail layout use 96-DPI logical units.
 UI Automation receives physical client pixels: logical bounds, including the
 fixed graph group, are scaled once at the reporting boundary. Terminal tab and
