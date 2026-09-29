@@ -24,14 +24,12 @@ updates/deletion and the dedicated branches against deletion/history rewrites; s
 `Tools\windows\PACKAGING.md` for the recorded ruleset IDs and retention limits.
 These are source-retention tags, not signed Windows releases.
 
-The current zmx pin is the merged startup fix from
-[coneilen/zmx#2](https://github.com/coneilen/zmx/pull/2). A closed readiness probe
-can produce native `NO_DATA`/`BrokenPipe`; the ConPTY accept loop now tolerates
-recognized peer disconnects. Transport rearm retains the pipe instance on
-disconnect and creates its replacement before closing it on timeout/cancellation.
-This does not add client retries or weaken ACLs. Long configured-root
-`SetFileSecurityW` path failures and concurrent POSIX TaskComplete-before-Ack
-ordering remain outside this fix.
+The current zmx pin is the merged SetSize control-plane commit from
+[coneilen/zmx#3](https://github.com/coneilen/zmx/pull/3), which provides the
+`zmx attach <session> --size <cols>x<rows>` and leaderless one-shot
+`zmx resize <session> <cols>x<rows>` CLI verbs. This spike does not yet
+exercise either verb; GraphCode's pane-geometry integration in
+`graphcode-windows\src\TerminalSurface.zig` is what calls them.
 
 `graphcode-windows\fixtures\zmx-quick-chat-provider.json` is historical
 quick-chat provenance at the old provider SHA and recorded source/executable
