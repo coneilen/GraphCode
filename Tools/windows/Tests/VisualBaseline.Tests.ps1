@@ -377,7 +377,7 @@ try {
       backendPid = 125; createdAt = '2026-01-15T14:59:01Z'; cwd = 'C:\fixture' }
     zmxPathLengths = @{ endpoint = 214; lease = 220; ownerPipe = 165 }; visibilityInterventions = @()
     providers = @{
-      zmx = @{ sha256 = ('4' * 64); pin = '11e20c738b4ebd88031c7a01f1a9d938ee123234'
+      zmx = @{ sha256 = ('4' * 64); pin = 'dcf61203cd390d43451c25636776d7d64ecfd629'
         artifact = '.graphcode-tools\providers\zmx\zig-out\bin\zmx.exe' }
       winghostty = @{ sha256 = ('5' * 64); pin = 'f5abc059e4ca58b376eb209313aca7784659c679'
         artifact = '.graphcode-tools\providers\winghostty\zig-out\lib\winghostty-win32-host.lib' }

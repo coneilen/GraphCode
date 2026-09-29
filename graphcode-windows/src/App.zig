@@ -2599,10 +2599,7 @@ pub const App = struct {
                 .later => self.setStatus("Update installed. Relaunch GraphCode to use it."),
             },
             .cancelled => self.setStatus("Update install cancelled"),
-            .failed => |message| {
-                self.setStatus(message);
-                self.allocator.free(message);
-            },
+            .failed => |message| self.setStatus(message.text()),
         }
     }
 

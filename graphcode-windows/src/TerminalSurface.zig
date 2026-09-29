@@ -10,6 +10,129 @@ const TerminalVt = @import("TerminalVt.zig");
 const columns: usize = 120;
 const rows: usize = 40;
 const cell_count: usize = columns * rows;
+const max_terminal_grid_cells: u64 = 256 * 1024;
+
+const default_grid = GridSize{ .cols = @intCast(columns), .rows = @intCast(rows) };
+
+const GridSize = struct {
+    cols: u16,
+    rows: u16,
+
+    fn eql(left: GridSize, right: GridSize) bool {
+        return left.cols == right.cols and left.rows == right.rows;
+    }
+};
+
+fn gridSizeForBounds(
+    width: u32,
+    height: u32,
+    metrics: c.winghostty_cell_metrics,
+) error{GridTooLarge}!GridSize {
+    const cell_width = if (metrics.cell_width == 0) 8 else metrics.cell_width;
+    const cell_height = if (metrics.cell_height == 0) 16 else metrics.cell_height;
+    const cols = @max(@as(u64, width) / cell_width, 1);
+    const row_count = @max(@as(u64, height) / cell_height, 1);
+    if (cols > std.math.maxInt(u16) or row_count > std.math.maxInt(u16)) return error.GridTooLarge;
+    const count = std.math.mul(u64, cols, row_count) catch return error.GridTooLarge;
+    if (count > max_terminal_grid_cells) return error.GridTooLarge;
+    return .{
+        .cols = @intCast(cols),
+        .rows = @intCast(row_count),
+    };
+}
+
+fn resizedCellBuffer(
+    allocator: std.mem.Allocator,
+    old_cells: []const c.winghostty_terminal_cell,
+    old_size: GridSize,
+    new_size: GridSize,
+    vt: ?*TerminalVt.State,
+) ![]c.winghostty_terminal_cell {
+    const old_count = std.math.mul(usize, old_size.cols, old_size.rows) catch return error.InvalidGridSize;
+    if (old_count > max_terminal_grid_cells or old_cells.len != old_count) return error.InvalidGridSize;
+    const count = std.math.mul(usize, new_size.cols, new_size.rows) catch return error.InvalidGridSize;
+    if (count > max_terminal_grid_cells) return error.InvalidGridSize;
+    const cells = try allocator.alloc(c.winghostty_terminal_cell, count);
+    errdefer allocator.free(cells);
+    for (cells) |*cell| cell.* = .{
+        .codepoint = 0,
+        .foreground = 0xE6E6E6,
+        .background = 0,
+        .flags = 0,
+    };
+    if (vt) |state| try state.resize(new_size.cols, new_size.rows);
+    const copy_rows = @min(old_size.rows, new_size.rows);
+    const copy_columns = @min(old_size.cols, new_size.cols);
+    for (0..copy_rows) |row| {
+        const old_start = row * old_size.cols;
+        const new_start = row * new_size.cols;
+        @memcpy(cells[new_start..][0..copy_columns], old_cells[old_start..][0..copy_columns]);
+    }
+    return cells;
+}
+
+fn formatGridSize(size: GridSize, buffer: []u8) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "{d}x{d}", .{ size.cols, size.rows });
+}
+
+fn attachArguments(
+    program: []const u8,
+    session: []const u8,
+    size: GridSize,
+    output: *[5][]const u8,
+    size_buffer: []u8,
+) ![]const []const u8 {
+    output.* = .{ program, "attach", session, "--size", try formatGridSize(size, size_buffer) };
+    return output;
+}
+
+fn resizeArguments(
+    program: []const u8,
+    session: []const u8,
+    size: GridSize,
+    output: *[4][]const u8,
+    size_buffer: []u8,
+) ![]const []const u8 {
+    output.* = .{ program, "resize", session, try formatGridSize(size, size_buffer) };
+    return output;
+}
+
+fn paneBounds(
+    origin_x: i32,
+    origin_y: i32,
+    width: i32,
+    height: i32,
+    direction: WorkspaceLayout.Direction,
+    position: usize,
+    pane_count: usize,
+) c.winghostty_rect {
+    const safe_count = @max(pane_count, 1);
+    const available_height = @max(1, height - Tokens.tab_bar_height - Tokens.pane_header_height);
+    const available_width = @max(1, width);
+    const horizontal = direction == .horizontal;
+    const first = if (horizontal)
+        @divTrunc(@as(i64, available_width) * @as(i64, @intCast(position)), @as(i64, @intCast(safe_count)))
+    else
+        0;
+    const next = if (horizontal)
+        @divTrunc(@as(i64, available_width) * @as(i64, @intCast(position + 1)), @as(i64, @intCast(safe_count)))
+    else
+        available_width;
+    const top = if (horizontal)
+        0
+    else
+        @divTrunc(@as(i64, available_height) * @as(i64, @intCast(position)), @as(i64, @intCast(safe_count)));
+    const bottom = if (horizontal)
+        available_height
+    else
+        @divTrunc(@as(i64, available_height) * @as(i64, @intCast(position + 1)), @as(i64, @intCast(safe_count)));
+    return .{
+        .x = origin_x + @as(i32, @intCast(first)),
+        .y = origin_y + Tokens.tab_bar_height + Tokens.pane_header_height + @as(i32, @intCast(top)),
+        .width = @intCast(@max(1, next - first)),
+        .height = @intCast(@max(1, bottom - top)),
+    };
+}
 
 const ParserState = enum { normal, escape, csi, osc };
 const input_queue_capacity: usize = 64;
@@ -133,6 +256,10 @@ pub const Surface = struct {
     destroying: bool = false,
     destroyed: bool = false,
     input_bytes: usize = 0,
+    grid: GridSize = default_grid,
+    last_resize_size: ?GridSize = null,
+    attempted_resize_size: ?GridSize = null,
+    pending_resize_size: ?GridSize = null,
     // Counts batches whose cell, accessibility, and redraw publication calls all succeeded.
     output_events: usize = 0,
     output_result: TerminalOutputResult = .{},
@@ -216,6 +343,10 @@ pub const Workspace = struct {
     input_worker_surface: ?usize = null,
     input_worker_handle: c.HANDLE = null,
     input_cancel_requested: bool = false,
+    resize_child: ?std.process.Child = null,
+    resize_child_surface: ?usize = null,
+    resize_child_size: ?GridSize = null,
+    resize_child_session: []u8 = &.{},
     input_queue: InputQueue,
     input_error_message: []const u8 = "",
     layout: WorkspaceLayout.Layout,
@@ -294,6 +425,7 @@ pub const Workspace = struct {
     }
 
     pub fn deinit(self: *Workspace) void {
+        self.stopResizeChild();
         self.stopInputWorker();
         for (self.surfaces, 0..) |_, index| self.destroySurface(index);
         for (&self.recreate_sessions) |*session| {
@@ -425,7 +557,7 @@ pub const Workspace = struct {
         if (self.surfaces[index].surface != null or self.surfaces[index].attach != null) {
             const old_id = try self.allocator.dupe(u8, self.surfaces[index].session_name);
             defer self.allocator.free(old_id);
-            const replacement_index = try self.createAttachedSurface(node_id);
+            const replacement_index = try self.createAttachedSurface(node_id, self.surfaces[index].grid);
             errdefer self.destroySurface(replacement_index);
             self.layout.replacePaneID(old_id, node_id) catch |err| {
                 self.destroySurface(replacement_index);
@@ -449,7 +581,7 @@ pub const Workspace = struct {
         slot.session_name = try self.allocator.dupe(u8, node_id);
         errdefer self.destroySurface(index);
         slot.project_path = try self.allocator.dupe(u8, self.project_path);
-        try self.startSession(index, slot.session_name);
+        try self.startSession(index, slot.session_name, try self.gridForSession(node_id));
         if (self.layout.tabs.items.len == 0) {
             try self.layout.addTab(node_id, true);
         } else if (index > 0 and self.layout.tabs.items.len == 1) {
@@ -485,7 +617,7 @@ pub const Workspace = struct {
         defer self.allocator.free(surface_id);
         const previous_selected = self.layout.selected_tab;
         const previous_next_id = self.layout.next_tab_id;
-        const index = try self.createAttachedSurface(surface_id);
+        const index = try self.createAttachedSurface(surface_id, try self.workspaceGridSize());
         errdefer self.destroySurface(index);
         self.layout.addTab(surface_id, false) catch |err| {
             self.destroySurface(index);
@@ -501,13 +633,13 @@ pub const Workspace = struct {
         self.syncTopology();
     }
 
-    fn createAttachedSurface(self: *Workspace, session: []const u8) !usize {
+    fn createAttachedSurface(self: *Workspace, session: []const u8, initial_grid: GridSize) !usize {
         for (&self.surfaces, 0..) |*slot, index| {
             if (slot.surface != null or slot.attach != null) continue;
             slot.session_name = try self.allocator.dupe(u8, session);
             errdefer self.destroySurface(index);
             slot.project_path = try self.allocator.dupe(u8, self.project_path);
-            try self.startSession(index, slot.session_name);
+            try self.startSession(index, slot.session_name, initial_grid);
             var options = self.surfaceOptions(index);
             const result = c.winghostty_host_create_surface_v2(
                 self.host,
@@ -544,7 +676,11 @@ pub const Workspace = struct {
         };
         defer for (ids[0..count]) |id| self.allocator.free(id);
         for (ids[0..count]) |id| {
-            if (self.createAttachedSurface(id)) |index| {
+            const initial_grid = self.gridForSession(id) catch |err| {
+                self.queueRestoreRetry(id, err);
+                continue;
+            };
+            if (self.createAttachedSurface(id, initial_grid)) |index| {
                 self.clearRestoreError(index);
             } else |err| {
                 self.queueRestoreRetry(id, err);
@@ -613,7 +749,7 @@ pub const Workspace = struct {
         const tab = self.layout.selected() orelse return error.NoTabs;
         const previous_focus = tab.focused_pane;
         const previous_direction = tab.split_direction;
-        const index = try self.createAttachedSurface(surface_id);
+        const index = try self.createAttachedSurface(surface_id, try self.splitGridSize(direction));
         errdefer self.destroySurface(index);
         self.layout.splitFocused(direction, surface_id) catch |err| {
             self.destroySurface(index);
@@ -916,6 +1052,7 @@ pub const Workspace = struct {
         if (self.collapsed) return;
         for (self.surfaces, 0..) |_, index| self.readAttachOutput(index);
         self.pollRecreates();
+        self.pollResizeControl();
     }
 
     /// Releases native Win32 keyboard focus from every live terminal surface and hides them.
@@ -1005,27 +1142,51 @@ pub const Workspace = struct {
         defer self.syncing_topology = false;
         const selected = self.layout.selected() orelse return;
         const pane_count = selected.panes.items.len;
-        const available_height = @max(1, self.layout_height - Tokens.tab_bar_height - Tokens.pane_header_height);
-        const available_width = @max(1, self.layout_width);
         for (&self.surfaces, 0..) |*slot, index| {
             const pane_index = self.paneIndex(slot.session_name);
             if (slot.surface == null) continue;
             if (pane_index) |position| {
-                const horizontal = selected.split_direction == .horizontal;
-                const first = if (horizontal) @divTrunc(available_width * position, pane_count) else 0;
-                const next = if (horizontal) @divTrunc(available_width * (position + 1), pane_count)
-                    else available_width;
-                const top = if (horizontal) 0 else @divTrunc(available_height * position, pane_count);
-                const bottom = if (horizontal) available_height
-                    else @divTrunc(available_height * (position + 1), pane_count);
                 _ = c.winghostty_surface_set_visible(slot.surface, 1);
-                const bounds = c.winghostty_rect{
-                    .x = self.layout_origin_x + @as(i32, @intCast(first)),
-                    .y = self.layout_origin_y + Tokens.tab_bar_height + Tokens.pane_header_height + @as(i32, @intCast(top)),
-                    .width = @intCast(@max(1, next - first)),
-                    .height = @intCast(@max(1, bottom - top)),
-                };
+                const bounds = paneBounds(
+                    self.layout_origin_x,
+                    self.layout_origin_y,
+                    self.layout_width,
+                    self.layout_height,
+                    selected.split_direction,
+                    position,
+                    pane_count,
+                );
                 _ = c.winghostty_surface_set_bounds(slot.surface, &bounds);
+                var metrics = slot.cell_metrics;
+                if (c.winghostty_surface_get_cell_metrics(slot.surface, &metrics) == c.WINGHOSTTY_OK) {
+                    slot.cell_metrics = metrics;
+                }
+                const requested_size: ?GridSize = gridSizeForBounds(
+                    bounds.width,
+                    bounds.height,
+                    slot.cell_metrics,
+                ) catch |err| blk: {
+                    std.debug.print("Terminal grid bounds rejected pane={d} error={s}\n", .{
+                        index,
+                        @errorName(err),
+                    });
+                    self.setInputError("terminal grid exceeds the supported size");
+                    break :blk null;
+                };
+                if (requested_size) |size| {
+                    var grid_ready = true;
+                    if (!slot.grid.eql(size)) {
+                        self.resizeSurfaceGrid(index, size) catch |err| {
+                            std.debug.print("Terminal grid resize failed pane={d} error={s}\n", .{
+                                index,
+                                @errorName(err),
+                            });
+                            self.setInputError("terminal grid resize failed");
+                            grid_ready = false;
+                        };
+                    }
+                    if (grid_ready) self.queueResize(index, size);
+                }
                 const focused = position == selected.focused_pane;
                 _ = c.winghostty_surface_set_focus(slot.surface, if (focused) 1 else 0);
                 if (focused) self.active_surface = index;
@@ -1047,6 +1208,108 @@ pub const Workspace = struct {
             if (std.mem.eql(u8, pane.id, id)) return index;
         }
         return null;
+    }
+
+    fn fallbackCellMetrics(self: *const Workspace) c.winghostty_cell_metrics {
+        for (self.surfaces) |slot| {
+            if (slot.cell_metrics.cell_width != 0 and slot.cell_metrics.cell_height != 0)
+                return slot.cell_metrics;
+        }
+        return .{
+            .font_width = @intCast(@max(1, Dpi.scale(8, self.dpi))),
+            .font_height = @intCast(@max(1, Dpi.scale(16, self.dpi))),
+            .cell_width = @intCast(@max(1, Dpi.scale(8, self.dpi))),
+            .cell_height = @intCast(@max(1, Dpi.scale(16, self.dpi))),
+            .baseline = @intCast(@max(1, Dpi.scale(13, self.dpi))),
+        };
+    }
+
+    fn gridForSession(self: *const Workspace, session: []const u8) !GridSize {
+        const metrics = self.fallbackCellMetrics();
+        const tab = self.layout.selectedConst() orelse return self.workspaceGridSize();
+        for (tab.panes.items, 0..) |pane, position| {
+            if (!std.mem.eql(u8, pane.id, session)) continue;
+            const bounds = paneBounds(
+                self.layout_origin_x,
+                self.layout_origin_y,
+                self.layout_width,
+                self.layout_height,
+                tab.split_direction,
+                position,
+                tab.panes.items.len,
+            );
+            return gridSizeForBounds(bounds.width, bounds.height, metrics);
+        }
+        return self.workspaceGridSize();
+    }
+
+    fn workspaceGridSize(self: *const Workspace) !GridSize {
+        const bounds = paneBounds(
+            self.layout_origin_x,
+            self.layout_origin_y,
+            self.layout_width,
+            self.layout_height,
+            .horizontal,
+            0,
+            1,
+        );
+        return gridSizeForBounds(bounds.width, bounds.height, self.fallbackCellMetrics());
+    }
+
+    fn splitGridSize(self: *const Workspace, direction: WorkspaceLayout.Direction) !GridSize {
+        const tab = self.layout.selectedConst() orelse return error.NoTabs;
+        const count = tab.panes.items.len + 1;
+        const position = tab.focused_pane + 1;
+        const bounds = paneBounds(
+            self.layout_origin_x,
+            self.layout_origin_y,
+            self.layout_width,
+            self.layout_height,
+            direction,
+            position,
+            count,
+        );
+        return gridSizeForBounds(bounds.width, bounds.height, self.fallbackCellMetrics());
+    }
+
+    fn resizeSurfaceGrid(self: *Workspace, index: usize, size: GridSize) !void {
+        const slot = &self.surfaces[index];
+        if (slot.grid.eql(size)) return;
+        const cells = try resizedCellBuffer(self.allocator, slot.cells, slot.grid, size, slot.vt);
+        errdefer self.allocator.free(cells);
+        if (slot.cells.len != 0) self.allocator.free(slot.cells);
+        slot.cells = cells;
+        slot.grid = size;
+        slot.terminal_x = @min(slot.terminal_x, @as(usize, size.cols));
+        slot.terminal_y = @min(slot.terminal_y, @as(usize, size.rows - 1));
+        if (slot.surface != null) self.feedTerminalOutput(index, "");
+    }
+
+    fn queueResize(self: *Workspace, index: usize, size: GridSize) void {
+        const slot = &self.surfaces[index];
+        if (self.resize_child_surface == index and self.resize_child_size != null and
+            std.mem.eql(u8, self.resize_child_session, slot.session_name))
+        {
+            if (self.resize_child_size.?.eql(size)) {
+                slot.pending_resize_size = null;
+            } else {
+                slot.pending_resize_size = size;
+            }
+            return;
+        }
+        if (slot.last_resize_size) |sent| {
+            if (sent.eql(size)) {
+                slot.pending_resize_size = null;
+                return;
+            }
+        }
+        if (slot.attempted_resize_size) |attempted| {
+            if (attempted.eql(size)) {
+                slot.pending_resize_size = null;
+                return;
+            }
+        }
+        slot.pending_resize_size = size;
     }
 
     pub fn send(self: *Workspace, text: []const u8) void {
@@ -1253,20 +1516,29 @@ pub const Workspace = struct {
         return options;
     }
 
-    fn startSession(self: *Workspace, index: usize, session: []const u8) !void {
-        const vt = if (self.experimental_vt) try TerminalVt.State.create(self.allocator, columns, rows) else null;
+    fn startSession(self: *Workspace, index: usize, session: []const u8, size: GridSize) !void {
+        try self.resizeSurfaceGrid(index, size);
+        const vt = if (self.experimental_vt) try TerminalVt.State.create(self.allocator, size.cols, size.rows) else null;
         errdefer if (vt) |state| state.destroy();
         const nonreading = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_NONREADING_ATTACH") catch null;
         defer if (nonreading) |value| self.allocator.free(value);
-        var attach_args: [4][]const u8 = undefined;
+        var attach_args: [5][]const u8 = undefined;
         var attach_len: usize = 3;
+        var size_buffer: [16]u8 = undefined;
         if (nonreading != null and std.mem.eql(u8, nonreading.?, "1")) {
-            attach_args = .{ "pwsh", "-NoProfile", "-Command", "Start-Sleep -Seconds 60" };
+            attach_args[0] = "pwsh";
+            attach_args[1] = "-NoProfile";
+            attach_args[2] = "-Command";
+            attach_args[3] = "Start-Sleep -Seconds 60";
             attach_len = 4;
         } else {
-            attach_args[0] = self.zmx_path;
-            attach_args[1] = "attach";
-            attach_args[2] = session;
+            attach_len = (try attachArguments(
+                self.zmx_path,
+                session,
+                size,
+                &attach_args,
+                &size_buffer,
+            )).len;
         }
         var child = std.process.Child.init(attach_args[0..attach_len], self.allocator);
         child.cwd = self.cwd;
@@ -1281,6 +1553,9 @@ pub const Workspace = struct {
         self.input_mutex.lock();
         self.surfaces[index].attach = child;
         self.surfaces[index].vt = vt;
+        self.surfaces[index].last_resize_size = size;
+        self.surfaces[index].attempted_resize_size = null;
+        self.surfaces[index].pending_resize_size = null;
         self.input_mutex.unlock();
     }
 
@@ -1353,6 +1628,97 @@ pub const Workspace = struct {
         self.input_worker_surface = null;
         self.input_worker_handle = null;
         self.input_mutex.unlock();
+    }
+
+    fn stopResizeChild(self: *Workspace) void {
+        if (self.resize_child) |*child| {
+            _ = child.kill() catch {};
+            _ = child.wait() catch {};
+            self.resize_child = null;
+        }
+        if (self.resize_child_session.len != 0) self.allocator.free(self.resize_child_session);
+        self.resize_child_session = &.{};
+        self.resize_child_surface = null;
+        self.resize_child_size = null;
+    }
+
+    fn pollResizeControl(self: *Workspace) void {
+        if (self.resize_child) |*child| {
+            var exit_code: c.DWORD = 0;
+            if (c.GetExitCodeProcess(child.id, &exit_code) == 0) {
+                _ = child.kill() catch {};
+                _ = child.wait() catch {};
+                self.finishResizeControl(false, "terminal PTY resize status unavailable");
+            } else if (exit_code != c.STILL_ACTIVE) {
+                _ = child.wait() catch {};
+                self.finishResizeControl(exit_code == 0, "terminal PTY resize command failed");
+            }
+        }
+        if (self.resize_child != null) return;
+        for (&self.surfaces, 0..) |*slot, index| {
+            const size = slot.pending_resize_size orelse continue;
+            if (slot.attach == null or slot.surface == null) continue;
+            var args: [4][]const u8 = undefined;
+            var size_buffer: [16]u8 = undefined;
+            const command = resizeArguments(self.zmx_path, slot.session_name, size, &args, &size_buffer) catch {
+                slot.attempted_resize_size = size;
+                slot.pending_resize_size = null;
+                self.setInputError("terminal PTY resize command could not be formatted");
+                return;
+            };
+            const session = self.allocator.dupe(u8, slot.session_name) catch {
+                slot.attempted_resize_size = size;
+                slot.pending_resize_size = null;
+                self.setInputError("terminal PTY resize tracking allocation failed");
+                return;
+            };
+            var child = std.process.Child.init(command, self.allocator);
+            child.cwd = self.cwd;
+            child.stdin_behavior = .Ignore;
+            child.stdout_behavior = .Ignore;
+            child.stderr_behavior = .Ignore;
+            child.create_no_window = true;
+            child.spawn() catch {
+                self.allocator.free(session);
+                slot.attempted_resize_size = size;
+                slot.pending_resize_size = null;
+                self.setInputError("terminal PTY resize command could not start");
+                return;
+            };
+            slot.pending_resize_size = null;
+            self.resize_child = child;
+            self.resize_child_surface = index;
+            self.resize_child_size = size;
+            self.resize_child_session = session;
+            return;
+        }
+    }
+
+    fn finishResizeControl(self: *Workspace, succeeded: bool, failure_message: []const u8) void {
+        const index = self.resize_child_surface orelse max_surfaces;
+        const size = self.resize_child_size;
+        if (index < self.surfaces.len and size != null and
+            std.mem.eql(u8, self.surfaces[index].session_name, self.resize_child_session))
+        {
+            const slot = &self.surfaces[index];
+            if (slot.pending_resize_size) |pending| {
+                if (size.?.eql(pending)) slot.pending_resize_size = null;
+            }
+            if (succeeded) {
+                slot.last_resize_size = size;
+                slot.attempted_resize_size = null;
+            } else {
+                slot.attempted_resize_size = size;
+                self.setInputError(failure_message);
+            }
+        } else if (!succeeded) {
+            self.setInputError(failure_message);
+        }
+        self.resize_child = null;
+        self.resize_child_surface = null;
+        self.resize_child_size = null;
+        if (self.resize_child_session.len != 0) self.allocator.free(self.resize_child_session);
+        self.resize_child_session = &.{};
     }
 
     fn inputWorkerMain(self: *Workspace) void {
@@ -1537,7 +1903,11 @@ pub const Workspace = struct {
         const slot = &self.surfaces[index];
         const surface = slot.surface orelse return;
         const previous = slot.output_result;
-        const result = publishTerminalOutput(self.allocator, slot, bytes, NativeTerminalOutput{ .surface = surface });
+        const result = publishTerminalOutput(self.allocator, slot, bytes, NativeTerminalOutput{
+            .surface = surface,
+            .columns = slot.grid.cols,
+            .rows = slot.grid.rows,
+        });
         self.routeVtResponses(index);
         self.render_error = result.render_result;
         if (!std.meta.eql(previous, slot.output_result)) slot.output_result.logFailures(index);
@@ -1654,9 +2024,11 @@ const TerminalOutputResult = struct {
 
 const NativeTerminalOutput = struct {
     surface: *c.winghostty_surface,
+    columns: u32,
+    rows: u32,
 
     fn setCells(self: NativeTerminalOutput, cells: []const c.winghostty_terminal_cell) c.winghostty_result {
-        return c.winghostty_surface_set_terminal_cells(self.surface, columns, rows, cells.ptr, cells.len);
+        return c.winghostty_surface_set_terminal_cells(self.surface, self.columns, self.rows, cells.ptr, cells.len);
     }
 
     fn setText(self: NativeTerminalOutput, text: []const u8, utf16_length: usize, caret: usize) c.winghostty_result {
@@ -1669,10 +2041,17 @@ const NativeTerminalOutput = struct {
 };
 
 fn publishTerminalOutput(allocator: std.mem.Allocator, slot: *Surface, bytes: []const u8, api: anytype) TerminalOutputResult {
-    if (slot.vt) |state| return publishVtOutput(slot, state, bytes, api);
+    if (slot.vt) |state| return publishVtOutput(allocator, slot, state, bytes, api);
     feedCells(slot, bytes);
     var result = TerminalOutputResult{};
-    const snapshot: ?AccessibilitySnapshot = accessibilitySnapshot(allocator, slot.cells, columns, rows, slot.terminal_x, slot.terminal_y) catch |err| blk: {
+    const snapshot: ?AccessibilitySnapshot = accessibilitySnapshot(
+        allocator,
+        slot.cells,
+        slot.grid.cols,
+        slot.grid.rows,
+        slot.terminal_x,
+        slot.terminal_y,
+    ) catch |err| blk: {
         result.snapshot_error = err;
         break :blk null;
     };
@@ -1687,29 +2066,40 @@ fn publishTerminalOutput(allocator: std.mem.Allocator, slot: *Surface, bytes: []
     return result;
 }
 
-fn publishVtOutput(slot: *Surface, state: *TerminalVt.State, bytes: []const u8, api: anytype) TerminalOutputResult {
+fn publishVtOutput(
+    allocator: std.mem.Allocator,
+    slot: *Surface,
+    state: *TerminalVt.State,
+    bytes: []const u8,
+    api: anytype,
+) TerminalOutputResult {
     var result = TerminalOutputResult{ .authoritative_vt = true };
     state.feed(bytes) catch |err| {
         result.vt_error = err;
     };
     if (state.snapshot_current) {
         const snapshot = &state.snapshot.?;
-        var projected: [cell_count]TerminalVt.HostCell = undefined;
-        if (snapshot.columns != columns or snapshot.rows != rows or slot.cells.len != cell_count) {
+        if (snapshot.columns != slot.grid.cols or snapshot.rows != slot.grid.rows or slot.cells.len != @as(usize, slot.grid.cols) * slot.grid.rows) {
             result.projection_error = error.InvalidGrid;
         } else {
-            TerminalVt.project(snapshot, &projected) catch |err| {
+            const projected = allocator.alloc(TerminalVt.HostCell, slot.cells.len) catch {
+                result.vt_error = error.OutOfMemory;
+                slot.output_result = result;
+                return result;
+            };
+            defer allocator.free(projected);
+            TerminalVt.project(snapshot, projected) catch |err| {
                 result.projection_error = err;
             };
-        }
-        if (result.projection_error == null) {
-            for (projected, slot.cells) |cell, *out| out.* = .{
-                .codepoint = cell.codepoint,
-                .foreground = cell.fg,
-                .background = cell.bg,
-                .flags = cell.flags,
-            };
-            result.render_result = api.setCells(slot.cells);
+            if (result.projection_error == null) {
+                for (projected, slot.cells) |cell, *out| out.* = .{
+                    .codepoint = cell.codepoint,
+                    .foreground = cell.fg,
+                    .background = cell.bg,
+                    .flags = cell.flags,
+                };
+                result.render_result = api.setCells(slot.cells);
+            }
         }
         // This is authoritative VT text, not a claim about the host's glyphs.
         // A non-visible caret has no representable host offset.
@@ -3238,32 +3628,56 @@ fn clearCells(slot: *Surface) void {
 }
 
 fn advanceLine(slot: *Surface) void {
+    const grid_columns = slot.grid.cols;
+    const grid_rows = slot.grid.rows;
+    const count = slot.cells.len;
     slot.terminal_x = 0;
-    if (slot.terminal_y + 1 < rows) {
+    if (slot.terminal_y + 1 < grid_rows) {
         slot.terminal_y += 1;
         return;
     }
-    std.mem.copyForwards(c.winghostty_terminal_cell, slot.cells[0 .. cell_count - columns], slot.cells[columns..]);
-    for (slot.cells[cell_count - columns ..]) |*cell| cell.* = .{ .codepoint = 0, .foreground = 0xE6E6E6, .background = 0, .flags = 0 };
+    std.mem.copyForwards(
+        c.winghostty_terminal_cell,
+        slot.cells[0 .. count - grid_columns],
+        slot.cells[grid_columns..],
+    );
+    for (slot.cells[count - grid_columns ..]) |*cell| cell.* = .{
+        .codepoint = 0,
+        .foreground = 0xE6E6E6,
+        .background = 0,
+        .flags = 0,
+    };
 }
 
 fn putCodepoint(slot: *Surface, codepoint: u32) void {
-    if (slot.terminal_x >= columns) advanceLine(slot);
-    slot.cells[slot.terminal_y * columns + slot.terminal_x] = .{ .codepoint = codepoint, .foreground = 0xE6E6E6, .background = 0, .flags = 0 };
+    if (slot.terminal_x >= slot.grid.cols) advanceLine(slot);
+    slot.cells[slot.terminal_y * slot.grid.cols + slot.terminal_x] = .{
+        .codepoint = codepoint,
+        .foreground = 0xE6E6E6,
+        .background = 0,
+        .flags = 0,
+    };
     slot.terminal_x += 1;
 }
 
 fn finishCsi(slot: *Surface, final: u8) void {
+    const grid_columns = slot.grid.cols;
+    const grid_rows = slot.grid.rows;
     const value = if (slot.csi_have_value) slot.csi_value else 1;
     switch (final) {
         'A' => slot.terminal_y -|= value,
-        'B' => slot.terminal_y = @min(rows - 1, slot.terminal_y + value),
-        'C' => slot.terminal_x = @min(columns, slot.terminal_x + value),
+        'B' => slot.terminal_y = @min(grid_rows - 1, slot.terminal_y + value),
+        'C' => slot.terminal_x = @min(grid_columns, slot.terminal_x + value),
         'D' => slot.terminal_x -|= value,
         'J' => if (slot.csi_have_value and slot.csi_value == 2) clearCells(slot),
         'K' => {
-            const start = slot.terminal_y * columns + slot.terminal_x;
-            for (slot.cells[start..][0 .. columns - slot.terminal_x]) |*cell| cell.* = .{ .codepoint = 0, .foreground = 0xE6E6E6, .background = 0, .flags = 0 };
+            const start = slot.terminal_y * grid_columns + slot.terminal_x;
+            for (slot.cells[start..][0 .. grid_columns - slot.terminal_x]) |*cell| cell.* = .{
+                .codepoint = 0,
+                .foreground = 0xE6E6E6,
+                .background = 0,
+                .flags = 0,
+            };
         },
         else => {},
     }
@@ -3278,7 +3692,7 @@ fn feedCells(slot: *Surface, bytes: []const u8) void {
             '\r' => slot.terminal_x = 0,
             '\n' => advanceLine(slot),
             '\x08' => slot.terminal_x -|= 1,
-            '\t' => slot.terminal_x = @min(columns, (slot.terminal_x + 8) & ~@as(usize, 7)),
+            '\t' => slot.terminal_x = @min(slot.grid.cols, (slot.terminal_x + 8) & ~@as(usize, 7)),
             0x20...0x7E => putCodepoint(slot, byte),
             else => {},
         },
@@ -3348,6 +3762,140 @@ test "workspace chrome actions occupy distinct visible buttons" {
     try std.testing.expectEqual(ChromeAction.split_down, chromeActionForBounds(220, 34, 800, 948, 44).?);
     try std.testing.expect(chromeActionForBounds(220, 34, 800, 868, 44) == null);
     try std.testing.expectEqual(@as(?ChromeAction, null), chromeActionForBounds(220, 34, 800, 700, 44));
+}
+
+test "pane geometry derives a terminal grid from actual cell metrics" {
+    const size = try gridSizeForBounds(480, 192, .{
+        .font_width = 7,
+        .font_height = 15,
+        .cell_width = 8,
+        .cell_height = 16,
+        .baseline = 12,
+    });
+    try std.testing.expectEqual(GridSize{ .cols = 60, .rows = 12 }, size);
+}
+
+test "pane geometry clamps sub-cell bounds to one cell and ignores unset metrics" {
+    try std.testing.expectEqual(
+        GridSize{ .cols = 1, .rows = 1 },
+        try gridSizeForBounds(3, 4, std.mem.zeroes(c.winghostty_cell_metrics)),
+    );
+    const one_pixel_cells = c.winghostty_cell_metrics{
+        .font_width = 1,
+        .font_height = 1,
+        .cell_width = 1,
+        .cell_height = 1,
+        .baseline = 1,
+    };
+    try std.testing.expectEqual(
+        GridSize{ .cols = 512, .rows = 512 },
+        try gridSizeForBounds(512, 512, one_pixel_cells),
+    );
+    try std.testing.expectError(
+        error.GridTooLarge,
+        gridSizeForBounds(513, 512, one_pixel_cells),
+    );
+    try std.testing.expectError(
+        error.GridTooLarge,
+        gridSizeForBounds(std.math.maxInt(u32), 1, .{
+            .font_width = 1,
+            .font_height = 1,
+            .cell_width = 1,
+            .cell_height = 1,
+            .baseline = 1,
+        }),
+    );
+}
+
+test "pane attach and resize commands carry geometry outside terminal input" {
+    var attach_storage: [5][]const u8 = undefined;
+    var attach_size: [16]u8 = undefined;
+    const attach = try attachArguments("zmx.exe", "session-a", .{ .cols = 60, .rows = 12 }, &attach_storage, &attach_size);
+    const expected_attach = [_][]const u8{ "zmx.exe", "attach", "session-a", "--size", "60x12" };
+    try std.testing.expectEqual(expected_attach.len, attach.len);
+    for (expected_attach, attach) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+
+    var resize_storage: [4][]const u8 = undefined;
+    var resize_size: [16]u8 = undefined;
+    const resize = try resizeArguments("zmx.exe", "session-a", .{ .cols = 80, .rows = 24 }, &resize_storage, &resize_size);
+    const expected_resize = [_][]const u8{ "zmx.exe", "resize", "session-a", "80x24" };
+    try std.testing.expectEqual(expected_resize.len, resize.len);
+    for (expected_resize, resize) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+}
+
+test "pane bounds partition available area without losing remainder pixels" {
+    const left = paneBounds(10, 20, 801, 400, .horizontal, 0, 2);
+    const right = paneBounds(10, 20, 801, 400, .horizontal, 1, 2);
+    try std.testing.expectEqual(@as(i32, 10), left.x);
+    try std.testing.expectEqual(@as(u32, 400), left.width);
+    try std.testing.expectEqual(@as(i32, 410), right.x);
+    try std.testing.expectEqual(@as(u32, 401), right.width);
+    try std.testing.expectEqual(@as(u32, 348), left.height);
+    try std.testing.expectEqual(@as(u32, 348), right.height);
+}
+
+test "terminal grid resizing reallocates pane cells and keeps legacy output in bounds" {
+    const allocator = std.testing.allocator;
+    var slot = Surface{
+        .cells = try allocator.alloc(c.winghostty_terminal_cell, cell_count),
+    };
+    defer allocator.free(slot.cells);
+    clearCells(&slot);
+    putCodepoint(&slot, 'A');
+
+    const cells = try resizedCellBuffer(allocator, slot.cells, slot.grid, .{ .cols = 3, .rows = 2 }, null);
+    allocator.free(slot.cells);
+    slot.cells = cells;
+    slot.grid = .{ .cols = 3, .rows = 2 };
+    try std.testing.expectEqual(@as(usize, 6), slot.cells.len);
+    try std.testing.expectEqual(@as(usize, 1), slot.terminal_x);
+    try std.testing.expectEqual(@as(u32, 'A'), slot.cells[0].codepoint);
+    feedCells(&slot, "BCDE");
+    try std.testing.expectEqual(@as(u32, 'D'), slot.cells[3].codepoint);
+    try std.testing.expectEqual(@as(usize, 1), slot.terminal_y);
+    const snapshot = try accessibilitySnapshot(allocator, slot.cells, 3, 2, slot.terminal_x, slot.terminal_y);
+    defer allocator.free(snapshot.text);
+    try std.testing.expectEqualStrings("ABC\nDE ", snapshot.text);
+}
+
+test "terminal pane resize updates the experimental VT grid dimensions" {
+    const allocator = std.testing.allocator;
+    const old_cells = try allocator.alloc(c.winghostty_terminal_cell, cell_count);
+    defer allocator.free(old_cells);
+    const state = try TerminalVt.State.create(allocator, columns, rows);
+    defer state.destroy();
+    const cells = try resizedCellBuffer(allocator, old_cells, default_grid, .{ .cols = 60, .rows = 12 }, state);
+    defer allocator.free(cells);
+    try std.testing.expectEqual(@as(usize, 60), cells.len / 12);
+    try std.testing.expectEqual(@as(usize, 720), cells.len);
+    try std.testing.expectEqual(@as(u16, 60), state.snapshot.?.columns);
+    try std.testing.expectEqual(@as(u16, 12), state.snapshot.?.rows);
+}
+
+test "pane resize requests coalesce, deduplicate and suppress failed retries" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    workspace.surfaces[0].last_resize_size = default_grid;
+    workspace.surfaces[0].session_name = @constCast("session-a");
+
+    workspace.queueResize(0, default_grid);
+    try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
+    workspace.queueResize(0, .{ .cols = 80, .rows = 24 });
+    workspace.queueResize(0, .{ .cols = 72, .rows = 20 });
+    try std.testing.expectEqual(GridSize{ .cols = 72, .rows = 20 }, workspace.surfaces[0].pending_resize_size.?);
+    workspace.surfaces[0].attempted_resize_size = .{ .cols = 72, .rows = 20 };
+    workspace.queueResize(0, .{ .cols = 72, .rows = 20 });
+    try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
+
+    workspace.surfaces[0].attempted_resize_size = null;
+    workspace.resize_child_surface = 0;
+    workspace.resize_child_session = @constCast("session-a");
+    workspace.resize_child_size = .{ .cols = 80, .rows = 24 };
+    workspace.queueResize(0, .{ .cols = 80, .rows = 24 });
+    try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
+    workspace.queueResize(0, default_grid);
+    try std.testing.expectEqual(default_grid, workspace.surfaces[0].pending_resize_size.?);
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
 }
 
 test "workspace tab chrome separates selection and close affordances" {
