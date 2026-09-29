@@ -84,6 +84,8 @@ public static class GraphCodeUiaGateState {
   [DllImport("user32.dll")]
   private static extern IntPtr SendMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")]
+  private static extern IntPtr SendMessageString(IntPtr window, uint message, UIntPtr wParam, string lParam);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")]
   private static extern IntPtr SendMessageText(
     IntPtr window, uint message, UIntPtr wParam, StringBuilder lParam
   );
@@ -100,6 +102,8 @@ public static class GraphCodeUiaGateState {
   private static extern bool SetWindowText(IntPtr window, string text);
   [DllImport("user32.dll")]
   private static extern int GetDlgCtrlID(IntPtr window);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetDlgItem(IntPtr dialog, int controlId);
   [DllImport("user32.dll")]
   private static extern IntPtr SetFocus(IntPtr window);
   [DllImport("user32.dll")]
@@ -480,6 +484,31 @@ public static class GraphCodeUiaGateState {
     SendMessage(parent, 0x0111, (UIntPtr)command, edit);
     return true;
   }
+  public static bool SetEditTextById(IntPtr parent, int controlId, string text) {
+    var edit = GetDlgItem(parent, controlId);
+    // Cross-process SetWindowText only updates the stored caption; WM_SETTEXT reaches the EDIT buffer.
+    if (edit == IntPtr.Zero || SendMessageString(edit, 0x000C, UIntPtr.Zero, text) == IntPtr.Zero) return false;
+    ulong command = ((ulong)0x0300 << 16) | (uint)controlId;
+    SendMessage(parent, 0x0111, (UIntPtr)command, edit);
+    return true;
+  }
+  public static string EditTextById(IntPtr parent, int controlId) {
+    var edit = GetDlgItem(parent, controlId);
+    if (edit == IntPtr.Zero) return null;
+    return EditBufferText(edit);
+  }
+  private static string EditBufferText(IntPtr edit) {
+    // Cross-process GetWindowText returns the stored caption; WM_GETTEXT reads the EDIT buffer.
+    int length = (int)SendMessage(edit, 0x000E, UIntPtr.Zero, IntPtr.Zero);
+    var text = new StringBuilder(length + 1);
+    SendMessageText(edit, 0x000D, (UIntPtr)text.Capacity, text);
+    return text.ToString();
+  }
+  public static string FirstEditText(IntPtr parent) {
+    var edit = FindWindowEx(parent, IntPtr.Zero, "Edit", null);
+    if (edit == IntPtr.Zero) return null;
+    return EditBufferText(edit);
+  }
 }
 "@ -ReferencedAssemblies @(
   [System.Windows.Automation.AutomationElement].Assembly.Location,
@@ -536,6 +565,37 @@ public static class GraphCodeUiaHostInfo {
 
 function Require([bool] $condition, [string] $message) {
   if (-not $condition) { throw $message }
+}
+
+# The shell's UIA command recorder truncates then writes daemon-command.json, so
+# the file can exist while its writer handle is still open. File.ReadAllText
+# demands FileShare.Read and throws a sharing violation against that handle;
+# read with permissive sharing and retry until the recorded JSON is complete.
+function Read-DaemonCommandLog([string] $path) {
+  $lastFailure = "not attempted"
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    try {
+      $stream = [IO.FileStream]::new(
+        $path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+        [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+      )
+      try {
+        $reader = [IO.StreamReader]::new($stream)
+        $text = $reader.ReadToEnd()
+      } finally {
+        $stream.Dispose()
+      }
+      if ($text.Length -gt 0) {
+        $null = $text | ConvertFrom-Json -ErrorAction Stop
+        return $text
+      }
+      $lastFailure = "empty"
+    } catch {
+      $lastFailure = $_.Exception.Message
+    }
+    Start-Sleep -Milliseconds 50
+  }
+  throw "daemon command log '$path' never became a complete readable record: $lastFailure"
 }
 
 function Format-WindowHandle([IntPtr] $handle) {
@@ -3499,6 +3559,16 @@ try {
     )
   }
   Require ($null -ne $renameDialog) "Rename Loop command did not open its native dialog"
+  $renameGraphBefore = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -eq "UIA loop A"
+  })
+  $renameSidebarBefore = @(Get-DirectChildren $loops $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^loop-row-' -and $_.Current.Name -eq "UIA loop A"
+  })
+  Require (($renameGraphBefore.Count -eq 1) -and ($renameSidebarBefore.Count -eq 1)) `
+    "Rename outcome probe could not identify the same loop in graph and sidebar"
+  $renameGraphIdentity = $renameGraphBefore[0].Current.AutomationId
+  $renameSidebarIdentity = $renameSidebarBefore[0].Current.AutomationId
   $renameElements = @($renameDialog.FindAll(
     [System.Windows.Automation.TreeScope]::Descendants,
     [System.Windows.Automation.Condition]::TrueCondition
@@ -3507,9 +3577,15 @@ try {
   Require ($renameContent -match "Choose the title shown") "Rename Loop dialog omitted its explanation"
   Require ($renameContent -match "(?m)^Title$") "Rename Loop dialog omitted its Title field label"
   Require ($renameContent -match "UIA loop A") "Rename Loop dialog did not populate the current title"
-  Require ([GraphCodeUiaGateState]::SetFirstEditText(
-    [IntPtr]$renameDialog.Current.NativeWindowHandle, "UIA renamed loop"
-  )) "Rename Loop dialog omitted its native editable title field"
+  Require ([GraphCodeUiaGateState]::SetEditTextById(
+    [IntPtr]$renameDialog.Current.NativeWindowHandle, 9904, "UIA renamed loop"
+  )) "Rename Loop dialog omitted its native Title edit control (id 9904)"
+  $renameInputAfterSet = [GraphCodeUiaGateState]::EditTextById(
+    [IntPtr]$renameDialog.Current.NativeWindowHandle, 9904
+  )
+  Write-Host "UIA_RENAME_INPUT requested='UIA renamed loop' observed='$renameInputAfterSet'"
+  Require ($renameInputAfterSet -eq "UIA renamed loop") `
+    "Rename Loop edit control did not retain the requested replacement title"
   Require ([GraphCodeUiaGateState]::SendReturn(
     [IntPtr]$renameDialog.Current.NativeWindowHandle
   )) "Rename Loop dialog rejected Return"
@@ -3522,6 +3598,113 @@ try {
     if ($null -eq $remainingRename) { break }
   }
   Require ($null -eq $remainingRename) "Return did not submit and close the Rename Loop dialog"
+  $renameCommandJson = (Read-DaemonCommandLog $daemonCommandLogPath)
+  $renameCommand = ConvertFrom-Json -InputObject $renameCommandJson
+  Require ($renameCommand.graphCommand.command.renameNode._0 -eq
+           "11111111-1111-4111-8111-111111111111") `
+    "Rename submission did not dispatch the fixture node identity"
+  $renameDispatchMatches = $renameCommand.graphCommand.command.renameNode.title -eq "UIA renamed loop"
+  Write-Host "UIA_RENAME_DISPATCH nodeId=$($renameCommand.graphCommand.command.renameNode._0) title=$($renameCommand.graphCommand.command.renameNode.title) expectedTitle='UIA renamed loop' titleMatches=$renameDispatchMatches connectionFailure=forced"
+  $renamedGraphCard = Find-FragmentById $root $renameGraphIdentity $rawWalker
+  $renamedSidebarRow = Find-FragmentById $root $renameSidebarIdentity $rawWalker
+  $renameGraphTitle = [string]$renamedGraphCard.Current.Name
+  $renameSidebarTitle = [string]$renamedSidebarRow.Current.Name
+  Write-Host "UIA_RENAME_OUTCOME graph='$renameGraphTitle' sidebar='$renameSidebarTitle' expected='UIA renamed loop' reason=gate-forces-daemon-connection-failure"
+
+  $updateWindowCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    (New-Object System.Windows.Automation.AndCondition(
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, "Update node"
+      )),
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Window
+      ))
+    ))
+  )
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 21)) `
+    "Edit Details open fixture command was rejected"
+  $updateDialog = $null
+  for ($index = 0; $index -lt 40 -and $null -eq $updateDialog; $index++) {
+    Start-Sleep -Milliseconds 50
+    $updateDialog = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $updateWindowCondition
+    )
+  }
+  Require ($null -ne $updateDialog) "Update node dialog did not open"
+  $renameCommandAfterCancel = (Read-DaemonCommandLog $daemonCommandLogPath)
+  Require ([GraphCodeUiaGateState]::SendCommand(
+    [IntPtr]$updateDialog.Current.NativeWindowHandle, 2
+  )) "Edit Details dialog rejected Cancel"
+  for ($index = 0; $index -lt 40; $index++) {
+    Start-Sleep -Milliseconds 50
+    $remainingUpdate = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $updateWindowCondition
+    )
+    if ($null -eq $remainingUpdate) { break }
+  }
+  Require ($null -eq $remainingUpdate) "Update node cancellation left the dialog open"
+  Require ((Read-DaemonCommandLog $daemonCommandLogPath) -ceq $renameCommandAfterCancel) `
+    "Edit Details cancellation dispatched a daemon command"
+  Write-Host "UIA_EDIT_DETAILS open=True cancel=closed commandUnchanged=True"
+
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 21)) `
+    "Edit Details submit fixture command was rejected"
+  $updateDialog = $null
+  for ($index = 0; $index -lt 40 -and $null -eq $updateDialog; $index++) {
+    Start-Sleep -Milliseconds 50
+    $updateDialog = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $updateWindowCondition
+    )
+  }
+  Require ($null -ne $updateDialog) "Update node dialog did not reopen for submission"
+  Require ([GraphCodeUiaGateState]::SetEditTextById(
+    [IntPtr]$updateDialog.Current.NativeWindowHandle, 9100, "UIA details submitted"
+  )) "Edit Details dialog omitted its native Goal summary edit control (id 9100)"
+  $updateInputAfterSet = [GraphCodeUiaGateState]::EditTextById(
+    [IntPtr]$updateDialog.Current.NativeWindowHandle, 9100
+  )
+  Write-Host "UIA_UPDATE_NODE_INPUT requested='UIA details submitted' observed='$updateInputAfterSet'"
+  Require ([GraphCodeUiaGateState]::SendCommand(
+    [IntPtr]$updateDialog.Current.NativeWindowHandle, 1
+  )) "Edit Details dialog rejected Submit"
+  for ($index = 0; $index -lt 40; $index++) {
+    Start-Sleep -Milliseconds 50
+    $remainingUpdate = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $updateWindowCondition
+    )
+    if ($null -eq $remainingUpdate) { break }
+  }
+  if ($null -ne $remainingUpdate) {
+    $updateSubmitElements = @($remainingUpdate.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition
+    ))
+    $updateSubmitContent = @($updateSubmitElements | ForEach-Object {
+      $_.Current.Name
+    }) -join "|"
+    $updateSubmitFirstEdit = [GraphCodeUiaGateState]::FirstEditText(
+      [IntPtr]$remainingUpdate.Current.NativeWindowHandle
+    )
+    Write-Host "UIA_UPDATE_NODE_SUBMIT_STATE stillOpen=True firstEdit='$updateSubmitFirstEdit' content='$updateSubmitContent'"
+  }
+  Require ($null -eq $remainingUpdate) "Edit Details submission left the dialog open"
+  $updateCommandJson = (Read-DaemonCommandLog $daemonCommandLogPath)
+  $updateCommand = ConvertFrom-Json -InputObject $updateCommandJson
+  Require (($updateCommand.graphCommand.command.updateNode._0 -eq
+            "11111111-1111-4111-8111-111111111111") -and
+           ($updateCommand.graphCommand.command.updateNode.update.goalSummary -eq
+            "UIA details submitted")) "Edit Details did not dispatch the edited summary for the fixture node"
+  Write-Host "UIA_UPDATE_NODE_DISPATCH nodeId=$($updateCommand.graphCommand.command.updateNode._0) goalSummary=$($updateCommand.graphCommand.command.updateNode.update.goalSummary) connectionFailure=forced"
+  Require ($renameDispatchMatches) `
+    "Rename submission dispatched a title different from the requested replacement"
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 14)) `
     "jump palette fixture command was rejected"
@@ -4025,7 +4208,7 @@ try {
     Start-Sleep -Milliseconds 50
   }
   Require (Test-Path -LiteralPath $daemonCommandLogPath) "Needs-you Stop did not emit a daemon command"
-  $needsYouStopCommand = [IO.File]::ReadAllText($daemonCommandLogPath)
+  $needsYouStopCommand = (Read-DaemonCommandLog $daemonCommandLogPath)
   Require (($needsYouStopCommand | ConvertFrom-Json).graphCommand.projectPath -eq $fixtureProjectPath) `
     "Needs-you Stop routed to the wrong project: $needsYouStopCommand"
   Require ($needsYouStopCommand -match '"stopNode":\{"_0":"22222222-2222-4222-8222-222222222222"\}') `
@@ -4047,7 +4230,7 @@ try {
            (($reorderedRootNames -join '|') -eq 'UIA loop C|UIA loop A|UIA loop B')) `
     "sidebar root reorder was not observable in the loop tree: $($reorderedRootNames -join '|')"
   Require (Test-Path -LiteralPath $daemonCommandLogPath) "sidebar root reorder did not emit a daemon command"
-  $reorderCommand = [IO.File]::ReadAllText($daemonCommandLogPath)
+  $reorderCommand = (Read-DaemonCommandLog $daemonCommandLogPath)
   Require ($reorderCommand -match '"sidebarNodesReordered"') `
     "sidebar root reorder did not use the sidebar-order daemon command: $reorderCommand"
 
