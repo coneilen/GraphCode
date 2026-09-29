@@ -13,6 +13,13 @@ import MailroomKit
 public enum DaemonCommand: Codable, Sendable, Equatable {
   case listRecentProjects
   case openProject(path: String)
+  /// Read and authorize a joined local root on this v2 connection without opening it.
+  case projectSnapshot(path: String, token: UUID)
+  /// Validation leaves the snapshot authorization available for one checked import.
+  case validateProjectTransfer(path: String, expectedGraphID: UUID, snapshotToken: UUID)
+  /// Distinct from legacy import so older daemons cannot silently import unchecked.
+  case importProjectChecked(
+    path: String, expectedGraphID: UUID, snapshotToken: UUID, request: GraphImportRequest)
   /// Reopen whichever projects were showing in the sidebar when the app last quit. Sent
   /// at launch and again on every reconnect — joining is per-connection, so a client that
   /// dialled again is joined to nothing until it asks a second time. The daemon replies

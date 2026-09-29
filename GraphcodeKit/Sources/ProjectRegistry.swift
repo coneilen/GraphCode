@@ -229,6 +229,13 @@ public actor ProjectRegistry {
   /// here, per connection, and handed to every store the connection joins, before or
   /// after the announcement arrives.
   private var connectionCapabilities: [UUID: Set<String>] = [:]
+  private var closingProjectPaths: Set<String> = []
+  private final class TransferOpen {
+    let lease = ProjectTransferLease()
+    var inFlight = 0
+    var committed = false
+  }
+  private var transferOpens: [String: TransferOpen] = [:]
 
   public func addConnection(
     id: UUID,
@@ -499,11 +506,79 @@ public actor ProjectRegistry {
     case .openProject(let path):
       switch routing(for: path, isSidebar: sidebarConnections.contains(connectionID)) {
       case .project(let canonicalPath):
-        let snapshot = await open(canonicalPath, for: connectionID, channel: channel)
-        response = .graphChanged(snapshot)
-        error = nil
+        if let snapshot = await open(canonicalPath, for: connectionID, channel: channel) {
+          response = .graphChanged(snapshot)
+        } else {
+          error = "The project or connection changed while opening; open it again."
+        }
       case .refused(let reason):
         error = reason
+      }
+
+    case .projectSnapshot(let path, let token):
+      switch transferPath(path, connectionID: connectionID, channel: channel) {
+      case .project(let root):
+        guard let store = stores[root], let lease = transferOpens[root]?.lease else {
+          error = "The transfer project is no longer open."
+          break
+        }
+        let result = await store.snapshotForProjectTransfer(
+          connectionID: connectionID, token: token, channel: channel)
+        guard
+          currentOpen(
+            root, connectionID: connectionID, channel: channel, store: store, lease: lease)
+        else {
+          error = "The transfer project changed while reading its snapshot."
+          break
+        }
+        switch result {
+        case .applied(let graph): response = .graphChanged(graph)
+        case .rejected(let message, _): error = message
+        }
+      case .refused(let reason): error = reason
+      }
+
+    case .validateProjectTransfer(let path, let graphID, let token):
+      switch transferPath(path, connectionID: connectionID, channel: channel) {
+      case .project(let root):
+        guard let store = stores[root], let lease = transferOpens[root]?.lease else {
+          error = "The transfer project is no longer open."
+          break
+        }
+        let result = await store.validateProjectTransfer(
+          expectedGraphID: graphID, snapshotToken: token, connectionID: connectionID,
+          channel: channel)
+        guard
+          currentOpen(
+            root, connectionID: connectionID, channel: channel, store: store, lease: lease)
+        else {
+          error = "The transfer project changed while validating."
+          break
+        }
+        switch result {
+        case .applied(let graph): response = .graphChanged(graph)
+        case .rejected(let message, _): error = message
+        }
+      case .refused(let reason): error = reason
+      }
+
+    case .importProjectChecked(let path, let graphID, let token, let request):
+      switch transferPath(path, connectionID: connectionID, channel: channel) {
+      case .project(let root):
+        guard let store = stores[root] else {
+          error = "The transfer project is no longer open."
+          break
+        }
+        let result = await store.importProjectChecked(
+          request, expectedGraphID: graphID, snapshotToken: token, connectionID: connectionID,
+          channel: channel)
+        // A close can win after the store's atomic commit but before this actor
+        // resumes. The correlated result must still describe the command that ran.
+        switch result {
+        case .applied(let graph): response = .graphChanged(graph)
+        case .rejected(let message, _): error = message
+        }
+      case .refused(let reason): error = reason
       }
 
     case .restoreOpenProjects:
@@ -520,8 +595,10 @@ public actor ProjectRegistry {
       // puts a row in a running app instead of one that only appears next launch.
       sidebarConnections.insert(connectionID)
       for path in prunedOpenProjects()
-      where Self.isWellFormedProjectPath(path, platformPaths: platformPaths) {
-        await open(
+      where Self.isWellFormedProjectPath(path, platformPaths: platformPaths)
+        && !closingProjectPaths.contains(Self.canonicalize(path, platformPaths: platformPaths))
+      {
+        _ = await open(
           Self.canonicalize(path, platformPaths: platformPaths),
           for: connectionID,
           channel: channel)
@@ -530,19 +607,32 @@ public actor ProjectRegistry {
       error = nil
 
     case .openGlobalGraph:
-      let snapshot = await open(LoopGraphScope.globalPath, for: connectionID, channel: channel)
-      response = .graphChanged(snapshot)
-      error = nil
+      if let snapshot = await open(LoopGraphScope.globalPath, for: connectionID, channel: channel) {
+        response = .graphChanged(snapshot)
+      } else {
+        error = "The connection changed while opening the global graph."
+      }
 
     case .closeProject(let path):
+      let root = Self.canonicalize(path, platformPaths: platformPaths)
+      guard closingProjectPaths.insert(root).inserted else {
+        return ProjectRegistryCommandResult(error: "The project is already closing.")
+      }
+      invalidateTransfer(root)
+      defer { closingProjectPaths.remove(root) }
       let snapshot = await close(
-        Self.canonicalize(path, platformPaths: platformPaths),
+        root,
         for: connectionID)
       response = snapshot.map(DaemonEvent.graphChanged)
       error = nil
 
     case .forgetProject(let path):
       let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
+      guard closingProjectPaths.insert(canonicalPath).inserted else {
+        return ProjectRegistryCommandResult(error: "The project is already closing.")
+      }
+      invalidateTransfer(canonicalPath)
+      defer { closingProjectPaths.remove(canonicalPath) }
       _ = await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
       if path != canonicalPath { persistence.forgetProject(path: path) }
@@ -550,6 +640,11 @@ public actor ProjectRegistry {
 
     case .deleteProjectGraph(let path):
       let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
+      guard closingProjectPaths.insert(canonicalPath).inserted else {
+        return ProjectRegistryCommandResult(error: "The project is already closing.")
+      }
+      invalidateTransfer(canonicalPath)
+      defer { closingProjectPaths.remove(canonicalPath) }
       _ = await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
       // The graph is the only handle on every loop's detached session, so its deletion
@@ -559,6 +654,9 @@ public actor ProjectRegistry {
       // `store(forProjectPath:)` would run its load-time `ensureUnattendedSessions`,
       // *starting* sessions on the way to killing them. Memory goes with each loop, the
       // same as single-node deletion.
+      // A checked import that committed just before invalidation must finish its
+      // callbacks and queued save before writer.forget, or it could resurrect the file.
+      await stores[canonicalPath]?.finishQueuedCommands()
       let graph = await stores[canonicalPath]?.graph ?? writer.load(path: canonicalPath)
       for node in graph?.nodesAtAnyDepth ?? [] {
         terminateSession?(node, canonicalPath)
@@ -753,28 +851,103 @@ public actor ProjectRegistry {
         return nil
       }
       return .graphChanged(await store.graph)
-    case .announce, .mailbox:
+    case .announce, .mailbox, .projectSnapshot, .validateProjectTransfer,
+      .importProjectChecked:
       return nil
     }
   }
 
   private func open(
     _ canonicalPath: String, for connectionID: UUID, channel: DaemonConnectionChannel
-  ) async -> LoopGraph {
+  ) async -> LoopGraph? {
+    guard !closingProjectPaths.contains(canonicalPath), connections[connectionID] === channel
+    else { return nil }
+    let state: TransferOpen?
+    if canonicalPath == LoopGraphScope.globalPath {
+      state = nil
+    } else if let existing = transferOpens[canonicalPath] {
+      state = existing
+    } else {
+      let created = TransferOpen()
+      transferOpens[canonicalPath] = created
+      state = created
+    }
+    state?.inFlight += 1
+    defer {
+      if let state {
+        state.inFlight -= 1
+        if state.inFlight == 0 && !state.committed {
+          if transferOpens[canonicalPath] === state {
+            transferOpens.removeValue(forKey: canonicalPath)
+          }
+          state.lease.invalidate()
+        }
+      }
+    }
     let store = await store(forProjectPath: canonicalPath)
+    guard
+      currentOpen(
+        canonicalPath, connectionID: connectionID, channel: channel, store: store,
+        lease: state?.lease)
+    else { return nil }
     connectionProjectPaths[connectionID, default: []].insert(canonicalPath)
     let snapshot = await store.addConnection(id: connectionID, channel: channel)
+    guard
+      currentOpen(
+        canonicalPath, connectionID: connectionID, channel: channel, store: store,
+        lease: state?.lease)
+    else { return nil }
     await store.setCapabilities(connectionCapabilities[connectionID] ?? [], for: connectionID)
+    guard
+      currentOpen(
+        canonicalPath, connectionID: connectionID, channel: channel, store: store,
+        lease: state?.lease)
+    else { return nil }
     // The global graph is always resident and isn't a folder anyone opened, so it stays
     // out of both the recents list and the restore-on-launch set — the app asks for it
     // by name every launch instead.
     guard canonicalPath != LoopGraphScope.globalPath else { return snapshot }
+    if let state, RemoteProjectLocation.parse(projectPath: canonicalPath) == nil {
+      guard await store.activateProjectTransfer(using: state.lease),
+        currentOpen(
+          canonicalPath, connectionID: connectionID, channel: channel, store: store,
+          lease: state.lease)
+      else { return nil }
+    }
     let project = snapshot.project
     persistence.recordOpened(
       ProjectRef(path: project.path, name: project.name, lastOpenedAt: Date()))
-    guard rememberOpen(canonicalPath) else { return snapshot }
-    await joinSidebars(to: store, at: canonicalPath, excluding: connectionID)
+    let newlyOpened = rememberOpen(canonicalPath)
+    state?.committed = true
+    guard newlyOpened else { return snapshot }
+    await joinSidebars(
+      to: store, at: canonicalPath, excluding: connectionID, lease: state?.lease)
+    guard
+      currentOpen(
+        canonicalPath, connectionID: connectionID, channel: channel, store: store,
+        lease: state?.lease)
+    else { return nil }
     return snapshot
+  }
+
+  private func currentOpen(
+    _ path: String, connectionID: UUID, channel: DaemonConnectionChannel,
+    store: GraphStore, lease: ProjectTransferLease?
+  ) -> Bool {
+    connections[connectionID] === channel && currentProjectOpen(path, store: store, lease: lease)
+  }
+
+  private func currentProjectOpen(
+    _ path: String, store: GraphStore, lease: ProjectTransferLease?
+  ) -> Bool {
+    guard !closingProjectPaths.contains(path), stores[path] === store else { return false }
+    if path == LoopGraphScope.globalPath { return true }
+    guard let lease else { return false }
+    return transferOpens[path]?.lease === lease && lease.isActive
+  }
+
+  private func invalidateTransfer(_ path: String) {
+    transferOpens.removeValue(forKey: path)?.lease.invalidate()
   }
 
   /// Joins every attached sidebar client to a project one of *them* — or the CLI, or a
@@ -791,18 +964,25 @@ public actor ProjectRegistry {
   /// frames until the `.graphChanged` for the project it named (`runAndPrintGraph`, and
   /// the same loop in the remote python shim), so joining it to an unrelated project
   /// would hand it another project's graph to print.
-  private func joinSidebars(to store: GraphStore, at path: String, excluding opener: UUID) async {
+  private func joinSidebars(
+    to store: GraphStore, at path: String, excluding opener: UUID, lease: ProjectTransferLease?
+  ) async {
     for id in sidebarConnections where id != opener {
+      guard currentProjectOpen(path, store: store, lease: lease) else { return }
       guard let channel = connections[id] else { continue }
       connectionProjectPaths[id, default: []].insert(path)
       _ = await store.addConnection(id: id, channel: channel)
+      guard currentProjectOpen(path, store: store, lease: lease) else { return }
+      guard connections[id] === channel else { continue }
       await store.setCapabilities(connectionCapabilities[id] ?? [], for: id)
+      guard currentProjectOpen(path, store: store, lease: lease) else { return }
     }
   }
 
   private func close(_ canonicalPath: String, for connectionID: UUID) async -> LoopGraph? {
     var snapshot: LoopGraph?
     if let store = stores[canonicalPath] {
+      await store.invalidateProjectTransfer()
       snapshot = await store.removeConnection(connectionID, leaveReplay: true)
     }
     connectionProjectPaths[connectionID]?.remove(canonicalPath)
@@ -866,6 +1046,30 @@ public actor ProjectRegistry {
   enum PathRouting: Equatable {
     case project(String)
     case refused(String)
+  }
+
+  private func transferPath(
+    _ path: String, connectionID: UUID, channel: DaemonConnectionChannel
+  ) -> PathRouting {
+    guard case .v2 = channel.mode else {
+      return .refused("Project transfer requires daemon protocol v2.")
+    }
+    guard Self.isWellFormedProjectPath(path, platformPaths: platformPaths),
+      path != LoopGraphScope.globalPath,
+      RemoteProjectLocation.parse(projectPath: path) == nil
+    else { return .refused("Project transfer requires a local project root.") }
+    let root = Self.canonicalize(path, platformPaths: platformPaths)
+    guard path == root, !closingProjectPaths.contains(root), stores[root] != nil,
+      transferOpens[root]?.committed == true,
+      transferOpens[root]?.lease.isActive == true,
+      connectionProjectPaths[connectionID]?.contains(root) == true,
+      persistence.loadOpenProjects().contains(where: {
+        Self.canonicalize($0, platformPaths: platformPaths) == root
+      })
+    else {
+      return .refused("The canonical project root is not open on this connection.")
+    }
+    return .project(root)
   }
 
   /// Where a path a client named should be routed, and whether it may become a *new*
