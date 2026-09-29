@@ -56,6 +56,21 @@ must be at least 8 characters, must use `command -> result` form, and must not
 contain an angle-bracket placeholder or the words TODO, TBD, or N/A. There is
 no exemption, so write the lines from commands you actually ran.
 
+The angle-bracket rule applies to the **entire line**, not just to the template's
+scaffolding, and abbreviating a long path as an angle-bracketed token is the most
+common way this check fails. Write the real path, or shorten it without brackets.
+Validate the body before you publish:
+
+```powershell
+pwsh -NoProfile -File Tools\tdd\Test-TddEvidence.ps1 -BodyPath .\pr-body.md
+```
+
+Because the checker matches the first `RED:`/`GREEN:`/`REGRESSION:` line anywhere
+in the body, including inside an HTML comment, never start a line with one of those
+labels in example or guidance text. `Tools/tdd/Tests/TddEvidence.Tests.ps1` asserts
+that the shipped pull request template is still rejected, which is what keeps an
+unedited template from passing as real evidence.
+
 This mirrors the working practice: write the test, observe it fail for the
 intended reason, then implement, then re-run something wider. Preserve the
 failing output rather than replacing it with the passing run.
