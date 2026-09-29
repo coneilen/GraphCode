@@ -1635,7 +1635,7 @@ public enum ZmxSessionLauncher {
   static func remoteEnsureInvocation(
     forNode node: LoopNode, at location: RemoteProjectLocation,
     settings: GraphcodeSettings = GraphcodeSettingsStore.load(),
-    bridgeState: RemoteBridgeWireState? = nil
+    bridgeState: RemoteBridgeWireState? = nil, onlyAfterReboot: Bool = false
   ) -> [String]? {
     let shedPrompt = ShedPromptReport()
     guard
@@ -1710,13 +1710,25 @@ public enum ZmxSessionLauncher {
     let launch =
       agentLabelCommand(zmxPath: "zmx", forNode: node)
       .map { "\(create) && { \($0) || true; }" } ?? create
+    // The boot this session is alive in, recorded by the daemon as well as by a pane
+    // attach (`RemoteBootMarker`): it is how a pane, and `rebootProbeScript`, tell a
+    // session that died with the machine from one that ended.
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let markerWrite = RemoteBootMarker.writeFragment(forSessionName: name)
+    var missing = trustSeed + hooksWrite + "{ \(launch); } && { \(markerWrite); }"
+    if onlyAfterReboot {
+      let marker = RemoteBootMarker.markerExpression(forSessionName: name)
+      missing =
+        "\(RemoteBootMarker.captureFragment); gc_last=$(cat \(marker) 2>/dev/null); "
+        + "if [ -n \"$gc_boot\" ] && [ -n \"$gc_last\" ] && [ \"$gc_boot\" != \"$gc_last\" ]; "
+        + "then \(missing); fi"
+    }
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
       + deliveryFragment(
         delivery, ifSessionMissing: check,
         bridgeStateGeneration: bridgeState.map(\.generation))
-      + "\(check) >/dev/null 2>&1\(bank) || \(repair){ " + trustSeed + hooksWrite
-      + "\(launch); }; }"
+      + "\(check) >/dev/null 2>&1\(bank) && { \(markerWrite); } || \(repair){ \(missing); }; }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
 
@@ -2228,7 +2240,12 @@ public enum ZmxSessionLauncher {
   static func remoteKillInvocation(
     forNode node: LoopNode, at location: RemoteProjectLocation
   ) -> [String] {
-    let script = quotedCommand(["zmx"] + killArguments(forNode: node))
+    // A session ended on purpose must not read as one a reboot killed, to the pane or to
+    // `rebootProbeScript`.
+    let marker = RemoteBootMarker.markerExpression(
+      forSessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName)
+    let script =
+      "rm -f \(marker); " + quotedCommand(["zmx"] + killArguments(forNode: node))
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
 
@@ -2236,7 +2253,9 @@ public enum ZmxSessionLauncher {
     _ = await runRemoteRetrying(remoteKillInvocation(forNode: node, at: location))
   }
 
-  private static func startRemote(_ node: LoopNode, at location: RemoteProjectLocation) async {
+  private static func startRemote(
+    _ node: LoopNode, at location: RemoteProjectLocation, onlyAfterReboot: Bool = false
+  ) async {
     // A codespace that is down is redialed on the shared schedule, not on every sweep.
     guard await CodespaceDialBreaker.shared.permits(location) else { return }
     // A dial already in flight for this node is doing this job; a second one racing it
@@ -2294,7 +2313,7 @@ public enum ZmxSessionLauncher {
     // as the local path: no UI here, the node's state stays honest, opening the loop
     // retries.
     if let ensure = remoteEnsureInvocation(
-      forNode: node, at: location, bridgeState: bridgeState
+      forNode: node, at: location, bridgeState: bridgeState, onlyAfterReboot: onlyAfterReboot
     ) {
       if await runRemoteRetrying(ensure) {
         await CodespaceDialBreaker.shared.record(location, reached: true)
@@ -2302,6 +2321,105 @@ public enum ZmxSessionLauncher {
       }
     }
     await RemoteEnsureGate.shared.end(node.id, token: lease)
+  }
+
+  /// Brings back the sessions of finished loops that a reboot of their remote host killed
+  /// (`GraphStore.ensureUnattendedSessionsAlive`). One probe dial per host names the
+  /// sessions that are missing *and* were last seen alive in an earlier boot; only those
+  /// are dialed again, each behind the same boot gate.
+  ///
+  /// The probe itself runs only when a pane of that host has redialed since the last
+  /// probe that answered (`redialStamp`): the one thing left dialing a finished loop's
+  /// host is its pane, and a healthy host has no pane redialing, so the sweep spends
+  /// nothing — a codespace dial spends the human's API quota (issue #480).
+  ///
+  /// `nodes` are already the quiet copies the store made (`GraphStore.rebootRestoreCopy`):
+  /// the create resumes the banked conversation, or opens on a note, never on the task.
+  static func restoreRebootedRemote(
+    _ nodes: [LoopNode], projectPath: String, gate: RebootProbeGate = .shared
+  ) async {
+    guard !nodes.isEmpty, let location = RemoteProjectLocation.parse(projectPath: projectPath)
+    else { return }
+    let asked = Date()
+    guard await gate.panesRedialed(location) else { return }
+    let name = { (node: LoopNode) in
+      SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    }
+    let probe = location.sshInvocation(
+      remoteCommand: location.remoteLoginShellCommand(
+        rebootProbeScript(forSessionNames: nodes.map(name))))
+    let (succeeded, output) = await collectRemoteOutput(probe, location: location)
+    guard succeeded else { return }
+    await gate.probed(location, at: asked)
+    let rebooted = parseRebootProbe(output)
+    for node in nodes where rebooted.contains(name(node)) {
+      await startRemote(node, at: location, onlyAfterReboot: true)
+    }
+  }
+
+  /// Touched by a remote pane's reconnect loop before every redial
+  /// (`SSHReconnectLoop`), and read by `RebootProbeGate`. Per host, not per loop: one
+  /// probe answers for every loop on it.
+  public static func redialStamp(for location: RemoteProjectLocation) -> URL {
+    SupportDirectory.url.appendingPathComponent("remote-redials", isDirectory: true)
+      .appendingPathComponent("\(location.host).redial")
+  }
+
+  /// Whether a host's panes have redialed since its last answered probe — the only
+  /// state `restoreRebootedRemote` keeps. Stamps from before this daemon started count
+  /// once, so a pane left waiting across a daemon restart is still answered.
+  actor RebootProbeGate {
+    static let shared = RebootProbeGate()
+
+    private let stampFor: @Sendable (RemoteProjectLocation) -> URL
+    private var probedAt: [String: Date] = [:]
+
+    init(
+      stampFor: @escaping @Sendable (RemoteProjectLocation) -> URL = {
+        ZmxSessionLauncher.redialStamp(for: $0)
+      }
+    ) {
+      self.stampFor = stampFor
+    }
+
+    func panesRedialed(_ location: RemoteProjectLocation) -> Bool {
+      guard
+        let touched =
+          (try? FileManager.default.attributesOfItem(
+            atPath: stampFor(location).path))?[.modificationDate] as? Date
+      else { return false }
+      guard let since = probedAt[location.host] else { return true }
+      return touched > since
+    }
+
+    /// Recorded only for a probe that answered: one that failed leaves the redial
+    /// pending, so the host is probed once it is back even if every pane has paused.
+    func probed(_ location: RemoteProjectLocation, at date: Date) {
+      probedAt[location.host] = date
+    }
+  }
+
+  /// Prints `rebooted <name>` for each session that is not running and whose boot marker
+  /// names a boot other than this one — the pane's reboot verdict, made for many sessions
+  /// in one shell. A host that cannot answer (no boot ID, `zmx` not up yet) prints nothing.
+  static func rebootProbeScript(forSessionNames names: [String]) -> String {
+    let quotedNames = names.map(RemoteProjectLocation.shellQuoted).joined(separator: " ")
+    return "\(RemoteBootMarker.captureFragment); [ -n \"$gc_boot\" ] || exit 0; "
+      + "gc_ls=$(zmx ls 2>/dev/null) || exit 0; gc_tab=$(printf '\\t'); "
+      + "for gc_n in \(quotedNames); do "
+      + "gc_last=$(cat \"$HOME/.graphcode/boots/$gc_n\" 2>/dev/null); "
+      + "[ -n \"$gc_last\" ] && [ \"$gc_last\" != \"$gc_boot\" ] || continue; "
+      + "printf '%s\\n' \"$gc_ls\" | grep -v -e \"${gc_tab}ended=\" -e \"${gc_tab}err=\" "
+      + "| grep -q \"name=$gc_n$gc_tab\" || printf 'rebooted %s\\n' \"$gc_n\"; done; exit 0"
+  }
+
+  static func parseRebootProbe(_ output: String) -> Set<String> {
+    Set(
+      output.split(whereSeparator: \.isNewline).compactMap { line in
+        let fields = line.split(whereSeparator: \.isWhitespace)
+        guard fields.count == 2, fields[0] == "rebooted" else { return nil }
+        return String(fields[1])
+      })
   }
 
   static func start(_ node: LoopNode, projectPath: String? = nil) async {

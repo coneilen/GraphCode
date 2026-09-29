@@ -22,7 +22,12 @@ import Foundation
 public enum SSHReconnectLoop {
   public static let maxDelaySeconds = 15
 
-  public static func script(connect: String, reconnect: String) -> String {
+  /// `redialStamp` is touched before every redial: it is how `graphcoded` learns, for
+  /// free, that a host may have rebooted under a loop it restores
+  /// (`ZmxSessionLauncher.restoreRebootedRemote`).
+  public static func script(
+    connect: String, reconnect: String, redialStamp: String? = nil
+  ) -> String {
     let passExit = "; gc_rc=$?; [ \"$gc_rc\" -ne 255 ] && exit \"$gc_rc\""
     return "trap 'exit 130' INT; "
       + connect + passExit + "; "
@@ -31,7 +36,7 @@ public enum SSHReconnectLoop {
       + #"Press Ctrl-C to stop. ──\033[0m\r\n' "$gc_rc" "$gc_delay"; "#
       + "sleep \"$gc_delay\"; gc_delay=$((gc_delay * 2)); "
       + "[ \"$gc_delay\" -gt \(maxDelaySeconds) ] && gc_delay=\(maxDelaySeconds); "
-      + reconnect + passExit + "; done"
+      + touching(redialStamp) + reconnect + passExit + "; done"
   }
 
   /// A Codespace surface's loop: the same dials and exit handling, retried on
@@ -52,7 +57,7 @@ public enum SSHReconnectLoop {
   /// genuinely ended nonzero, which converges: the redial reattaches a live session, and
   /// a gone one takes the reconnect script's session-ended branch to a clean exit 0.
   public static func codespaceScript(
-    connect: String, reconnect: String, pauseMarker: String,
+    connect: String, reconnect: String, pauseMarker: String, redialStamp: String? = nil,
     schedule: CodespaceDialSchedule = .standard, upAfter: Int = 330
   ) -> String {
     let marker = quoted(pauseMarker)
@@ -100,7 +105,11 @@ public enum SSHReconnectLoop {
       + #"printf '\033[1;33m── Connection failed (exit %s). Retrying in %ss. "#
       + #"Press Ctrl-C to stop. ──\033[0m\r\n' "$gc_rc" "$gc_wait"; "#
       + "gc_wait_or_ask \"$gc_wait\" && { \(restart); }; fi; "
-      + "gc_t=$(date +%s); " + reconnect + passExit + clock + "; done"
+      + "gc_t=$(date +%s); " + touching(redialStamp) + reconnect + passExit + clock + "; done"
+  }
+
+  private static func touching(_ stamp: String?) -> String {
+    stamp.map { "touch \(quoted($0)) 2>/dev/null; " } ?? ""
   }
 
   /// `RemoteProjectLocation.shellQuoted`, repeated because this file also builds in the

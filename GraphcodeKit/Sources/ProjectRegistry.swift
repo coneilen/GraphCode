@@ -59,6 +59,7 @@ public actor ProjectRegistry {
   /// one named project — see `sidebarSubscribers`.
   private var sidebarConnections: Set<UUID> = []
   private let ensureSession: (@Sendable (LoopNode, String?) -> Void)?
+  private let restoreRebootedSessions: (@Sendable ([LoopNode], String) async -> Void)?
   private let terminateSession: (@Sendable (LoopNode, String?) -> Void)?
   private let restartSession: (@Sendable (LoopNode, String?) async -> Bool)?
   private let startQuickChat:
@@ -121,6 +122,8 @@ public actor ProjectRegistry {
     platformPaths: any PlatformPaths = CurrentPlatformPaths.value,
     replayStore: DaemonReplayStore = DaemonReplayStore(),
     ensureSession: (@Sendable (LoopNode, String?) -> Void)? = CLISessionBackend.ensureSession,
+    restoreRebootedSessions: (@Sendable ([LoopNode], String) async -> Void)? =
+      CLISessionBackend.restoreRebootedSessions,
     terminateSession: (@Sendable (LoopNode, String?) -> Void)? =
       CLISessionBackend.terminateSession,
     restartSession: (@Sendable (LoopNode, String?) async -> Bool)? =
@@ -163,6 +166,7 @@ public actor ProjectRegistry {
     quickChatStore = QuickChatStore(baseDirectory: persistenceDirectory)
     self.replayStore = replayStore
     self.ensureSession = ensureSession
+    self.restoreRebootedSessions = restoreRebootedSessions
     self.terminateSession = terminateSession
     self.restartSession = restartSession
     self.evaluatePredicate = evaluatePredicate
@@ -1011,6 +1015,7 @@ public actor ProjectRegistry {
       },
       onConnectionFailure: onConnectionFailure,
       onEnsureSession: ensureSession,
+      onRestoreRebootedSessions: restoreRebootedSessions,
       onFindMissingProvider: { node, path in
         await ProviderPath.missingProvider(for: node, projectPath: path)
       },
