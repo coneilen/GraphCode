@@ -18,8 +18,33 @@ pub const Outcome = union(enum) {
     relaunch: RelaunchAction,
     /// The user cancelled before the install finished.
     cancelled,
-    /// Installation failed; carries a human-readable reason.
-    failed: []const u8,
+    /// Installation failed; carries a human-readable reason by value, so the
+    /// caller never owns, frees, or borrows memory from the dialog.
+    failed: FailureMessage,
+};
+
+/// A fixed-capacity copy of a failure reason. Capturing one cannot fail, so
+/// every failure path surfaces its reason without an allocation to lose.
+pub const FailureMessage = struct {
+    pub const capacity = 256;
+
+    bytes: [capacity]u8 = undefined,
+    len: usize = 0,
+
+    pub fn init(value: []const u8) FailureMessage {
+        var len = @min(value.len, capacity);
+        // Never cut a UTF-8 sequence in half when truncating.
+        if (len < value.len) {
+            while (len > 0 and (value[len] & 0xC0) == 0x80) len -= 1;
+        }
+        var message = FailureMessage{ .len = len };
+        @memcpy(message.bytes[0..len], value[0..len]);
+        return message;
+    }
+
+    pub fn text(self: *const FailureMessage) []const u8 {
+        return self.bytes[0..self.len];
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -134,6 +159,7 @@ pub fn run(
     registerClass() catch return error.DialogClassRegistrationFailed;
     active_state = .{ .allocator = allocator };
     active = true;
+    errdefer active = false;
     shared_phase.store(0, .release);
     shared_fraction_bits.store(@bitCast(@as(f64, 0)), .release);
     shared_done.store(false, .release);
@@ -159,11 +185,6 @@ pub fn run(
         active = false;
         return error.DialogCreationFailed;
     };
-    active_hwnd = hwnd;
-    _ = c.EnableWindow(parent, 0);
-    _ = c.ShowWindow(hwnd, c.SW_SHOW);
-    _ = c.SetForegroundWindow(hwnd);
-
     const options = WindowsUpdateInstall.InstallOptions{
         .allocator = allocator,
         .asset_url = asset_url,
@@ -172,7 +193,7 @@ pub fn run(
         .cancelled = &shared_cancelled,
         .progress = &reportProgress,
     };
-    const thread = try std.Thread.spawn(.{}, worker, .{options});
+    const thread = try startInstall(StartupApi, hwnd, parent, options);
 
     var message: c.MSG = undefined;
     while (!active_state.closed) {
@@ -189,7 +210,51 @@ pub fn run(
     ModalTeardown.dismiss(hwnd, parent);
     active_hwnd = null;
     active = false;
-    return active_state.outcome orelse .{ .failed = "The update window closed unexpectedly." };
+    return closedOutcome(active_state.outcome);
+}
+
+const window_closed_message = "The update window closed unexpectedly.";
+
+fn closedOutcome(outcome: ?Outcome) Outcome {
+    return outcome orelse .{ .failed = FailureMessage.init(window_closed_message) };
+}
+
+/// The Win32 and thread surface used to present the window and start the
+/// worker, injected so the startup failure path can be asserted without real
+/// windows or threads.
+const StartupApi = struct {
+    pub fn enableWindow(window: c.HWND, enabled: c_int) void {
+        _ = c.EnableWindow(window, enabled);
+    }
+
+    pub fn showWindow(window: c.HWND) void {
+        _ = c.ShowWindow(window, c.SW_SHOW);
+        _ = c.SetForegroundWindow(window);
+    }
+
+    pub fn destroyWindow(window: c.HWND) void {
+        _ = c.DestroyWindow(window);
+    }
+
+    pub fn setActiveWindow(window: c.HWND) void {
+        _ = c.SetActiveWindow(window);
+    }
+
+    pub fn spawn(options: WindowsUpdateInstall.InstallOptions) !std.Thread {
+        return std.Thread.spawn(.{}, worker, .{options});
+    }
+};
+
+fn startInstall(comptime Api: type, hwnd: c.HWND, parent: c.HWND, options: WindowsUpdateInstall.InstallOptions) !std.Thread {
+    active_hwnd = hwnd;
+    Api.enableWindow(parent, 0);
+    Api.showWindow(hwnd);
+    errdefer {
+        ModalTeardown.dismissWith(Api, hwnd, parent);
+        active_hwnd = null;
+        active = false;
+    }
+    return try Api.spawn(options);
 }
 
 fn registerClass() !void {
@@ -252,20 +317,32 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
     return c.DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
+/// Decides the outcome of a worker that reported failure. `source` is the
+/// worker's shared, reused buffer; the returned outcome holds its own copy.
+fn failedCompletion(cancel_requested: bool, source: []const u8) Outcome {
+    if (cancel_requested) return .cancelled;
+    return .{ .failed = FailureMessage.init(source) };
+}
+
+fn failureTextOf(outcome: *const Outcome) ?[]const u8 {
+    return switch (outcome.*) {
+        .failed => |*message| message.text(),
+        else => null,
+    };
+}
+
 fn onTick(hwnd: c.HWND) void {
     if (active_state.stage != .progress) return;
     if (shared_done.load(.acquire)) {
         if (shared_failed.load(.acquire)) {
             const len = shared_failure_len.load(.acquire);
-            const message = active_state.allocator.dupe(u8, shared_failure_buffer[0..len]) catch shared_failure_buffer[0..len];
             active_state.stage = .failed;
-            if (active_state.cancel_requested) {
-                active_state.outcome = .cancelled;
+            active_state.outcome = failedCompletion(active_state.cancel_requested, shared_failure_buffer[0..len]);
+            if (failureTextOf(&active_state.outcome.?)) |message| {
+                transitionToFailed(hwnd, message);
+            } else {
                 requestClose(hwnd);
-                return;
             }
-            active_state.outcome = .{ .failed = message };
-            transitionToFailed(hwnd, message);
         } else {
             active_state.stage = .relaunch;
             transitionToRelaunch(hwnd);
@@ -409,4 +486,130 @@ test "every InstallError maps to a distinct, human-readable failure message" {
 test "the relaunch message explains session continuity, not just that install succeeded" {
     try std.testing.expect(std.mem.indexOf(u8, relaunch_message, "Sessions") != null);
     try std.testing.expect(std.mem.indexOf(u8, relaunch_message, "daemon") != null);
+}
+
+test "a worker failure outcome does not borrow the shared failure buffer and needs no allocation" {
+    var source: [128]u8 = undefined;
+    const reason = failureMessage(error.DownloadFailed);
+    @memcpy(source[0..reason.len], reason);
+    // Capturing takes no allocator, so there is no out-of-memory fallback
+    // that could hand back a borrowed or static reason.
+    const outcome = failedCompletion(false, source[0..reason.len]);
+    // The worker reuses this buffer; the outcome must survive it being rewritten.
+    @memset(&source, 'x');
+    try std.testing.expectEqualStrings(reason, failureTextOf(&outcome).?);
+}
+
+test "a worker failure outcome survives being copied after its source is gone" {
+    const outcome = blk: {
+        var source: [128]u8 = undefined;
+        const reason = failureMessage(error.UpgradeFailed);
+        @memcpy(source[0..reason.len], reason);
+        const captured = failedCompletion(false, source[0..reason.len]);
+        @memset(&source, 0);
+        break :blk captured;
+    };
+    try std.testing.expectEqualStrings(failureMessage(error.UpgradeFailed), failureTextOf(&outcome).?);
+}
+
+test "a failure reported after the user cancelled is surfaced as cancelled without leaking" {
+    const outcome = failedCompletion(true, failureMessage(error.Cancelled));
+    try std.testing.expect(outcome == .cancelled);
+}
+
+test "the window-closed fallback is a surfaced failure the caller never frees" {
+    const outcome = closedOutcome(null);
+    try std.testing.expectEqualStrings(window_closed_message, failureTextOf(&outcome).?);
+    // The failure payload is a value, not a slice a caller could free.
+    try std.testing.expect(std.meta.TagPayload(Outcome, .failed) == FailureMessage);
+}
+
+test "the window-closed fallback never replaces a decided outcome" {
+    try std.testing.expect(closedOutcome(.cancelled) == .cancelled);
+    try std.testing.expectEqual(RelaunchAction.later, closedOutcome(.{ .relaunch = .later }).relaunch);
+}
+
+test "a failure reason longer than the capacity is truncated on a UTF-8 boundary" {
+    var long: [FailureMessage.capacity + 8]u8 = undefined;
+    @memset(&long, 'a');
+    // A three-byte character straddling the capacity must be dropped whole.
+    const ellipsis = "…";
+    @memcpy(long[FailureMessage.capacity - 1 ..][0..ellipsis.len], ellipsis);
+    const message = FailureMessage.init(&long);
+    try std.testing.expectEqual(FailureMessage.capacity - 1, message.text().len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(message.text()));
+}
+
+var startup_calls: [8]StartupCall = undefined;
+var startup_calls_len: usize = 0;
+var startup_owner_enabled: bool = true;
+var startup_dialog_alive: bool = false;
+
+const StartupCall = enum { disable_owner, enable_owner, show_dialog, destroy_dialog, activate_owner, spawn };
+
+fn recordStartup(call: StartupCall) void {
+    startup_calls[startup_calls_len] = call;
+    startup_calls_len += 1;
+}
+
+const FailingSpawnApi = struct {
+    pub fn enableWindow(window: c.HWND, enabled: c_int) void {
+        _ = window;
+        startup_owner_enabled = enabled != 0;
+        recordStartup(if (enabled != 0) .enable_owner else .disable_owner);
+    }
+
+    pub fn showWindow(window: c.HWND) void {
+        _ = window;
+        recordStartup(.show_dialog);
+    }
+
+    pub fn destroyWindow(window: c.HWND) void {
+        _ = window;
+        startup_dialog_alive = false;
+        recordStartup(.destroy_dialog);
+    }
+
+    pub fn setActiveWindow(window: c.HWND) void {
+        _ = window;
+        recordStartup(.activate_owner);
+    }
+
+    pub fn spawn(options: WindowsUpdateInstall.InstallOptions) !std.Thread {
+        _ = options;
+        recordStartup(.spawn);
+        return error.SystemResources;
+    }
+};
+
+fn fakeWindow(value: usize) c.HWND {
+    @setRuntimeSafety(false);
+    return @ptrFromInt(value);
+}
+
+test "a worker thread that cannot start restores the owner and tears the window down" {
+    startup_calls_len = 0;
+    startup_owner_enabled = true;
+    startup_dialog_alive = true;
+    active = true;
+    defer active = false;
+    defer active_hwnd = null;
+
+    const options = WindowsUpdateInstall.InstallOptions{
+        .allocator = std.testing.allocator,
+        .asset_url = "https://example.invalid/GraphCode.zip",
+        .cancelled = &shared_cancelled,
+        .progress = &reportProgress,
+    };
+    try std.testing.expectError(error.SystemResources, startInstall(FailingSpawnApi, fakeWindow(0x2000), fakeWindow(0x1000), options));
+
+    try std.testing.expect(startup_owner_enabled);
+    try std.testing.expect(!startup_dialog_alive);
+    try std.testing.expect(!active);
+    try std.testing.expect(active_hwnd == null);
+    try std.testing.expectEqualSlices(
+        StartupCall,
+        &.{ .disable_owner, .show_dialog, .spawn, .enable_owner, .destroy_dialog, .activate_owner },
+        startup_calls[0..startup_calls_len],
+    );
 }
