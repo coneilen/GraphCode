@@ -6,7 +6,15 @@ param(
   [string] $ResultPath,
   [ValidateRange(0, 1000)]
   [int] $ResponseDelayMilliseconds = 0,
-  [switch] $NonReading
+  [switch] $NonReading,
+  [string] $NodeAId = "",
+  [string] $NodeBId = "",
+  [string] $NodeATitle = "Stub node A",
+  [string] $NodeBTitle = "Stub node B",
+  # Apply renameNode graph commands to the stub's own graph and publish the
+  # result as a new graphChanged event, so a caller can observe what a daemon
+  # that accepted the command would send back.
+  [switch] $ApplyGraphCommands
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,9 +29,28 @@ $busyObserved = $false
 $seenCommands = [Collections.Generic.List[string]]::new()
 $errorMessage = $null
 
-$nodeA = if ($env:GRAPHCODE_STUB_NODE_A) { $env:GRAPHCODE_STUB_NODE_A } else { "11111111-1111-4111-8111-111111111111" }
-$nodeB = if ($env:GRAPHCODE_STUB_NODE_B) { $env:GRAPHCODE_STUB_NODE_B } else { "22222222-2222-4222-8222-222222222222" }
-$graphEvent = '{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"stub-graph","project":{"path":"graphcode://stub/project","name":"Stub project","remote":false},"nodes":[{"id":"' + $nodeA + '","title":"Stub node A","loopType":"turnBased","state":"running","activity":"stub","presence":{"presence":"busy","confidence":"reported"}},{"id":"' + $nodeB + '","title":"Stub node B","loopType":"turnBased","state":"idle","activity":"stub","presence":{"presence":"idle","confidence":"reported"}}],"edges":[]}}}'
+$nodeA = if ($NodeAId) { $NodeAId } elseif ($env:GRAPHCODE_STUB_NODE_A) { $env:GRAPHCODE_STUB_NODE_A } else { "11111111-1111-4111-8111-111111111111" }
+$nodeB = if ($NodeBId) { $NodeBId } elseif ($env:GRAPHCODE_STUB_NODE_B) { $env:GRAPHCODE_STUB_NODE_B } else { "22222222-2222-4222-8222-222222222222" }
+$nodeTitles = [ordered]@{ $nodeA = $NodeATitle; $nodeB = $NodeBTitle }
+$nodeStates = @{ $nodeA = @("running", "busy"); $nodeB = @("idle", "idle") }
+$graphSequence = 1
+$appliedRenames = [Collections.Generic.List[string]]::new()
+
+function ConvertTo-StubJsonText([string] $value) {
+  return $value.Replace('\', '\\').Replace('"', '\"')
+}
+
+function New-StubGraphEvent {
+  $nodes = foreach ($id in @($nodeTitles.Keys)) {
+    $state = $nodeStates[$id]
+    '{"id":"' + $id + '","title":"' + (ConvertTo-StubJsonText ([string]$nodeTitles[$id])) +
+      '","loopType":"turnBased","state":"' + $state[0] +
+      '","activity":"stub","presence":{"presence":"' + $state[1] + '","confidence":"reported"}}'
+  }
+  return '{"version":2,"kind":"event","sequence":' + $graphSequence +
+    ',"event":{"graphChanged":{"id":"stub-graph","project":{"path":"graphcode://stub/project",' +
+    '"name":"Stub project","remote":false},"nodes":[' + ($nodes -join ",") + '],"edges":[]}}}'
+}
 $recentProjects = '{"version":2,"kind":"response","requestID":"{0}","event":{"recentProjectsListed":[{"path":"graphcode://stub/project","name":"Stub project","remote":false}]}}'
 $quickChats = '{"version":2,"kind":"response","requestID":"{0}","event":{"quickChatsListed":[{"id":"33333333-3333-4333-8333-333333333333","title":"Stub quick chat","backend":"claudeCode","createdAt":0,"activity":{"sequence":1,"text":"ready","presence":{"presence":"idle","confidence":"reported"}}},{"id":"44444444-4444-4444-8444-444444444444","title":"Review notes","backend":"copilot","createdAt":1,"activity":null}]}}'
 $success = '{"version":2,"kind":"response","requestID":"{0}","success":true}'
@@ -97,6 +124,7 @@ function Write-Result {
     reconnectObserved = $connectionCount -ge 2
     graphSent = $graphSent
     busyObserved = $busyObserved
+    appliedRenames = @($appliedRenames)
   }
   $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $ResultPath -NoNewline
 }
@@ -147,6 +175,18 @@ try {
         $commandName = $frame.command.PSObject.Properties.Name | Select-Object -First 1
         $requestCommands[[string]$frame.requestID] = [string]$commandName
         if ($commandName) { $seenCommands.Add([string]$commandName) }
+        $renameApplied = $false
+        if ($ApplyGraphCommands -and $commandName -eq "graphCommand") {
+          $rename = $frame.command.graphCommand.command.renameNode
+          if ($null -ne $rename) {
+            $renameTarget = [string]$rename._0
+            if ($nodeTitles.Contains($renameTarget)) {
+              $nodeTitles[$renameTarget] = [string]$rename.title
+              $appliedRenames.Add($renameTarget + "=" + [string]$rename.title)
+              $renameApplied = $true
+            }
+          }
+        }
         $response = if ($commandName -eq "listRecentProjects") {
           $recentProjects.Replace("{0}", [string]$frame.requestID)
         } elseif ($commandName -eq "listQuickChats") {
@@ -160,9 +200,14 @@ try {
         if (-not (Send-Frame $server $response)) { break }
         [void] $seenResponses.Add([string]$frame.requestID)
         if ($commandName -eq "listRecentProjects" -and -not $graphSentOnConnection) {
-          if (-not (Send-Frame $server $graphEvent)) { break }
+          if (-not (Send-Frame $server (New-StubGraphEvent))) { break }
           $graphSent = $true
           $graphSentOnConnection = $true
+        }
+        if ($renameApplied) {
+          $graphSequence++
+          if (-not (Send-Frame $server (New-StubGraphEvent))) { break }
+          $graphSent = $true
         }
         Write-Result
       }

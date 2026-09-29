@@ -662,6 +662,26 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -match 'ReadAllText\(\$daemonCommandLogPath\)') {
     throw "RED: UIA gate reads the daemon command log without tolerating the recorder's open write handle"
   }
+  if ($uiaLiveGateSource -notmatch 'UIA_CONNECTED_RENAME_PROPAGATION' -or
+      $uiaLiveGateSource -notmatch 'UIA_CONNECTED_DAEMON_MODEL' -or
+      $uiaLiveGateSource -notmatch '-ApplyGraphCommands' -or
+      $uiaLiveGateSource -notmatch 'Remove-Item Env:GRAPHCODE_UIA_CONNECTION_FAILURE' -or
+      $uiaLiveGateSource -notmatch 'daemon rename result never reached the graph card' -or
+      $uiaLiveGateSource -notmatch 'daemon rename result never reached the sidebar row' -or
+      $uiaLiveGateSource -notmatch 'rename stub daemon never applied the dispatched rename') {
+    throw "RED: UIA gate never observes a rename result returned by a connected daemon"
+  }
+  if ($uiaLiveGateSource -notmatch '\$env:GRAPHCODE_UIA_CONNECTION_FAILURE = "1"' -or
+      $uiaLiveGateSource -notmatch 'connectionFailureBannerPassed = \$true') {
+    throw "RED: UIA gate no longer exercises the forced disconnected connection-failure path"
+  }
+  $stubDaemonSource = Get-Content (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") -Raw
+  if ($stubDaemonSource -notmatch '\$ApplyGraphCommands' -or
+      $stubDaemonSource -notmatch '\$frame\.command\.graphCommand\.command\.renameNode' -or
+      $stubDaemonSource -notmatch 'appliedRenames' -or
+      $stubDaemonSource -notmatch 'function New-StubGraphEvent') {
+    throw "RED: stub daemon cannot apply a renameNode command and republish its graph"
+  }
   if ($uiaLiveGateSource -notmatch '(?s)\$updateDialog = \$desktop\.FindFirst\(\s*\[System\.Windows\.Automation\.TreeScope\]::Children' -or
       $uiaLiveGateSource -notmatch 'UIA_UPDATE_DIALOG_CHILDREN found=' -or
       $uiaLiveGateSource -notmatch 'Current\.ProcessId -ne \$process\.Id') {

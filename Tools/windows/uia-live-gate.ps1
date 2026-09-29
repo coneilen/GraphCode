@@ -1212,6 +1212,20 @@ function Wait-ForRootReconnect(
 # genuinely-transient state where a fragment that is about to exist (or that
 # briefly disappeared mid-rebuild) isn't found by a single BFS pass. Retry the
 # whole search a bounded number of times before treating it as truly absent.
+# Reads an element's Name without letting a provider that has gone away turn a
+# polling read into a gate failure: a removed or replaced fragment throws
+# ElementNotAvailable, which here means "not this value yet", not "assert now".
+function Get-ElementName(
+  [System.Windows.Automation.AutomationElement] $element
+) {
+  if ($null -eq $element) { return "" }
+  try {
+    return [string]$element.Current.Name
+  } catch {
+    return ""
+  }
+}
+
 function Find-FragmentByIdWithRetry(
   [System.Windows.Automation.AutomationElement] $root,
   [string] $automationId,
@@ -1678,6 +1692,8 @@ $oldShellExecuteLog = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_SHELL
 $oldLocalAppData = [Environment]::GetEnvironmentVariable("LOCALAPPDATA")
 $process = $null
 $settingsProcess = $null
+$renameProcess = $null
+$renameStubProcess = $null
 $status = $null
 $liveRegionEvent = $null
 $eventHandler = $null
@@ -4796,6 +4812,198 @@ try {
   Require ($settingsProcess.ExitCode -eq 0) "Product Settings fixture shell exited with code $($settingsProcess.ExitCode)"
   $settingsProcess = $null
 
+  # --- Connected-daemon rename propagation --------------------------------
+  # Every assertion above runs with GRAPHCODE_UIA_CONNECTION_FAILURE forced and an
+  # in-process fixture model, so a rename can only be observed as a dispatched
+  # command: nothing ever comes back to update the rendered graph. This phase
+  # launches a separate shell with no UIA fixture at all, against a stub daemon
+  # that speaks the real length-prefixed v2 protocol over a real named pipe and
+  # applies renameNode to its own graph. Everything the shell renders here comes
+  # from daemon graphChanged frames, so the rename result is the daemon's reply
+  # reaching the same graph card and sidebar row identities - not a local edit.
+  # The daemon is a deterministic stub, not graphcoded: this proves the returned
+  # model reaches the UI, not that the production daemon computes that model.
+  $renameNodeId = "11111111-1111-4111-8111-111111111111"
+  $renameInitialTitle = "Daemon loop A"
+  $renameFinalTitle = "Daemon renamed loop"
+  $renamePipeName = "graphcode-uia-rename-$PID"
+  $renameStubResultPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-stub.json")
+  $renameStubErrorPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-stub-stderr.log")
+  $renameCommandLogPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-daemon-command.json")
+  $renameShellErrorPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-shell-stderr.log")
+  $renameShellOutputPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-shell-stdout.log")
+  $renameStubProcess = Start-Process -FilePath "pwsh" -WindowStyle Hidden -PassThru `
+    -RedirectStandardError $renameStubErrorPath -ArgumentList @(
+      "-NoProfile",
+      "-File",
+      (Join-Path $PSScriptRoot "Stub-Daemon.ps1"),
+      "-PipeName",
+      $renamePipeName,
+      "-ResultPath",
+      $renameStubResultPath,
+      "-NodeAId",
+      $renameNodeId,
+      "-NodeATitle",
+      $renameInitialTitle,
+      "-ApplyGraphCommands"
+    )
+  $renamePipeReady = $false
+  for ($index = 0; $index -lt 100 -and -not $renamePipeReady; $index++) {
+    Start-Sleep -Milliseconds 100
+    $renamePipeReady = @([IO.Directory]::GetFiles("\\.\pipe\")) -contains "\\.\pipe\$renamePipeName"
+  }
+  Require $renamePipeReady "rename stub daemon never published its named pipe"
+  $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\$renamePipeName"
+  $env:GRAPHCODE_UIA_DAEMON_COMMAND_LOG = $renameCommandLogPath
+  # The daemon supplies the model here, so the fixture rows and the forced
+  # connection-failure chrome are both removed for this shell only; the finally
+  # block restores whatever the caller had.
+  Remove-Item Env:GRAPHCODE_UIA_CONNECTION_FAILURE -ErrorAction SilentlyContinue
+  Remove-Item Env:GRAPHCODE_UIA_FIXTURE_ROWS -ErrorAction SilentlyContinue
+  Remove-Item Env:GRAPHCODE_UIA_UPDATE_AVAILABLE -ErrorAction SilentlyContinue
+  Remove-Item Env:GRAPHCODE_UIA_SHOW_UPDATE -ErrorAction SilentlyContinue
+  if ($ArgumentList.Count -gt 0) {
+    $renameProcess = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru `
+      -WindowStyle Normal -RedirectStandardOutput $renameShellOutputPath `
+      -RedirectStandardError $renameShellErrorPath
+  } else {
+    $renameProcess = Start-Process -FilePath $Shell -PassThru -WindowStyle Normal `
+      -RedirectStandardOutput $renameShellOutputPath -RedirectStandardError $renameShellErrorPath
+  }
+  $renameRoot = $null
+  for ($index = 0; $index -lt 160 -and $null -eq $renameRoot; $index++) {
+    Start-Sleep -Milliseconds 250
+    $renameProcess.Refresh()
+    Require (-not $renameProcess.HasExited) `
+      "connected-daemon shell exited with code $($renameProcess.ExitCode) during startup"
+    if ($renameProcess.MainWindowHandle -ne 0) {
+      $candidate = [System.Windows.Automation.AutomationElement]::FromHandle(
+        $renameProcess.MainWindowHandle
+      )
+      if ($candidate.Current.AutomationId -eq "graphcode-root") { $renameRoot = $candidate }
+    }
+  }
+  Require ($null -ne $renameRoot) "connected-daemon shell did not expose graphcode-root"
+  $renameShellWindow = $renameProcess.MainWindowHandle
+
+  # Nothing was seeded locally, so a sidebar row carrying the daemon's title is
+  # itself evidence that the connection negotiated and its graph was applied.
+  $renameSidebarBefore = $null
+  for ($index = 0; $index -lt 150 -and $null -eq $renameSidebarBefore; $index++) {
+    $renameLoops = Find-FragmentById $renameRoot "loops" $rawWalker
+    if ($null -ne $renameLoops) {
+      $renameSidebarBefore = @(Get-DirectChildren $renameLoops $rawWalker | Where-Object {
+        $_.Current.AutomationId -match '^loop-row-' -and $_.Current.Name -eq $renameInitialTitle
+      }) | Select-Object -First 1
+    }
+    if ($null -eq $renameSidebarBefore) { Start-Sleep -Milliseconds 100 }
+  }
+  Require ($null -ne $renameSidebarBefore) `
+    "daemon-supplied loop '$renameInitialTitle' never reached the sidebar"
+  $renameSidebarIdentityLive = $renameSidebarBefore.Current.AutomationId
+  Write-Host "UIA_CONNECTED_DAEMON_MODEL sidebar='$($renameSidebarBefore.Current.Name)' identity=$renameSidebarIdentityLive"
+
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($renameShellWindow, 7)) `
+    "connected-daemon Rename Loop command was rejected"
+  $renameLiveCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $renameProcess.Id
+    )),
+    $renameWindowCondition
+  )
+  $renameLiveDialog = $null
+  for ($index = 0; $index -lt 60 -and $null -eq $renameLiveDialog; $index++) {
+    Start-Sleep -Milliseconds 50
+    $renameLiveDialog = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $renameLiveCondition
+    )
+  }
+  Require ($null -ne $renameLiveDialog) "connected-daemon Rename Loop dialog did not open"
+  $renameLiveGraph = Find-FragmentByIdWithRetry $renameRoot "graph" $rawWalker
+  Require ($null -ne $renameLiveGraph) "connected-daemon shell omitted its graph fragment"
+  $renameGraphCardBefore = $null
+  for ($index = 0; $index -lt 60 -and $null -eq $renameGraphCardBefore; $index++) {
+    $renameLiveGraph = Find-FragmentById $renameRoot "graph" $rawWalker
+    if ($null -ne $renameLiveGraph) {
+      $renameGraphCardBefore = @(Get-DirectChildren $renameLiveGraph $rawWalker | Where-Object {
+        $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -eq $renameInitialTitle
+      }) | Select-Object -First 1
+    }
+    if ($null -eq $renameGraphCardBefore) { Start-Sleep -Milliseconds 100 }
+  }
+  Require ($null -ne $renameGraphCardBefore) `
+    "daemon-supplied loop '$renameInitialTitle' never rendered as a graph card"
+  $renameGraphIdentityLive = $renameGraphCardBefore.Current.AutomationId
+  $renameLiveElements = @($renameLiveDialog.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.Condition]::TrueCondition
+  ))
+  $renameLiveContent = @($renameLiveElements | ForEach-Object { $_.Current.Name }) -join "`n"
+  Require ($renameLiveContent -match [regex]::Escape($renameInitialTitle)) `
+    "connected-daemon Rename dialog did not prefill the daemon-supplied title"
+  Require ([GraphCodeUiaGateState]::SetEditTextById(
+    [IntPtr]$renameLiveDialog.Current.NativeWindowHandle, 9904, $renameFinalTitle
+  )) "connected-daemon Rename dialog omitted its native Title edit control (id 9904)"
+  Require ([GraphCodeUiaGateState]::EditTextById(
+    [IntPtr]$renameLiveDialog.Current.NativeWindowHandle, 9904
+  ) -eq $renameFinalTitle) "connected-daemon Rename edit control did not retain the typed title"
+  Require ([GraphCodeUiaGateState]::SendReturn(
+    [IntPtr]$renameLiveDialog.Current.NativeWindowHandle
+  )) "connected-daemon Rename dialog rejected Return"
+  $remainingLiveRename = $null
+  for ($index = 0; $index -lt 60; $index++) {
+    Start-Sleep -Milliseconds 50
+    $remainingLiveRename = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $renameLiveCondition
+    )
+    if ($null -eq $remainingLiveRename) { break }
+  }
+  Require ($null -eq $remainingLiveRename) "connected-daemon Rename dialog stayed open after Return"
+  $renameLiveCommand = ConvertFrom-Json -InputObject (Read-DaemonCommandLog $renameCommandLogPath)
+  Require (($renameLiveCommand.graphCommand.command.renameNode._0 -eq $renameNodeId) -and
+           ($renameLiveCommand.graphCommand.command.renameNode.title -eq $renameFinalTitle)) `
+    "connected-daemon rename dispatched the wrong node identity or title"
+
+  $renameLiveGraphTitle = ""
+  $renameLiveSidebarTitle = ""
+  for ($index = 0; $index -lt 100; $index++) {
+    $renameLiveGraphTitle = Get-ElementName (Find-FragmentById $renameRoot $renameGraphIdentityLive $rawWalker)
+    $renameLiveSidebarTitle = Get-ElementName (Find-FragmentById $renameRoot $renameSidebarIdentityLive $rawWalker)
+    if ($renameLiveGraphTitle -eq $renameFinalTitle -and
+        $renameLiveSidebarTitle -eq $renameFinalTitle) { break }
+    Start-Sleep -Milliseconds 100
+  }
+  Write-Host ("UIA_CONNECTED_RENAME_PROPAGATION nodeId=$renameNodeId " +
+    "graphIdentity=$renameGraphIdentityLive graph='$renameLiveGraphTitle' " +
+    "sidebarIdentity=$renameSidebarIdentityLive sidebar='$renameLiveSidebarTitle' " +
+    "expected='$renameFinalTitle' connection=live-stub-daemon")
+  Require ($renameLiveGraphTitle -eq $renameFinalTitle) `
+    "daemon rename result never reached the graph card (read '$renameLiveGraphTitle')"
+  Require ($renameLiveSidebarTitle -eq $renameFinalTitle) `
+    "daemon rename result never reached the sidebar row (read '$renameLiveSidebarTitle')"
+
+  Require ([GraphCodeUiaGateState]::PostCommand($renameShellWindow, 0x5002)) `
+    "connected-daemon shell rejected the tray Exit command"
+  Require $renameProcess.WaitForExit(5000) "connected-daemon shell did not exit"
+  Require ($renameProcess.ExitCode -eq 0) `
+    "connected-daemon shell exited with code $($renameProcess.ExitCode)"
+  $renameProcess = $null
+  $renameStubEvidence = $null
+  for ($index = 0; $index -lt 50 -and $null -eq $renameStubEvidence; $index++) {
+    Start-Sleep -Milliseconds 100
+    if (Test-Path -LiteralPath $renameStubResultPath) {
+      $renameStubEvidence = Get-Content -LiteralPath $renameStubResultPath -Raw |
+        ConvertFrom-Json -ErrorAction SilentlyContinue
+    }
+  }
+  Require ($null -ne $renameStubEvidence) "rename stub daemon wrote no protocol evidence"
+  Write-Host ("UIA_CONNECTED_RENAME_STUB=" + ($renameStubEvidence | ConvertTo-Json -Compress -Depth 6))
+  Require ([bool]$renameStubEvidence.protocolConnected) "rename stub daemon saw no connection"
+  Require (@($renameStubEvidence.appliedRenames) -contains "$renameNodeId=$renameFinalTitle") `
+    "rename stub daemon never applied the dispatched rename"
+
   [pscustomobject]@{
     name = $rootName
     automationId = $rootAutomationId
@@ -4829,6 +5037,11 @@ try {
     dynamicInvocationsPassed = $true
     compositeNavigationPassed = $true
     renameDialogPassed = $true
+    connectedDaemonRenamePassed = $true
+    connectedDaemonGraphTitle = $renameLiveGraphTitle
+    connectedDaemonSidebarTitle = $renameLiveSidebarTitle
+    connectedDaemonRenameIdentity = $renameNodeId
+    connectedDaemonAppliedRenames = @($renameStubEvidence.appliedRenames)
     jumpPalettePassed = $true
     inlineIngressErrorPassed = $true
     openFolderPickerPassed = $true
@@ -4893,7 +5106,7 @@ try {
   if ($focusEventRegistered) {
     [System.Windows.Automation.Automation]::RemoveAutomationFocusChangedEventHandler($focusHandler)
   }
-  Stop-UiaOwnedProcessTrees @($process, $settingsProcess)
+  Stop-UiaOwnedProcessTrees @($process, $settingsProcess, $renameProcess, $renameStubProcess)
   } catch {
     $sandboxCleanupError = $_
     if ($sandboxCreated) { Write-Host "UIA_FAILED_SANDBOX_RETAINED=$sandboxPath" }
@@ -4942,7 +5155,7 @@ try {
   } else { $env:LOCALAPPDATA = $oldLocalAppData }
   if ($sandboxCreated) {
     Write-Host "UIA_SANDBOX_RETAINED=$sandboxPath"
-    if (-not $process -and -not $settingsProcess) {
+    if (-not $process -and -not $settingsProcess -and -not $renameProcess) {
       Write-Host "UIA_PROCESS_TREE_CLEANUP=not_needed no UIA shell was launched"
     }
   }
