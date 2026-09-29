@@ -4854,19 +4854,22 @@ try {
   $renameCommandLogPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-daemon-command.json")
   $renameShellErrorPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-shell-stderr.log")
   $renameShellOutputPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "rename-shell-stdout.log")
+  # Start-Process joins ArgumentList with spaces and quotes nothing, so any value
+  # that contains a space has to carry its own quotes or pwsh binds the remainder
+  # to the next positional parameter.
   $renameStubProcess = Start-Process -FilePath "pwsh" -WindowStyle Hidden -PassThru `
     -RedirectStandardError $renameStubErrorPath -ArgumentList @(
       "-NoProfile",
       "-File",
-      (Join-Path $PSScriptRoot "Stub-Daemon.ps1"),
+      ('"' + (Join-Path $PSScriptRoot "Stub-Daemon.ps1") + '"'),
       "-PipeName",
-      $renamePipeName,
+      ('"' + $renamePipeName + '"'),
       "-ResultPath",
-      $renameStubResultPath,
+      ('"' + $renameStubResultPath + '"'),
       "-NodeAId",
-      $renameNodeId,
+      ('"' + $renameNodeId + '"'),
       "-NodeATitle",
-      $renameInitialTitle,
+      ('"' + $renameInitialTitle + '"'),
       "-ApplyGraphCommands"
     )
   # Enumerating the pipe namespace is only a diagnostic: the shell reconnects on
