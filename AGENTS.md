@@ -74,6 +74,10 @@ Overstated evidence has repeatedly caused rework. Be exact about what you ran.
   unless that exact path ran.
 - A manually dispatched workflow run is not the same as a pull request's
   required checks.
+- An **empty result is not a passing result.** A query that returns no rows
+  cannot distinguish "nothing failed" from "nothing ran" — assert a non-zero
+  count before drawing any conclusion from it. This applies to CI status
+  queries and log greps as much as to `--test-filter`.
 
 ### The parity ledger
 
