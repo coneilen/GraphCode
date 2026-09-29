@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          fetch-depth: 0
       - name: Classify changed paths
         id: classify
         shell: bash
@@ -52,3 +52,12 @@ jobs:
       - name: Validate release packaging
         shell: pwsh
         run: ./Tools/windows/validate.ps1 -Task packaging
+
+      - name: Retain UIA failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: uia-live-gate-diagnostics
+          path: ${{ runner.temp }}\gu-*\logs\*.json
+          if-no-files-found: warn
+          retention-days: 7

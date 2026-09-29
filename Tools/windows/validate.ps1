@@ -744,6 +744,24 @@ function Invoke-Task([string] $name) {
       }
     }
     "windows-shell" {
+      $uiaProductProcessBaseline = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+      )
+      $initialUiaProductProcesses = @(Get-CimInstance Win32_Process -Filter `
+        "Name = 'graphcode-windows.exe' OR Name = 'graphcoded.exe'" -ErrorAction Stop)
+      foreach ($candidate in $initialUiaProductProcesses) {
+        $identity = "$([int]$candidate.ProcessId)|$($candidate.CreationDate.ToUniversalTime().ToString('o'))"
+        [void]$uiaProductProcessBaseline.Add($identity)
+      }
+      Write-Host ("WINDOWS_SHELL_PREVALIDATION_PRODUCT_PROCESSES=" +
+        (ConvertTo-Json -InputObject @($initialUiaProductProcesses | ForEach-Object {
+          [ordered]@{
+            processId = [int]$_.ProcessId
+            name = $_.Name
+            executablePath = $_.ExecutablePath
+            sessionId = [int]$_.SessionId
+          }
+        }) -Compress -Depth 4))
       $zig0152 = Resolve-ZigVersion "0.15.2" "GRAPHCODE_ZIG0152"
       $swift = Resolve-SwiftExecutable
       Initialize-SwiftEnvironment $swift
@@ -830,6 +848,61 @@ function Invoke-Task([string] $name) {
       if (-not (Test-Path -LiteralPath $zmxExecutable -PathType Leaf)) {
         throw "zmx executable was not produced by the pinned shell build; workspace terminal UIA evidence requires it."
       }
+      $preUiaProcesses = @(Get-CimInstance Win32_Process -Filter `
+        "Name = 'graphcode-windows.exe' OR Name = 'graphcoded.exe'" -ErrorAction Stop)
+      $preUiaSnapshot = @($preUiaProcesses | ForEach-Object {
+        $identity = "$([int]$_.ProcessId)|$($_.CreationDate.ToUniversalTime().ToString('o'))"
+        [ordered]@{
+          processId = [int]$_.ProcessId
+          parentProcessId = [int]$_.ParentProcessId
+          name = $_.Name
+          executablePath = $_.ExecutablePath
+          creationDate = $_.CreationDate.ToUniversalTime().ToString("o")
+          sessionId = [int]$_.SessionId
+          existedBeforeValidation = $uiaProductProcessBaseline.Contains($identity)
+        }
+      })
+      Write-Host ("WINDOWS_SHELL_PRE_UIA_PROCESS_SNAPSHOT=" +
+        (ConvertTo-Json -InputObject $preUiaSnapshot -Compress -Depth 4))
+      $repositoryPrefix = ([IO.Path]::GetFullPath($repoRoot)).TrimEnd('\', '/') +
+        [IO.Path]::DirectorySeparatorChar
+      $ownedSurvivors = @($preUiaProcesses | Where-Object {
+        $identity = "$([int]$_.ProcessId)|$($_.CreationDate.ToUniversalTime().ToString('o'))"
+        $_.ExecutablePath -and
+          $_.ExecutablePath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+          -not $uiaProductProcessBaseline.Contains($identity)
+      })
+      foreach ($survivor in $ownedSurvivors) {
+        $current = Get-CimInstance Win32_Process -Filter `
+          "ProcessId = $([int]$survivor.ProcessId)" -ErrorAction Stop
+        if ($null -eq $current -or
+            [string]$current.CreationDate -cne [string]$survivor.CreationDate) {
+          continue
+        }
+        Stop-Process -Id ([int]$survivor.ProcessId) -Force -ErrorAction Stop
+      }
+      $remainingSurvivors = @()
+      foreach ($survivor in $ownedSurvivors) {
+        for ($attempt = 0; $attempt -lt 30; $attempt++) {
+          $current = Get-CimInstance Win32_Process -Filter `
+            "ProcessId = $([int]$survivor.ProcessId)" -ErrorAction Stop
+          if ($null -eq $current -or
+              [string]$current.CreationDate -cne [string]$survivor.CreationDate) {
+            break
+          }
+          Start-Sleep -Milliseconds 100
+        }
+        $current = Get-CimInstance Win32_Process -Filter `
+          "ProcessId = $([int]$survivor.ProcessId)" -ErrorAction Stop
+        if ($null -ne $current -and
+            [string]$current.CreationDate -ceq [string]$survivor.CreationDate) {
+          $remainingSurvivors += [int]$survivor.ProcessId
+        }
+      }
+      if ($remainingSurvivors.Count -gt 0) {
+        throw "Owned GraphCode processes survived pre-UIA cleanup: $($remainingSurvivors -join ',')"
+      }
+      Write-Host "WINDOWS_SHELL_PRE_UIA_CLEANUP=verified terminated=$($ownedSurvivors.Count)"
       Invoke-Native "Native UI Automation live gate" {
         & (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1") `
           -Shell (Join-Path $repoRoot "graphcode-windows\zig-out\bin\graphcode-windows.exe") `

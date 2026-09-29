@@ -59,6 +59,10 @@ expect "TDD evidence tooling validated by Windows suite" true false false \
   Tools/tdd/Test-TddEvidence.ps1
 expect "visual baseline manifest" true false false \
   investigation/visual-baseline/manifest.json
+expect "macOS icon source image" false true false \
+  Tools/icon/icon-master-1024.png
+expect "macOS reference screenshot only" false false false \
+  investigation/macos-parity-evidence/evidence/empty-welcome-original.png
 expect "Windows release workflow" true false false \
   .github/workflows/windows-release.yml
 
@@ -122,7 +126,50 @@ expect "classifier tests" true true true \
 
 expect "unknown path fails safe" true true true \
   some-new-directory/build.sh
+expect "unclassified root image fails safe" true true true \
+  notes/diagram.png
 expect "empty change list fails safe" true true true
+
+fixture="$(mktemp -d)"
+git -C "$fixture" init -q
+git -C "$fixture" config user.name "Classifier Test"
+git -C "$fixture" config user.email "classifier@example.invalid"
+git -C "$fixture" config core.autocrlf false
+printf 'base\n' >"$fixture/README.md"
+git -C "$fixture" add README.md
+git -C "$fixture" commit -qm "base"
+base="$(git -C "$fixture" rev-parse HEAD)"
+printf 'documentation\n' >"$fixture/notes.md"
+git -C "$fixture" add notes.md
+git -C "$fixture" commit -qm "documentation"
+head="$(git -C "$fixture" rev-parse HEAD)"
+got="$(
+  cd "$fixture" &&
+    GITHUB_OUTPUT='' bash "$classifier" --event pull_request --base "$base" --head "$head" 2>/dev/null |
+    flatten
+)"
+check "full-history docs-only diff is skipped" \
+  "windows=false macos=false linux=false" "$got"
+rm -rf "$fixture"
+
+# A PR path classifier must have the merge base locally; zero is a literal
+# depth, not a falsy workflow-expression operand.
+for workflow in \
+  .github/workflows/linux.yml \
+  .github/workflows/macos-shared-regression.yml \
+  .github/workflows/windows-shell.yml \
+  .github/workflows/windows-port-validation.yml \
+  .github/workflows/windows-hardening.yml; do
+  depth="$(awk '
+    /^  changes:/ { in_changes=1; next }
+    in_changes && /^  [^ ]/ { exit }
+    in_changes && /fetch-depth:/ {
+      sub(/^[[:space:]]*/, "")
+      print
+    }
+  ' "$here/../../../$workflow")"
+  check "$workflow changes checkout has full history" "fetch-depth: 0" "$depth"
+done
 
 # Non-PR events always get full validation, whatever changed.
 for event in push merge_group workflow_dispatch schedule; do
