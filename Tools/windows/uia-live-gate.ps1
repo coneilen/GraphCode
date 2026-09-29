@@ -2961,7 +2961,7 @@ try {
       $_.Current.AutomationId -match '^workspace-show-graph-' -and $_.Current.Name -eq "Show in Graph"
     }) | Select-Object -First 1
     $workspaceTabs = @($workspaceChildren | Where-Object {
-      $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$'
+      $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' -and $_.Current.Name -match 'tab$'
     })
     $workspaceControls = @($workspaceChildren | Where-Object {
       $_.Current.AutomationId -match '^workspace-(new-tab|split-right|split-down)-' -and
@@ -3089,23 +3089,23 @@ try {
   # another $null and pass vacuously.
   $newTabProbe = Wait-ForGraphChildren $root $rawWalker `
     { ($_.Current.AutomationId -match '^workspace-new-tab-' -and $_.Current.Name -eq "New Tab") -or
-      ($_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$') } `
+      ($_.Current.AutomationId -match '^workspace-tab-[0-9]+$' -and $_.Current.Name -match 'tab$') } `
     { param($items)
       (@($items | Where-Object { $_.Current.AutomationId -match '^workspace-new-tab-' }).Count -ge 1) -and
-      (@($items | Where-Object { $_.Current.AutomationId -match '^workspace-tab-' }).Count -ge 1) } 30
+      (@($items | Where-Object { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' }).Count -ge 1) } 30
   $graph = $newTabProbe.Graph
   $newTab = @($newTabProbe.Items | Where-Object {
     $_.Current.AutomationId -match '^workspace-new-tab-' -and $_.Current.Name -eq "New Tab"
   }) | Select-Object -First 1
   $workspaceTabs = @($newTabProbe.Items | Where-Object {
-    $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$'
+    $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' -and $_.Current.Name -match 'tab$'
   })
   Require ($workspaceTabs.Count -ge 1) "workspace omitted its initial terminal tab before the mounted-tab preservation check"
   $initialWorkspaceTabId = $workspaceTabs[0].Current.AutomationId
   Require ($null -ne $newTab) "workspace omitted New Tab before mounted-tab preservation check"
   $newTab.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   $mountedProbe = Wait-ForGraphChildren $root $rawWalker `
-    { $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$' } `
+    { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' -and $_.Current.Name -match 'tab$' } `
     { param($items) $items.Count -ge 2 }
   $graph = $mountedProbe.Graph
   $workspaceTabs = @($mountedProbe.Items)
@@ -3116,7 +3116,7 @@ try {
   # identity. The wait covers only the precondition (two tabs exist); it deliberately
   # does not wait on the ids matching, so a genuine identity change still fails here.
   $switchProbe = Wait-ForGraphChildren $root $rawWalker `
-    { $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$' } `
+    { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' -and $_.Current.Name -match 'tab$' } `
     { param($items) $items.Count -ge 2 }
   $graph = $switchProbe.Graph
   $workspaceTabs = @($switchProbe.Items)
@@ -3125,7 +3125,7 @@ try {
     "switching to the mounted background tab changed terminal tab identity"
   $workspaceTabs[1].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   $switchBackProbe = Wait-ForGraphChildren $root $rawWalker `
-    { $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$' } `
+    { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' -and $_.Current.Name -match 'tab$' } `
     { param($items) $items.Count -ge 2 }
   $graph = $switchBackProbe.Graph
   $workspaceTabs = @($switchBackProbe.Items)

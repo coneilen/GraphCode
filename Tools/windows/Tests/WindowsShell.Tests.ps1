@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
   [switch] $List,
+  [switch] $WorkspaceTabSelectorOnly,
   [string] $ZigExecutable
 )
 
@@ -28,6 +29,52 @@ function Assert-Contract([object] $condition, [string] $message) {
     throw "Windows shell contract: $message"
   }
 }
+
+function Assert-WorkspaceTabSelectors {
+  $gatePath = Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1"
+  $tokens = $null
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseFile(
+    $gatePath, [ref]$tokens, [ref]$errors)
+  Assert-Contract ($errors.Count -eq 0) "UIA live gate must parse"
+  $predicates = @($ast.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.BinaryExpressionAst] -and
+        $node.Operator -eq [Management.Automation.Language.TokenKind]::Imatch -and
+        $node.Left.Extent.Text -match '\.Current\.AutomationId$' -and
+        $node.Right.Extent.Text -match 'workspace-tab-'
+    }, $true))
+  Assert-Contract ($predicates.Count -eq 7) `
+    "expected seven actual-tab selectors in the UIA live gate, found $($predicates.Count)"
+
+  $cases = @(
+    @{ Label = "interleaved"; Ids = @("workspace-tab-0", "workspace-tab-close-0", "workspace-tab-1", "workspace-tab-close-1"); Expected = @("workspace-tab-0", "workspace-tab-1") },
+    @{ Label = "close first"; Ids = @("workspace-tab-close-0", "workspace-tab-0", "workspace-tab-close-1", "workspace-tab-1"); Expected = @("workspace-tab-0", "workspace-tab-1") },
+    @{ Label = "reversed"; Ids = @("workspace-tab-close-1", "workspace-tab-1", "workspace-tab-close-0", "workspace-tab-0"); Expected = @("workspace-tab-1", "workspace-tab-0") },
+    @{ Label = "no closes"; Ids = @("workspace-tab-0", "workspace-tab-1"); Expected = @("workspace-tab-0", "workspace-tab-1") },
+    @{ Label = "close only"; Ids = @("workspace-tab-close-0", "workspace-tab-close-1"); Expected = @() },
+    @{ Label = "empty"; Ids = @(); Expected = @() },
+    @{ Label = "split tab"; Ids = @("workspace-tab-close-0", "workspace-tab-0"); Expected = @("workspace-tab-0") }
+  )
+  foreach ($predicate in $predicates) {
+    $selector = [scriptblock]::Create($predicate.Extent.Text)
+    foreach ($case in $cases) {
+      $children = @($case.Ids | ForEach-Object {
+        [pscustomobject]@{ Current = [pscustomobject]@{
+          AutomationId = $_
+          Name = if ($_ -match 'close') { "Close tab" } elseif ($case.Label -eq "split tab") { "Split tab" } else { "Agent tab" }
+        } }
+      })
+      $selected = @($children | Where-Object $selector | ForEach-Object { $_.Current.AutomationId })
+      Assert-Contract (($selected -join "|") -ceq ($case.Expected -join "|")) `
+        "UIA actual-tab selector $($predicate.Extent.StartLineNumber) selected wrong controls for $($case.Label): $($selected -join ',')"
+    }
+  }
+  Write-Host "UIA actual-tab selector contract: 7 predicates, 7 fixtures passed"
+}
+
+Assert-WorkspaceTabSelectors
+if ($WorkspaceTabSelectorOnly) { exit 0 }
 
 $shellSource = Get-Content $shellScript -Raw
 $appSource = Get-Content (Join-Path $shellRoot "src\App.zig") -Raw
