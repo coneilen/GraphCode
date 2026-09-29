@@ -184,11 +184,15 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') }}
     runs-on: windows-2022
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        timeout-minutes: 5
 
-      - uses: compnerd/gha-setup-swift@397094e75494a93fa8d81db0268dbc8f5d6cf7c6 # v0.4.1
+      - name: Install pinned Swift toolchain
+        uses: compnerd/gha-setup-swift@397094e75494a93fa8d81db0268dbc8f5d6cf7c6 # v0.4.1
+        timeout-minutes: 10
         with:
           swift-version: swift-6.3.3-release
           swift-build: 6.3.3-RELEASE
@@ -196,6 +200,7 @@ jobs:
 
       - name: Restore pinned Zig toolchains
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        timeout-minutes: 10
         with:
           path: |
             .ci-tools/zig-0.15.2
@@ -204,6 +209,7 @@ jobs:
 
       - name: Restore pinned provider build caches
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        timeout-minutes: 10
         with:
           path: |
             .ci-providers
@@ -212,14 +218,17 @@ jobs:
 
       - name: Bootstrap exact Windows dependencies
         shell: pwsh
+        timeout-minutes: 30
         run: ./Tools/windows/bootstrap.ps1 -ToolRoot .ci-tools -ProviderRoot .ci-providers
 
       - name: Verify provider pins after cache restore
         shell: pwsh
+        timeout-minutes: 5
         run: ./Tools/windows/Assert-ProviderCheckout.ps1 -ProviderRoot .ci-providers
 
       - name: Validate release packaging with real products
         shell: pwsh
+        timeout-minutes: 40
         run: ./Tools/windows/validate.ps1 -Task packaging -PackagingPart real
 
   windows-shell:
