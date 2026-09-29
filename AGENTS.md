@@ -56,6 +56,21 @@ must be at least 8 characters, must use `command -> result` form, and must not
 contain an angle-bracket placeholder or the words TODO, TBD, or N/A. There is
 no exemption, so write the lines from commands you actually ran.
 
+The angle-bracket rule applies to the **entire line**, not just to the template's
+scaffolding, and abbreviating a long path as an angle-bracketed token is the most
+common way this check fails. Write the real path, or shorten it without brackets.
+Validate the body before you publish:
+
+```powershell
+pwsh -NoProfile -File Tools\tdd\Test-TddEvidence.ps1 -BodyPath .\pr-body.md
+```
+
+Because the checker matches the first `RED:`/`GREEN:`/`REGRESSION:` line anywhere
+in the body, including inside an HTML comment, never start a line with one of those
+labels in example or guidance text. `Tools/tdd/Tests/TddEvidence.Tests.ps1` asserts
+that the shipped pull request template is still rejected, which is what keeps an
+unedited template from passing as real evidence.
+
 This mirrors the working practice: write the test, observe it fail for the
 intended reason, then implement, then re-run something wider. Preserve the
 failing output rather than replacing it with the passing run.
@@ -74,6 +89,10 @@ Overstated evidence has repeatedly caused rework. Be exact about what you ran.
   unless that exact path ran.
 - A manually dispatched workflow run is not the same as a pull request's
   required checks.
+- An **empty result is not a passing result.** A query that returns no rows
+  cannot distinguish "nothing failed" from "nothing ran" — assert a non-zero
+  count before drawing any conclusion from it. This applies to CI status
+  queries and log greps as much as to `--test-filter`.
 
 ### The parity ledger
 
@@ -253,7 +272,7 @@ These are the single source of truth. Never silently upgrade one.
 | Zig (shell) | 0.15.2 | `mise.toml`, `graphcode-windows/build.zig.zon` (`minimum_zig_version`) |
 | Zig (zmx only) | 0.16.0 | `graphcode-windows/provider-pins.json` |
 | Winghostty | `f5abc059e4ca58b376eb209313aca7784659c679` | `graphcode-windows/provider-pins.json` |
-| zmx | `11e20c738b4ebd88031c7a01f1a9d938ee123234` | `graphcode-windows/provider-pins.json` |
+| zmx | `dcf61203cd390d43451c25636776d7d64ecfd629` | `graphcode-windows/provider-pins.json` |
 
 If a build fails because a tool is missing or the wrong version, rerun
 bootstrap. Do not fall back to whatever is on `PATH`.
