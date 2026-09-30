@@ -1358,6 +1358,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'actionPopupClosed = \$edgePopupClosed' -or
       $uiaLiveGateSource -notmatch 'UIA_CANVAS_EDGE_ACTION_CLICK_EVIDENCE' -or
       $uiaLiveGateSource -notmatch 'actionClick = \$editEdgeClickEvidence' -or
+      $uiaLiveGateSource -notmatch 'NameProperty, "Edit edge"' -or
       $uiaLiveGateSource -notmatch 'Create or edit edge' -or
       $uiaLiveGateSource -notmatch 'editActionDialogOpened = \$canvasEdgeEditDialogOpened' -or
       $uiaLiveGateSource -notmatch 'daemonCommandUnchanged = \$canvasEdgeDaemonCommandUnchanged' -or

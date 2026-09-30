@@ -4822,7 +4822,7 @@ try {
     )),
     (New-Object System.Windows.Automation.AndCondition(
       (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, "Create or edit edge"
+        [System.Windows.Automation.AutomationElement]::NameProperty, "Edit edge"
       )),
       (New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
