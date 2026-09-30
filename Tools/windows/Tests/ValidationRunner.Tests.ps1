@@ -1595,6 +1595,18 @@ Start-Sleep -Seconds 60
       $custodyCardWaitSource -match 'Invoke\(\)|PostRightClick|Actual Size') {
     throw "RED: custody card wait lacks a positive baseline, unique UUID-bound observation, or action-free polling"
   }
+  $openSketchMenuAst = $edgeTextGateAst.Find({
+      param($node)
+      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Open-SketchNodeMenu"
+    }, $true)
+  if (-not $openSketchMenuAst -or
+      $openSketchMenuAst.Extent.Text -notmatch '\$cards\.Count -eq 1' -or
+      $openSketchMenuAst.Extent.Text -notmatch '\$ExpectedCardId' -or
+      $openSketchMenuAst.Extent.Text -notmatch '\$cards\[0\]\.Current\.AutomationId' -or
+      $openSketchMenuAst.Extent.Text -notmatch 'Get-DirectChildren \$graph \$rawWalker') {
+    throw "RED: custody right-click can bypass fresh-fragment, unique-card, or child-UUID checks"
+  }
   if ($uiaLiveGateSource -notmatch 'Open-EdgeMenu \$false 5120' -or
       $uiaLiveGateSource -notmatch 'Open-EdgeMenu \$true 5110' -or
       $uiaLiveGateSource -notmatch 'Edge-Combo 9100 0' -or
