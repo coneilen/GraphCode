@@ -607,11 +607,34 @@ public static class GraphCodeUiaGateState {
   }
   [DllImport("user32.dll", SetLastError = true, EntryPoint = "SendInput")]
   private static extern uint SendKeyInputs(uint count, KeyInputRecord[] inputs, int size);
+  [DllImport("user32.dll", SetLastError = true, EntryPoint = "SystemParametersInfoW")]
+  private static extern bool SystemParametersInfoRect(uint action, uint param, out RECT rect, uint winIni);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetAncestor(IntPtr window, uint flags);
   public sealed class ControlClick {
     public int ControlId, Left, Top, Right, Bottom, ScreenX, ScreenY;
     public int CursorBeforeX, CursorBeforeY, CursorAtX, CursorAtY;
     public bool HitTarget;
     public int WindowAtPointId;
+    public string WindowAtPointClass, WindowAtPointRootClass;
+    public int WindowAtPointProcessId;
+    public bool VisibleEmpty;
+    public int WorkLeft, WorkTop, WorkRight, WorkBottom;
+    public bool OutsideWorkArea;
+    public int CenterX, CenterY;
+    public bool CenterHitTarget;
+    public string WindowAtCenterClass, WindowAtCenterRootClass;
+  }
+  private static string ClassOf(IntPtr window) {
+    if (window == IntPtr.Zero) return "";
+    var name = new StringBuilder(128);
+    GetClassName(window, name, name.Capacity);
+    return name.ToString();
+  }
+  public static int[] WindowBounds(IntPtr window) {
+    RECT rect;
+    if (window == IntPtr.Zero || !GetWindowRect(window, out rect)) return null;
+    return new[] { rect.Left, rect.Top, rect.Right, rect.Bottom };
   }
   public static IntPtr ControlById(IntPtr parent, int controlId) {
     return parent == IntPtr.Zero ? IntPtr.Zero : GetDlgItem(parent, controlId);
@@ -620,13 +643,38 @@ public static class GraphCodeUiaGateState {
     RECT rect;
     if (target == IntPtr.Zero || !GetWindowRect(target, out rect) ||
         rect.Right <= rect.Left || rect.Bottom <= rect.Top) return null;
-    var center = new ScreenPoint { X = (rect.Left + rect.Right) / 2, Y = (rect.Top + rect.Bottom) / 2 };
-    IntPtr atPoint = WindowFromPoint(center);
+    RECT work;
+    if (!SystemParametersInfoRect(0x0030, 0, out work, 0))
+      throw new InvalidOperationException(String.Format("SPI_GETWORKAREA failed: Win32Error={0}", Marshal.GetLastWin32Error()));
+    var rectCenter = new ScreenPoint { X = (rect.Left + rect.Right) / 2, Y = (rect.Top + rect.Bottom) / 2 };
+    IntPtr atRectCenter = WindowFromPoint(rectCenter);
+    // A user clicks the part of a control they can see. When the control lies
+    // inside the work area this is exactly its centre; only when it crosses the
+    // work-area edge does the point move into the visible portion. A control with
+    // no visible portion is reported as VisibleEmpty and never clicked.
+    int visibleLeft = Math.Max(rect.Left, work.Left), visibleTop = Math.Max(rect.Top, work.Top);
+    int visibleRight = Math.Min(rect.Right, work.Right), visibleBottom = Math.Min(rect.Bottom, work.Bottom);
+    var center = new ScreenPoint { X = (visibleLeft + visibleRight) / 2, Y = (visibleTop + visibleBottom) / 2 };
+    bool visibleEmpty = visibleRight <= visibleLeft || visibleBottom <= visibleTop;
+    IntPtr atPoint = visibleEmpty ? IntPtr.Zero : WindowFromPoint(center);
+    IntPtr rootAtPoint = atPoint == IntPtr.Zero ? IntPtr.Zero : GetAncestor(atPoint, 2);
+    uint ownerProcess = 0;
+    if (rootAtPoint != IntPtr.Zero) GetWindowThreadProcessId(rootAtPoint, out ownerProcess);
     var hit = new ControlClick {
       ControlId = GetDlgCtrlID(target), Left = rect.Left, Top = rect.Top, Right = rect.Right,
       Bottom = rect.Bottom, ScreenX = center.X, ScreenY = center.Y,
-      HitTarget = atPoint == target,
-      WindowAtPointId = atPoint == IntPtr.Zero ? 0 : GetDlgCtrlID(atPoint)
+      HitTarget = !visibleEmpty && atPoint == target,
+      VisibleEmpty = visibleEmpty,
+      WindowAtPointId = atPoint == IntPtr.Zero ? 0 : GetDlgCtrlID(atPoint),
+      WindowAtPointClass = ClassOf(atPoint),
+      WindowAtPointRootClass = ClassOf(rootAtPoint),
+      WindowAtPointProcessId = (int)ownerProcess,
+      WorkLeft = work.Left, WorkTop = work.Top, WorkRight = work.Right, WorkBottom = work.Bottom,
+      OutsideWorkArea = rect.Left < work.Left || rect.Top < work.Top || rect.Right > work.Right || rect.Bottom > work.Bottom,
+      CenterX = rectCenter.X, CenterY = rectCenter.Y,
+      CenterHitTarget = atRectCenter == target,
+      WindowAtCenterClass = ClassOf(atRectCenter),
+      WindowAtCenterRootClass = ClassOf(atRectCenter == IntPtr.Zero ? IntPtr.Zero : GetAncestor(atRectCenter, 2))
     };
     if (!hit.HitTarget) return hit;
     ScreenPoint before, at;
@@ -5832,6 +5880,7 @@ try {
   }
   # 9105 is a checkbox; NativeForms.zig gives checkbox fields an empty label.
   $nodeSheetCheckboxIds = @(9105)
+  $nodeSheetOcclusions = [Collections.Generic.List[object]]::new()
   $nodeSheetAlwaysVisible = @(9100, 9112, 9113, 9114)
   $nodeSheetTypes = @(
     [pscustomobject]@{ Tile = 2; Label = "Goal-based"; Value = "goalBased"; Extra = @(9106, 9107, 9108, 9109, 9110, 9111) },
@@ -5886,16 +5935,49 @@ try {
     $uiaBounds = [System.Windows.Automation.AutomationElement]::FromHandle($control).Current.BoundingRectangle
     $hit = [GraphCodeUiaGateState]::ClickScreenPoint($control)
     Require ($null -ne $hit) "node creation sheet control $controlId ($label) has no live window rectangle"
+    $dialogBounds = @([GraphCodeUiaGateState]::WindowBounds($nodeSheetWindow))
+    $controlBounds = @($hit.Left, $hit.Top, $hit.Right, $hit.Bottom)
+    $workArea = @($hit.WorkLeft, $hit.WorkTop, $hit.WorkRight, $hit.WorkBottom)
+    Require (-not $hit.VisibleEmpty) `
+      ("node creation sheet $label control [$($controlBounds -join ',')] has no visible portion inside " +
+       "work area [$($workArea -join ',')]; dialog [$($dialogBounds -join ',')]")
+    $occlusion = $null
+    if ($hit.OutsideWorkArea) {
+      $occlusion = [ordered]@{
+        controlId = $controlId
+        label = $label
+        controlBounds = $controlBounds
+        dialogBounds = $dialogBounds
+        workArea = $workArea
+        overlapPixels = [ordered]@{
+          left = [Math]::Max(0, $hit.WorkLeft - $hit.Left)
+          top = [Math]::Max(0, $hit.WorkTop - $hit.Top)
+          right = [Math]::Max(0, $hit.Right - $hit.WorkRight)
+          bottom = [Math]::Max(0, $hit.Bottom - $hit.WorkBottom)
+        }
+        dialogOverlapBottomPixels = if ($dialogBounds.Count -eq 4) { [Math]::Max(0, $dialogBounds[3] - $hit.WorkBottom) } else { $null }
+        rectCenter = @($hit.CenterX, $hit.CenterY)
+        rectCenterHitsControl = $hit.CenterHitTarget
+        rectCenterWindowClass = $hit.WindowAtCenterClass
+        rectCenterRootClass = $hit.WindowAtCenterRootClass
+        clickedPoint = @($hit.ScreenX, $hit.ScreenY)
+      }
+      $nodeSheetOcclusions.Add($occlusion)
+      Write-Host ("UIA_NODE_CREATION_OCCLUSION " + ($occlusion | ConvertTo-Json -Depth 4 -Compress))
+    }
     Require $hit.HitTarget `
       ("node creation sheet $label point ($($hit.ScreenX),$($hit.ScreenY)) inside " +
-       "[$($hit.Left),$($hit.Top),$($hit.Right),$($hit.Bottom)] hit control $($hit.WindowAtPointId), not $controlId")
+       "[$($controlBounds -join ',')] hit control $($hit.WindowAtPointId) class '$($hit.WindowAtPointClass)' " +
+       "root '$($hit.WindowAtPointRootClass)' pid $($hit.WindowAtPointProcessId), not $controlId; " +
+       "work area [$($workArea -join ',')], dialog [$($dialogBounds -join ',')]")
     return [ordered]@{
       label = $label
       controlId = $controlId
       text = [GraphCodeUiaGateState]::WindowTextOf($control)
-      bounds = @($hit.Left, $hit.Top, $hit.Right, $hit.Bottom)
+      bounds = $controlBounds
       uiaBounds = @([int]$uiaBounds.Left, [int]$uiaBounds.Top, [int]$uiaBounds.Right, [int]$uiaBounds.Bottom)
       point = @($hit.ScreenX, $hit.ScreenY)
+      outsideWorkArea = $hit.OutsideWorkArea
       cursorBefore = @($hit.CursorBeforeX, $hit.CursorBeforeY)
       cursorAt = @($hit.CursorAtX, $hit.CursorAtY)
     }
@@ -6189,6 +6271,10 @@ try {
       graphCardCount = $renderedCardCount
       graphCardIdentity = $renderedCardIdentity
       graphCardName = if ($renderedCardCount -gt 0) { $renderedCards[0].Current.Name } else { "" }
+    }
+    footerOccludedByTaskbar = [ordered]@{
+      occluded = ($nodeSheetOcclusions.Count -gt 0)
+      controls = @($nodeSheetOcclusions)
     }
   }
   Write-Host ("UIA_NODE_CREATION_SHEET_EVIDENCE=" + ($nodeCreationSheetEvidence | ConvertTo-Json -Compress -Depth 8))

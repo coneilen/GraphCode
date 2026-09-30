@@ -1424,6 +1424,15 @@ Start-Sleep -Seconds 60
   if ($uiaLiveGateSource -notmatch 'expected label list is empty or blank') {
     throw "RED: UIA live gate node creation sheet label comparison can pass vacuously on an empty expected list"
   }
+  if ($uiaLiveGateSource -notmatch 'SystemParametersInfoRect\(0x0030' -or
+      $uiaLiveGateSource -notmatch 'HitTarget = !visibleEmpty && atPoint == target' -or
+      $uiaLiveGateSource -notmatch 'Require \(-not \$hit\.VisibleEmpty\)' -or
+      $uiaLiveGateSource -notmatch 'has no visible portion inside' -or
+      $uiaLiveGateSource -notmatch 'footerOccludedByTaskbar = ' -or
+      $uiaLiveGateSource -notmatch 'overlapPixels = ' -or
+      $uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_OCCLUSION') {
+    throw "RED: UIA live gate node creation sheet cannot measure and record controls occluded outside the monitor work area"
+  }
   if ($shellTests -notmatch '(?s)Windows update feed executable tests.*?zig test src\\WindowsUpdates\.zig.*?-lwinhttp') {
     throw "RED: Windows shell validation does not run the native updater tests"
   }
