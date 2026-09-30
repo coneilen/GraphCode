@@ -622,8 +622,74 @@ try {
   Remove-Item -LiteralPath $renderedDir -Recurse -Force
 }
 
+# ReferenceSet is a separate capture surface from the historical three-image
+# comparator fixture above. Keep its UI actions and fail-closed guards wired to
+# the production capture entry point.
+$capturePath = Join-Path $repoRoot 'Tools\windows\capture-visual-baseline.ps1'
+$captureTokens = $null; $captureParseErrors = $null
+$captureAst = [Management.Automation.Language.Parser]::ParseFile(
+  $capturePath, [ref]$captureTokens, [ref]$captureParseErrors)
+if ($captureParseErrors.Count) { throw "ReferenceSet capture script has parse errors: $($captureParseErrors | Out-String)" }
+$captureSource = [IO.File]::ReadAllText($capturePath)
+function Get-CaptureFunctionSource([string] $Name) {
+  $definition = $captureAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name
+  }, $true)
+  if (-not $definition) { throw "ReferenceSet static contract: missing function $Name" }
+  return $definition.Extent.Text
+}
+function Assert-CaptureContract([bool] $Condition, [string] $Message) {
+  if (-not $Condition) { throw "ReferenceSet static contract failed: $Message" }
+}
+
+$referenceParameter = $captureAst.ParamBlock.Parameters | Where-Object {
+  $_.Name.VariablePath.UserPath -eq 'ReferenceSet'
+}
+Assert-CaptureContract ([bool]$referenceParameter -and
+  $referenceParameter.StaticType -eq [switch]) 'ReferenceSet is a declared switch parameter'
+Assert-CaptureContract ($captureSource -match '(?s)if \(\$ReferenceSet\) \{ \$start\.ArgumentList\.Add\(''-ReferenceSet''\) \}') `
+  'supervisor forwards ReferenceSet to its isolated worker'
+
+$menuCapture = Get-CaptureFunctionSource 'Capture-ContextMenu'
+Assert-CaptureContract ($menuCapture -match 'Post-RightClick' -and
+  $menuCapture -match 'Find\(\x24app\.Id, ''#32768''\)' -and
+  $menuCapture -match '\x24relative\[0\].*-lt 0' -and
+  $menuCapture -match 'Save-AppClient \x24Window \x24Id \x24State -OwnedOverlay -SkipElements' -and
+  $menuCapture -match 'PostMessage\(\x24Window, 0x0100') `
+  'native popup capture is bounded inside the owned client and dismissed without consuming obscured UIA'
+
+$nodeCapture = Get-CaptureFunctionSource 'Capture-NodeCreationForm'
+Assert-CaptureContract ($nodeCapture -match 'Invoke-NativeButton \x24form 9602 ''Goal-based''' -and
+  $nodeCapture -match 'Set-VisualValue \x24form ''9107''' -and
+  $nodeCapture -match "'node-creation-goal-top'" -and
+  $nodeCapture -match "'node-creation-goal-scrolled'" -and
+  $nodeCapture -match 'WM_VSCROLL' -and
+  $nodeCapture -match 'SB_BOTTOM') `
+  'Goal-based top and bottom states use the actual owner-drawn control and native form scroll'
+
+$referenceFlow = $captureSource.Substring($captureSource.IndexOf('if ($ReferenceSet) {', [StringComparison]::Ordinal))
+Assert-CaptureContract ($referenceFlow -match 'Capture-ContextMenu \x24window ''context-menu-canvas-background''' -and
+  $referenceFlow -match 'Capture-ContextMenu \x24window ''context-menu-node''' -and
+  $referenceFlow -match 'Capture-ContextMenu \x24window ''context-menu-edge''' -and
+  $referenceFlow -match 'Capture-NodeCreationForm \x24window ''node-creation-main''' -and
+  $referenceFlow -match 'Capture-NodeCreationForm \x24window ''node-creation-goal-top''') `
+  'ReferenceSet dispatches the three production context-menu and requested node-form captures'
+Assert-CaptureContract ($referenceFlow -match "'product-settings-full' 'static-full-page-no-scroll'" -and
+  $referenceFlow -match 'scrollBarElementCount = \$settingScrollbars\.Count' -and
+  $referenceFlow -match 'capturedWindowClient') `
+  'Product Settings records its actual fixed-page and scroll inspection rather than fabricating scroll states'
+Assert-CaptureContract ($referenceFlow -match 'Invoke-VisualElement \x24window ''\^workspace-split-right-'' ''Split Right''' -and
+  $referenceFlow -match 'Save-AppClient \x24window ''workspace-single-pane-disconnected''' -and
+  $referenceFlow -match 'Save-AppClient \x24window ''workspace-focus-terminal''') `
+  'workspace split uses the user-facing control and records both pane states'
+Assert-CaptureContract ($captureSource -match '\$afterSnapshot = Get-CaptureBuildSnapshot' -and
+  $captureSource -match 'Source/script/provider/binary hashes changed during capture') `
+  'reference captures abort if source, provider, or executable provenance changes mid-run'
+Write-Host 'ReferenceSet capture contract: PASS (native menu/form/workspace actions and frozen provenance)'
+
 if ($SupervisorArtifactsDirectory) {
-  $capture = Join-Path $repoRoot 'Tools\windows\capture-visual-baseline.ps1'
+  $capture = $capturePath
   $captureShell = Join-Path $repoRoot 'graphcode-windows\zig-out\bin\graphcode-windows.exe'
   $captureZmx = Join-Path $repoRoot '.graphcode-tools\providers\zmx\zig-out\bin\zmx.exe'
   if (Test-Path -LiteralPath $SupervisorArtifactsDirectory) { throw 'Supervisor test artifacts must be a fresh directory' }

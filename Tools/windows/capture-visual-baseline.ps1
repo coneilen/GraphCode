@@ -7,6 +7,7 @@ param(
   [ValidateRange(30, 120)] [int] $TimeoutSeconds = 120,
   [switch] $PreflightOnly,
   [ValidateSet('none', 'stall', 'sampler-block', 'worker-failure')] [string] $SupervisorProbe = 'none',
+  [switch] $ReferenceSet,
   [string] $WorkerToken,
   [switch] $Worker
 )
@@ -225,6 +226,7 @@ public sealed class CaptureJobWatchdog {
         '-TimeoutSeconds',"$TimeoutSeconds",'-WorkerToken',$token,'-SupervisorProbe',$SupervisorProbe,'-Worker')) {
       $start.ArgumentList.Add($arg)
     }
+    if ($ReferenceSet) { $start.ArgumentList.Add('-ReferenceSet') }
     $workerProcess = [Diagnostics.Process]::Start($start)
     $workerUtc = $workerProcess.StartTime.ToUniversalTime()
     $output = $workerProcess.StandardOutput.ReadToEndAsync()
@@ -345,6 +347,8 @@ public static class VisualWindow {
   [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
   [DllImport("user32.dll", SetLastError=true)] private static extern bool AttachThreadInput(uint from, uint to, bool attach);
   [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr window);
+  [DllImport("user32.dll")] private static extern IntPtr GetDlgItem(IntPtr window, int id);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern bool SetWindowTextW(IntPtr window, string text);
   [DllImport("user32.dll", SetLastError=true)] private static extern bool GetClientRect(IntPtr window, out RECT rect);
   [DllImport("user32.dll", SetLastError=true)] private static extern bool ClientToScreen(IntPtr window, ref POINT point);
   [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out RECT rect);
@@ -424,8 +428,15 @@ public static class VisualWindow {
     return new Rectangle(point.X, point.Y, rect.Right - rect.Left, rect.Bottom - rect.Top);
   }
   public static Rectangle Verify(IntPtr window, uint pid) {
+    return Verify(window, pid, false);
+  }
+  public static Rectangle Verify(IntPtr window, uint pid, bool allowOwnedOverlay) {
     uint owner; GetWindowThreadProcessId(window, out owner);
-    if (owner != pid || !IsWindowVisible(window) || IsIconic(window) || GetForegroundWindow() != window)
+    var foreground = GetForegroundWindow();
+    uint foregroundPid = 0;
+    if (foreground != IntPtr.Zero) GetWindowThreadProcessId(foreground, out foregroundPid);
+    if (owner != pid || !IsWindowVisible(window) || IsIconic(window) ||
+        (foreground != window && (!allowOwnedOverlay || foregroundPid != pid)))
       throw new InvalidOperationException("Capture ownership/visibility/foreground guard failed");
     var rect = Client(window);
     if (rect.Width <= 0 || rect.Height <= 0) throw new InvalidOperationException("Empty capture client");
@@ -436,6 +447,7 @@ public static class VisualWindow {
     // GW_HWNDPREV walks only higher Z-order windows; do not read their content.
     for (var above = GetWindow(window, 3); above != IntPtr.Zero; above = GetWindow(above, 3)) {
       if (!IsWindowVisible(above) || IsIconic(above)) continue;
+      if (allowOwnedOverlay && Owner(above) == pid) continue;
       uint cloaked;
       if (DwmGetWindowAttribute(above, 14, out cloaked, 4) == 0 && cloaked != 0) continue;
       RECT other;
@@ -444,6 +456,19 @@ public static class VisualWindow {
         throw new InvalidOperationException("Capture client is overlapped; no desktop pixels saved");
     }
     return rect;
+  }
+  public static Rectangle Window(IntPtr window) {
+    RECT rect;
+    if (!GetWindowRect(window, out rect)) throw new Win32Exception();
+    return Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+  }
+  public static IntPtr Child(IntPtr window, int id) {
+    var child = GetDlgItem(window, id);
+    if (child == IntPtr.Zero) throw new InvalidOperationException("Native form control is missing: " + id);
+    return child;
+  }
+  public static void SetText(IntPtr window, string text) {
+    if (!SetWindowTextW(window, text)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot set native form fixture text");
   }
 }
 '@
@@ -525,6 +550,39 @@ function Post-Menu([IntPtr] $Window, [uint32] $Command) {
     throw "WM_COMMAND $Command failed"
   }
   $actions.Add([ordered]@{ kind = 'native WM_COMMAND'; command = $Command })
+}
+
+function Post-RightClick([IntPtr] $Window, [int] $X, [int] $Y) {
+  if ($X -lt 0 -or $Y -lt 0 -or $X -gt 32767 -or $Y -gt 32767) {
+    throw "Context-menu point is outside signed Win32 client coordinates: $X,$Y"
+  }
+  $packed = ($Y -shl 16) -bor ($X -band 0xffff)
+  if (-not [VisualWindow]::PostMessage($Window, 0x0205, [UIntPtr]::Zero, [IntPtr]$packed)) {
+    throw "WM_RBUTTONUP at $X,$Y failed"
+  }
+  $actions.Add([ordered]@{ kind = 'native WM_RBUTTONUP'; clientPoint = @($X, $Y) })
+}
+
+function Invoke-NativeButton([IntPtr] $Window, [int] $Id, [string] $Name) {
+  $matches = @(Read-Elements $Window | Where-Object {
+    $_.Current.AutomationId -ceq [string]$Id -and $_.Current.Name -ceq $Name
+  })
+  if ($matches.Count -ne 1) { throw "Expected one native control $Id '$Name'; found $($matches.Count)" }
+  $control = [VisualWindow]::Child($Window, $Id)
+  if (-not [VisualWindow]::PostMessage($Window, 0x0111, [UIntPtr]$Id, $control)) {
+    throw "Native BN_CLICKED for $Id '$Name' failed"
+  }
+  $actions.Add([ordered]@{ kind = 'native WM_COMMAND BN_CLICKED'; id = $Id; name = $Name })
+}
+
+function Set-VisualValue([IntPtr] $Window, [string] $AutomationId, [string] $Value) {
+  $matches = @(Read-Elements $Window | Where-Object { $_.Current.AutomationId -ceq $AutomationId })
+  if ($matches.Count -ne 1) { throw "Expected one UIA value field '$AutomationId'; found $($matches.Count)" }
+  $id = 0
+  if (-not [int]::TryParse($AutomationId, [ref]$id)) { throw "Native form control ID is invalid: $AutomationId" }
+  $control = [VisualWindow]::Child($Window, $id)
+  [VisualWindow]::SetText($control, $Value)
+  $actions.Add([ordered]@{ kind = 'native SetWindowText'; id = $AutomationId; value = $Value })
 }
 
 function Get-ClientRelativeBounds($Bounds, [Drawing.Rectangle] $Client) {
@@ -632,29 +690,44 @@ function Read-OwnedZmxInfo {
   }
 }
 
-function Save-AppClient([IntPtr] $Window, [string] $Id, [string] $State) {
-  if (-not [VisualWindow]::Activate($Window)) {
+function Save-AppClient(
+  [IntPtr] $Window,
+  [string] $Id,
+  [string] $State,
+  [switch] $OwnedOverlay,
+  [switch] $SkipElements
+) {
+  if (-not $OwnedOverlay -and -not [VisualWindow]::Activate($Window)) {
     $foreground = [VisualWindow]::GetForegroundWindow()
     [uint32]$foregroundPid = 0
     $null = [VisualWindow]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
     throw "Could not foreground owned $Id window: target=$Window pid=$($app.Id); foreground=$foreground pid=$foregroundPid; $([VisualWindow]::ActivationDiagnostics)"
   }
-  $null = Wait-Visual { [VisualWindow]::GetForegroundWindow() -eq $Window } "$Id foreground"
+  if ($OwnedOverlay) {
+    $null = Wait-Visual {
+      $foreground = [VisualWindow]::GetForegroundWindow()
+      [VisualWindow]::Owner($foreground) -eq $app.Id
+    } "$Id owned foreground overlay"
+  } else {
+    $null = Wait-Visual { [VisualWindow]::GetForegroundWindow() -eq $Window } "$Id foreground"
+  }
   $app.Refresh()
   if (-not (Test-CaptureProcessIdentity $app $owned[$app.Id])) { throw "App process identity changed" }
-  $rect = [VisualWindow]::Verify($Window, $app.Id)
+  $rect = [VisualWindow]::Verify($Window, $app.Id, [bool]$OwnedOverlay)
   $dpi = [VisualWindow]::GetDpiForWindow($Window)
-  $elements = @(Read-Elements $Window | ForEach-Object {
-    $current = $_.Current
-    [ordered]@{ id = $current.AutomationId; name = $current.Name; type = $current.ControlType.ProgrammaticName
-      bounds = @(Get-ClientRelativeBounds $current.BoundingRectangle $rect) }
-  })
+  $elements = if ($SkipElements) { @() } else {
+    @(Read-Elements $Window | ForEach-Object {
+      $current = $_.Current
+      [ordered]@{ id = $current.AutomationId; name = $current.Name; type = $current.ControlType.ProgrammaticName
+        bounds = @(Get-ClientRelativeBounds $current.BoundingRectangle $rect) }
+    })
+  }
   $bitmap = [Drawing.Bitmap]::new($rect.Width, $rect.Height)
   try {
     $graphics = [Drawing.Graphics]::FromImage($bitmap)
     try { $graphics.CopyFromScreen($rect.Location, [Drawing.Point]::Empty, $rect.Size) }
     finally { $graphics.Dispose() }
-    $after = [VisualWindow]::Verify($Window, $app.Id)
+    $after = [VisualWindow]::Verify($Window, $app.Id, [bool]$OwnedOverlay)
     if ($after -ne $rect -or [VisualWindow]::GetDpiForWindow($Window) -ne $dpi) {
       throw "Window geometry/DPI changed during capture"
     }
@@ -662,15 +735,94 @@ function Save-AppClient([IntPtr] $Window, [string] $Id, [string] $State) {
     $path = Join-Path $OutputDirectory $file
     $bitmap.Save($path, [Drawing.Imaging.ImageFormat]::Png)
   } finally { $bitmap.Dispose() }
-  $images.Add([ordered]@{
+  $image = [ordered]@{
     id = $Id; file = $file; sha256 = (Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant()
     width = $rect.Width; height = $rect.Height; dpi = $dpi; state = $State
     window = @{ hwnd = $Window.ToInt64(); pid = $app.Id; createdAt = $owned[$app.Id].createdAt
       screenClient = @($rect.X, $rect.Y, $rect.Width, $rect.Height) }
     elements = $elements; regions = @()
-  })
+  }
+  $images.Add($image)
   $images | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'captured-images.json')
   Write-Host "CAPTURED: $Id $($rect.Width)x$($rect.Height) dpi=$dpi"
+  return $image
+}
+
+function Get-CardBounds([IntPtr] $Window, [string] $Name) {
+  $matches = @(Read-Elements $Window | Where-Object {
+    $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -ceq $Name
+  })
+  if ($matches.Count -ne 1) { throw "Expected one canvas card '$Name'; found $($matches.Count)" }
+  $bounds = $matches[0].Current.BoundingRectangle
+  return [Drawing.Rectangle]::new(
+    [int][Math]::Round($bounds.X), [int][Math]::Round($bounds.Y),
+    [int][Math]::Round($bounds.Width), [int][Math]::Round($bounds.Height))
+}
+
+function Capture-ContextMenu(
+  [IntPtr] $Window,
+  [string] $Id,
+  [string] $State,
+  [int] $X,
+  [int] $Y
+) {
+  Post-RightClick $Window $X $Y
+  $menu = Wait-Visual { [VisualWindow]::Find($app.Id, '#32768') } "$Id native popup"
+  $client = [VisualWindow]::Client($Window)
+  $menuBounds = [VisualWindow]::Window($menu)
+  $relative = @(Get-ClientRelativeBounds $menuBounds $client)
+  if ($relative[0] -lt 0 -or $relative[1] -lt 0 -or
+      $relative[0] + $relative[2] -gt $client.Width -or
+      $relative[1] + $relative[3] -gt $client.Height) {
+    throw "$Id popup is not fully inside the captured app client: $($relative -join ',')"
+  }
+  $image = Save-AppClient $Window $Id $State -OwnedOverlay -SkipElements
+  $image['overlay'] = [ordered]@{
+    class = '#32768'; hwnd = $menu.ToInt64(); clientRelativeBounds = $relative
+  }
+  $images | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'captured-images.json')
+  if (-not [VisualWindow]::PostMessage($Window, 0x0100, [UIntPtr]27, [IntPtr]::Zero)) {
+    throw "Could not dismiss $Id popup"
+  }
+  $actions.Add([ordered]@{ kind = 'native WM_KEYDOWN'; key = 'Escape'; dismisses = $Id })
+  $null = Wait-Visual { [VisualWindow]::Find($app.Id, '#32768') -eq [IntPtr]::Zero } "$Id popup dismissal"
+}
+
+function Capture-NodeCreationForm([IntPtr] $Window, [string] $Id, [string] $State) {
+  Post-Menu $Window 4205
+  $form = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeNativeForm') } "$Id node form"
+  if ($Id -eq 'node-creation-goal-top') {
+    Invoke-NativeButton $form 9602 'Goal-based'
+    Set-VisualValue $form '9107' 'test -f done.flag'
+    Invoke-NativeButton $form 1 'Create'
+  } elseif ($Id -eq 'node-creation-goal-scrolled') {
+    throw 'Goal-scrolled must follow the top-state preparation in the reference capture sequence'
+  }
+  if ($Id -eq 'node-creation-goal-top') {
+    $null = Wait-Visual {
+      @(Read-Elements $form | Where-Object { $_.Current.Name -eq 'Say what done looks like and use positive timing values.' }).Count -eq 1
+    } 'goal validation explanation'
+  }
+  $image = Save-AppClient $form $Id $State
+  if ($Id -eq 'node-creation-goal-top') {
+    if (-not [VisualWindow]::PostMessage($form, 0x0115, [UIntPtr]7, [IntPtr]::Zero)) {
+      throw 'Could not scroll goal form to its bottom'
+    }
+    $actions.Add([ordered]@{ kind = 'native WM_VSCROLL'; command = 'SB_BOTTOM'; form = $Id })
+    Start-Sleep -Milliseconds 150
+    $image = Save-AppClient $form 'node-creation-goal-scrolled' 'goal-based-done-check-invalid-bottom'
+    if (-not [VisualWindow]::PostMessage($form, 0x0111, [UIntPtr]2, [IntPtr]::Zero)) {
+      throw 'Could not cancel goal node form'
+    }
+    $actions.Add([ordered]@{ kind = 'native WM_COMMAND'; command = 2; form = 'cancel' })
+    $null = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeNativeForm') -eq [IntPtr]::Zero } 'goal form close'
+    return
+  }
+  if (-not [VisualWindow]::PostMessage($form, 0x0111, [UIntPtr]2, [IntPtr]::Zero)) {
+    throw "Could not cancel $Id node form"
+  }
+  $actions.Add([ordered]@{ kind = 'native WM_COMMAND'; command = 2; form = 'cancel' })
+  $null = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeNativeForm') -eq [IntPtr]::Zero } "$Id form close"
 }
 
 try {
@@ -734,13 +886,41 @@ try {
     }).Count -eq 2
   } 'fixture canvas'
   Save-AppClient $window 'canvas-sidebar' 'fixture-project-disconnected'
-  Post-Menu $window 4403
-  $dialog = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeProductSettings') } 'Product Settings'
-  Save-AppClient $dialog 'dialog' 'product-settings-unmodified'
-  if (-not [VisualWindow]::PostMessage($dialog, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)) {
-    throw "Could not close Product Settings"
+  if ($ReferenceSet) {
+    $client = [VisualWindow]::Client($window)
+    $nodeA = Get-CardBounds $window 'UIA loop A'
+    $nodeB = Get-CardBounds $window 'UIA loop B'
+    Capture-ContextMenu $window 'context-menu-canvas-background' 'empty-canvas-context-menu' 240 120
+    $nodeX = [int][Math]::Round($nodeA.X + ($nodeA.Width / 2) - $client.X)
+    $nodeY = [int][Math]::Round($nodeA.Y + ($nodeA.Height / 2) - $client.Y)
+    Capture-ContextMenu $window 'context-menu-node' 'goal-node-context-menu' $nodeX $nodeY
+    $edgeX = [int][Math]::Round(($nodeA.Right + $nodeB.Left) / 2 - $client.X)
+    $edgeY = [int][Math]::Round((($nodeA.Y + ($nodeA.Height / 2)) + ($nodeB.Y + ($nodeB.Height / 2))) / 2 - $client.Y)
+    Capture-ContextMenu $window 'context-menu-edge' 'handoff-edge-context-menu' $edgeX $edgeY
+    Capture-NodeCreationForm $window 'node-creation-main' 'default-loop-type'
+    Capture-NodeCreationForm $window 'node-creation-goal-top' 'goal-based-done-check-invalid-top'
+    Post-Menu $window 4403
+    $dialog = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeProductSettings') } 'Product Settings'
+    Save-AppClient $dialog 'product-settings-full' 'static-full-page-no-scroll'
+    $settingScrollbars = @(Read-Elements $dialog | Where-Object {
+      $_.Current.ControlType -eq [Windows.Automation.ControlType]::ScrollBar
+    })
+    @{ scrollBarElementCount = $settingScrollbars.Count; capturedWindowClient = @(
+        [VisualWindow]::Client($dialog).Width, [VisualWindow]::Client($dialog).Height
+      ) } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'settings-scroll-inspection.json')
+    if (-not [VisualWindow]::PostMessage($dialog, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)) {
+      throw "Could not close Product Settings"
+    }
+    $null = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeProductSettings') -eq [IntPtr]::Zero } 'dialog close'
+  } else {
+    Post-Menu $window 4403
+    $dialog = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeProductSettings') } 'Product Settings'
+    Save-AppClient $dialog 'dialog' 'product-settings-unmodified'
+    if (-not [VisualWindow]::PostMessage($dialog, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)) {
+      throw "Could not close Product Settings"
+    }
+    $null = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeProductSettings') -eq [IntPtr]::Zero } 'dialog close'
   }
-  $null = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeProductSettings') -eq [IntPtr]::Zero } 'dialog close'
   Invoke-VisualElement $window '^loop-row-' 'UIA loop A'
   $null = Wait-Visual {
     @(Read-Elements $window | Where-Object { $_.Current.Name -eq 'New Tab' }).Count -gt 0
@@ -757,7 +937,16 @@ try {
   } 'pinned zmx attached-client readiness'
   $backend | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'workspace-backend.json')
   Hide-OwnedZmxForeground
-  Save-AppClient $window 'workspace' 'fixture-loop-attached'
+  if ($ReferenceSet) {
+    Save-AppClient $window 'workspace-single-pane-disconnected' 'graphcode-daemon-absent-zmx-attached'
+    Invoke-VisualElement $window '^workspace-split-right-' 'Split Right'
+    $null = Wait-Visual {
+      @(Read-Elements $window | Where-Object { $_.Current.Name -eq 'Split tab' }).Count -eq 1
+    } 'two-pane workspace'
+    Save-AppClient $window 'workspace-focus-terminal' 'two-pane-focus-terminal-default'
+  } else {
+    Save-AppClient $window 'workspace' 'fixture-loop-attached'
+  }
   if (@($owned.Values | Where-Object { [IO.Path]::GetFileName($_.executable) -eq 'graphcoded.exe' }).Count -gt 0) {
     throw "Unexpected daemon child in disconnected fixture capture"
   }
