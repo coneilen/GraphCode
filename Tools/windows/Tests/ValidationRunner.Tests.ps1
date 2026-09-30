@@ -1387,7 +1387,10 @@ Start-Sleep -Seconds 60
   if ($stubDaemonSource -notmatch '\$frame\.command\.graphCommand\.command\.createNode\._0' -or
       $stubDaemonSource -notmatch 'appliedCreates' -or
       $stubDaemonSource -notmatch '\$nodeLoopTypes\[\$id\]' -or
-      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied\)') {
+      $stubDaemonSource -notmatch '(?s)function Get-StubResultWriteWin32Error.*?if \(\$current -is \[IO\.IOException\]\).*?\$current\.HResult -band 0xFFFF.*?if \(\$nativeCode -in @\(32, 33\)\).*?return 0' -or
+      $stubDaemonSource -notmatch '(?s)function Write-StubResultFile.*?for \(\$attempt = 0; \$attempt -lt 40; \$attempt\+\+\).*?Set-Content -LiteralPath \$path -Value \$json -NoNewline -ErrorAction Stop.*?catch \[IO\.IOException\].*?\$nativeCode = Get-StubResultWriteWin32Error \$exception.*?if \(\$nativeCode -notin @\(32, 33\)\).*?STUB_RESULT_WRITE_FAILURE.*?throw.*?STUB_RESULT_WRITE_EXHAUSTED.*?STUB_RESULT_WRITE_RETRY.*?Start-Sleep -Milliseconds 25' -or
+      $stubDaemonSource -notmatch '\$null = Write-StubResultFile \$ResultPath \$json' -or
+      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied(?: -or \$promotionApplied)?\)') {
     throw "RED: stub daemon cannot apply exactly the createNode it received and republish the created loop type"
   }
   if ($uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_SHEET_EVIDENCE' -or
@@ -1412,6 +1415,42 @@ Start-Sleep -Seconds 60
   }
   if ($uiaLiveGateSource -notmatch '(?s)nodeCreationSheet = \$nodeCreationSheetEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
     throw "RED: UIA final summary omits the parsable node creation sheet evidence"
+  }
+  if ($uiaLiveGateSource -notmatch 'UIA_SKETCH_CUSTODY_EVIDENCE=' -or
+      $uiaLiveGateSource -notmatch '(?s)sketchCustody = \$sketchCustodyEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress' -or
+      $uiaLiveGateSource -notmatch 'promotion\.goal' -or
+      $uiaLiveGateSource -notmatch 'promotion\.turn' -or
+      $uiaLiveGateSource -notmatch 'promotion\.timed' -or
+      $uiaLiveGateSource -notmatch 'createdBy' -or
+      $uiaLiveGateSource -notmatch 'commandLogBytesUnchanged' -or
+      $uiaLiveGateSource -notmatch 'appliedPromotions' -or
+      $uiaLiveGateSource -notmatch 'appliedPromotionRequests' -or
+      $uiaLiveGateSource -notmatch 'UIA_SKETCH_PROMOTION_RENDER_ATTEMPT=' -or
+      $uiaLiveGateSource -notmatch '\$sameCardAutomationId = \$renderMenu\.cardId -ceq \$menu\.cardId' -or
+      $uiaLiveGateSource -notmatch '(?s)\$renderedPromotedState = \$sameCardAutomationId -and\s*\$promotionChoices\.Count -eq 0 -and \$newChildChoices\.Count -eq 1' -or
+      $uiaLiveGateSource -notmatch 'ClickPopupMenuItem' -or
+      $uiaLiveGateSource -notmatch 'IsControlOwnedBy' -or
+      $uiaLiveGateSource -notmatch 'TypeEditTextById' -or
+      $uiaLiveGateSource -notmatch 'Read-EdgeStableText' -or
+      $uiaLiveGateSource -notmatch 'renderedHitTests' -or
+      $uiaLiveGateSource -notmatch 'function ConvertTo-SketchCanonicalJson' -or
+      $uiaLiveGateSource -notmatch 'function Test-SketchPromotionReceipt' -or
+      $uiaLiveGateSource -notmatch 'Test-SketchPromotionReceipt \$after \$request \$expectedWire' -or
+      $uiaLiveGateSource -notmatch 'receivedWireRaw = \$receivedWireRaw' -or
+      $uiaLiveGateSource -notmatch '\$custodyFirstInstruction = Sketch-Field 9104' -or
+      $uiaLiveGateSource -notmatch '\$custodyInstructionAfterBackend = Sketch-Field 9104' -or
+      $uiaLiveGateSource -notmatch 'instructionUnchanged = \(\$custodySubmitFields\.firstInstruction -ceq \$custodyFirstInstruction\)' -or
+      $uiaLiveGateSource -notmatch 'firstInstruction -ceq \$custodyFirstInstruction' -or
+      $uiaLiveGateSource -notmatch 'daemonCountsBefore = \$beforeCounts; daemonCountsAfter = \$afterCounts' -or
+      $uiaLiveGateSource -notmatch 'appliedPromotionRequests = @\(\$before\.appliedPromotionRequests\)\.Count' -or
+      $uiaLiveGateSource -notmatch 'requestCount = \[int\]\$before\.requestCount' -or
+      $uiaLiveGateSource -notmatch 'instructionEditing = "not validated;' -or
+      $uiaLiveGateSource -notmatch 'rejected/cancelled no-dispatch evidence combines unchanged UIA-recorder bytes with unchanged stub received/applied/request/response/graph counts' -or
+      $stubDaemonSource -notmatch 'appliedPromotions' -or
+      $stubDaemonSource -notmatch 'appliedPromotionRequests' -or
+      $stubDaemonSource -notmatch 'promoteNode' -or
+      $stubDaemonSource -notmatch 'createdBy') {
+    throw "RED: UIA gate does not prove all sketch promotions and custody child through native interaction, correlated wire, no mutation and rendered hit tests"
   }
   $uiaLiveGateType = [regex]::Match(
     $uiaLiveGateSource, '(?s)Add-Type -TypeDefinition @"\s*(?<source>.*?)\r?\n"@'
@@ -1460,10 +1499,11 @@ Start-Sleep -Seconds 60
     throw "RED: UIA edge retry/modal/identity proof regressed"
   }
   if ($uiaLiveGateSource -notmatch 'function Edge-TypeText\(' -or
+      $uiaLiveGateSource -notmatch 'function Get-EdgeTextAttemptDecision\(' -or
       $uiaLiveGateSource -notmatch 'Edge-TypeText \$field\.Id \$field\.Text' -or
       $uiaLiveGateSource -notmatch 'UIA_EDGE_TEXT_STABLE id=\$id attempt=\$attempt' -or
       $uiaLiveGateSource -notmatch '\[GraphCodeUiaGateState\]::TypeEditTextById\(\$edgeWorkflowWindow, \$id, \$text\)' -or
-      $uiaLiveGateSource -notmatch 'Require \(\$stable -and \$after -ceq \$text\)' -or
+      $uiaLiveGateSource -notmatch 'Require \$completed' -or
       $uiaLiveGateSource -notmatch 'IsControlOwnedBy\(\$edgeWorkflowWindow, \$control, \$id\)' -or
       $uiaLiveGateSource -notmatch 'HasVisibleBounds\(\$control\)' -or
       $uiaLiveGateSource -notmatch 'FocusedControlInDialog\(\$edgeWorkflowWindow\)' -or
@@ -1489,9 +1529,140 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'LastEditTextSent = SendKeyInputs\(LastEditTextExpected' -or
       $uiaLiveGateSource -notmatch 'Require \(\$inputCountsFull\)' -or
       $uiaLiveGateSource -notmatch 'clearSent=\$clearSent/\$clearExpected textSent=\$textSent/\$textExpected' -or
-      $uiaLiveGateSource -notmatch 'for \(\$attempt = 1; \$attempt -le 5' -or
+      $uiaLiveGateSource -notmatch 'for \(\$attempt = 1; \$attempt -le 5; \$attempt\+\+\)' -or
+      $uiaLiveGateSource -notmatch 'Get-EdgeTextAttemptDecision \$stable \$after \$text \$attempt 5' -or
+      $uiaLiveGateSource -notmatch 'attempts=\$attemptsExecuted/5' -or
       $uiaLiveGateSource -notmatch 'for \(\$layoutRetry = 0; \$layoutRetry -lt 20') {
     throw "RED: edge native text entry lacks native ownership, live layout, focus, clear/retype, or exact verification"
+  }
+  $edgeTextGateAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $uiaLiveGateSource, [ref]$null, [ref]$null
+  )
+  $edgeTextHelperAst = $edgeTextGateAst.Find({
+      param($node)
+      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Get-EdgeTextAttemptDecision"
+    }, $true)
+  if (-not $edgeTextHelperAst) {
+    throw "RED: stable-but-wrong native text has no extracted retry-decision helper"
+  }
+  . ([scriptblock]::Create($edgeTextHelperAst.Extent.Text))
+  $edgeTextAttempts = 0
+  $edgeTextValue = $null
+  for ($attempt = 1; $attempt -le 5; $attempt++) {
+    $edgeTextAttempts++
+    $edgeTextValue = if ($edgeTextAttempts -eq 1) { "" } else { "expected text" }
+    $decision = Get-EdgeTextAttemptDecision $true $edgeTextValue "expected text" $attempt 5
+    if ($decision -eq "complete") { break }
+    if ($decision -ne "retry") { throw "Unexpected edge text retry decision '$decision'" }
+  }
+  if ($edgeTextAttempts -ne 2 -or $edgeTextValue -cne "expected text") {
+    throw "RED: stable empty text did not retry exactly once before the expected second attempt"
+  }
+  $edgeTextHelperSource = $edgeTextHelperAst.Extent.Text
+  if ($edgeTextHelperSource -notmatch '\$actual -ceq \$expected') {
+    throw "RED: edge retry-decision helper lost exact expected-text verification"
+  }
+  $mutatedEdgeTextHelperSource = $edgeTextHelperSource.Replace(
+    'if ($actual -ceq $expected) { return "complete" }',
+    'if ($stable) { return "complete" }'
+  )
+  if ($mutatedEdgeTextHelperSource -ceq $edgeTextHelperSource) {
+    throw "RED: exact-match mutation negative did not find the expected helper branch"
+  }
+  $mutationAttempts = 0
+  $mutationValue = $null
+  for ($attempt = 1; $attempt -le 5; $attempt++) {
+    $mutationAttempts++
+    $mutationValue = if ($mutationAttempts -eq 1) { "" } else { "expected text" }
+    $mutationDecision = & {
+      param($helperSource, $observed, $requested, $ordinal)
+      . ([scriptblock]::Create($helperSource))
+      Get-EdgeTextAttemptDecision $true $observed $requested $ordinal 5
+    } $mutatedEdgeTextHelperSource $mutationValue "expected text" $attempt
+    if ($mutationDecision -eq "complete") { break }
+  }
+  if ($mutationAttempts -eq 2 -and $mutationValue -ceq "expected text") {
+    throw "RED: removing exact expected-text comparison evaded the stable-wrong retry regression"
+  }
+  $edgeTextAttempts = 0
+  $edgeTextExhaustion = $null
+  try {
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+      $edgeTextAttempts++
+      $null = Get-EdgeTextAttemptDecision $true "" "expected text" $attempt 5
+    }
+  } catch {
+    $edgeTextExhaustion = $_
+  }
+  if ($edgeTextAttempts -ne 5 -or $null -eq $edgeTextExhaustion -or
+      $edgeTextExhaustion.Exception.Message -notmatch 'attempts=5/5') {
+    throw "RED: stable-wrong edge text did not exhaust and report exactly five attempts; calls=$edgeTextAttempts error=$($edgeTextExhaustion.Exception.Message)"
+  }
+  if ($uiaLiveGateSource -notmatch 'function Wait-SketchGraphCard\(' -or
+      $uiaLiveGateSource -notmatch 'function Get-SketchCardAutomationId\(' -or
+      $uiaLiveGateSource -notmatch 'UIA_SKETCH_CUSTODY_CARD_WAIT=' -or
+      $uiaLiveGateSource -notmatch 'Wait-SketchGraphCard "UIA custody child" \$custodyId' -or
+      $uiaLiveGateSource -notmatch 'Open-SketchNodeMenu "UIA custody child" -SkipActualSize -ExpectedCardId') {
+    throw "RED: custody child render check has no bounded observation-only card reacquisition"
+  }
+  $custodyCardWaitAst = $edgeTextGateAst.Find({
+      param($node)
+      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Wait-SketchGraphCard"
+    }, $true)
+  if (-not $custodyCardWaitAst) {
+    throw "RED: custody graph-card wait helper is not extractable"
+  }
+  $custodyCardWaitSource = $custodyCardWaitAst.Extent.Text
+  if ($custodyCardWaitSource -notmatch '\$baselineCount -gt 0' -or
+      $custodyCardWaitSource -notmatch '\$lastTitleCount -eq 1 -and \$lastIdentityCount -eq 1' -or
+      $custodyCardWaitSource -notmatch '\$expectedNodeId' -or
+      $custodyCardWaitSource -notmatch '\$expectedAutomationId' -or
+      $custodyCardWaitSource -notmatch '\$_.Current\.AutomationId -ceq \$expectedAutomationId' -or
+      $custodyCardWaitSource -notmatch '\$graphSequence' -or
+      $custodyCardWaitSource -match 'Invoke\(\)|PostRightClick|Actual Size') {
+    throw "RED: custody card wait lacks a positive baseline, unique UUID-bound observation, or action-free polling"
+  }
+  $sketchCardIdAst = $edgeTextGateAst.Find({
+      param($node)
+      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Get-SketchCardAutomationId"
+    }, $true)
+  if (-not $sketchCardIdAst) {
+    throw "RED: source-derived sketch-card AutomationId helper is missing"
+  }
+  . ([scriptblock]::Create($sketchCardIdAst.Extent.Text))
+  $expectedSketchCardIds = @(
+    [pscustomobject]@{
+      NodeId = "66666666-6666-4666-8666-000000000001"
+      AutomationId = "canvas-card-1213325934034940293"
+    },
+    [pscustomobject]@{
+      NodeId = "66666666-6666-4666-8666-000000000002"
+      AutomationId = "canvas-card-1213322635500055660"
+    },
+    [pscustomobject]@{
+      NodeId = "66666666-6666-4666-8666-000000000003"
+      AutomationId = "canvas-card-1213323735011683871"
+    }
+  )
+  foreach ($expectedCard in $expectedSketchCardIds) {
+    if ((Get-SketchCardAutomationId $expectedCard.NodeId) -cne $expectedCard.AutomationId) {
+      throw "RED: source-derived UIA card identity differs for $($expectedCard.NodeId)"
+    }
+  }
+  $openSketchMenuAst = $edgeTextGateAst.Find({
+      param($node)
+      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Open-SketchNodeMenu"
+    }, $true)
+  if (-not $openSketchMenuAst -or
+      $openSketchMenuAst.Extent.Text -notmatch '\$cards\.Count -eq 1' -or
+      $openSketchMenuAst.Extent.Text -notmatch '\$ExpectedCardId' -or
+      $openSketchMenuAst.Extent.Text -notmatch '\$cards\[0\]\.Current\.AutomationId -ceq \$ExpectedCardId' -or
+      $openSketchMenuAst.Extent.Text -notmatch 'Get-DirectChildren \$graph \$rawWalker') {
+    throw "RED: custody right-click can bypass fresh-fragment, unique-card, or hashed child-identity checks"
   }
   if ($uiaLiveGateSource -notmatch 'Open-EdgeMenu \$false 5120' -or
       $uiaLiveGateSource -notmatch 'Open-EdgeMenu \$true 5110' -or
@@ -1516,7 +1687,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'appliedEdgeUpdateRequests' -or
       $stubDaemonSource -notmatch 'appliedEdgeCreateRequests' -or
       $stubDaemonSource -notmatch 'appliedEdgeUpdateRequests' -or
-      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied\)') {
+      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied(?: -or \$promotionApplied)?\)') {
     throw "RED: edge workflow does not pin native input, exact CAS wire, correlated application, and stable rendered identity"
   }
   $nativeFormsSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\NativeForms.zig") -Raw

@@ -14,7 +14,8 @@ param(
   # Apply renameNode, createNode, createEdge and updateEdge to the stub's own graph and
   # publish the result as a new graphChanged event, so a caller can observe what
   # a daemon that accepted the command would send back.
-  [switch] $ApplyGraphCommands
+  [switch] $ApplyGraphCommands,
+  [switch] $SeedSketches
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,6 +40,7 @@ $appliedRenames = [Collections.Generic.List[string]]::new()
 # nodes keep their historical turnBased shape with no backend/model fields.
 $nodeLoopTypes = @{}
 $nodeExtraFields = @{}
+$nodePromotionFields = @{}
 $appliedCreates = [Collections.Generic.List[string]]::new()
 $appliedCreateRequests = [Collections.Generic.List[string]]::new()
 $edges = [Collections.Generic.List[object]]::new()
@@ -46,6 +48,12 @@ $appliedEdgeCreates = [Collections.Generic.List[string]]::new()
 $appliedEdgeUpdates = [Collections.Generic.List[string]]::new()
 $appliedEdgeCreateRequests = [Collections.Generic.List[string]]::new()
 $appliedEdgeUpdateRequests = [Collections.Generic.List[string]]::new()
+$appliedPromotions = [Collections.Generic.List[string]]::new()
+$appliedPromotionRequests = [Collections.Generic.List[string]]::new()
+$receivedGraphCommands = [Collections.Generic.List[object]]::new()
+if ($SeedSketches) {
+  $nodeExtraFields[$nodeA] = ',"backend":"copilotCLI"'
+}
 
 function ConvertTo-StubJsonText([string] $value) {
   return $value.Replace('\', '\\').Replace('"', '\"')
@@ -56,8 +64,9 @@ function New-StubGraphEvent {
     $state = $nodeStates[$id]
     $loopType = if ($nodeLoopTypes.ContainsKey($id)) { [string]$nodeLoopTypes[$id] } else { "turnBased" }
     $extra = if ($nodeExtraFields.ContainsKey($id)) { [string]$nodeExtraFields[$id] } else { "" }
+    $promotionExtra = if ($nodePromotionFields.ContainsKey($id)) { [string]$nodePromotionFields[$id] } else { "" }
     '{"id":"' + $id + '","title":"' + (ConvertTo-StubJsonText ([string]$nodeTitles[$id])) +
-      '","loopType":"' + (ConvertTo-StubJsonText $loopType) + '"' + $extra + ',"state":"' + $state[0] +
+      '","loopType":"' + (ConvertTo-StubJsonText $loopType) + '"' + $extra + $promotionExtra + ',"state":"' + $state[0] +
       '","activity":"stub","presence":{"presence":"' + $state[1] + '","confidence":"reported"}}'
   }
   $edgeJson = @($edges | ForEach-Object { $_ | ConvertTo-Json -Depth 8 -Compress })
@@ -120,7 +129,54 @@ function Send-Frame([IO.Stream] $stream, [string] $json, [switch] $Fragment) {
   }
 }
 
+function Get-StubResultWriteWin32Error([System.Exception] $exception) {
+  for ($current = $exception; $null -ne $current; $current = $current.InnerException) {
+    if ($current -is [IO.IOException]) {
+      $nativeCode = [int]($current.HResult -band 0xFFFF)
+      if ($nativeCode -in @(32, 33)) { return $nativeCode }
+    }
+  }
+  return 0
+}
+
+function Write-StubResultFile([string] $path, [string] $json) {
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    try {
+      Set-Content -LiteralPath $path -Value $json -NoNewline -ErrorAction Stop
+      return ($attempt + 1)
+    } catch [IO.IOException] {
+      $exception = $_.Exception
+      $nativeCode = Get-StubResultWriteWin32Error $exception
+      $cause = "{0}; HResult=0x{1:X8}; native={2}; {3}" -f `
+        $exception.GetType().FullName, $exception.HResult, $nativeCode, $exception.Message
+      if ($nativeCode -notin @(32, 33)) {
+        Write-Host "STUB_RESULT_WRITE_FAILURE attempt=$($attempt + 1)/40 cause=$cause"
+        throw
+      }
+      if ($attempt -eq 39) {
+        Write-Host "STUB_RESULT_WRITE_EXHAUSTED attempt=40/40 cause=$cause"
+        throw
+      }
+      Write-Host "STUB_RESULT_WRITE_RETRY attempt=$($attempt + 1)/40 cause=$cause"
+      Start-Sleep -Milliseconds 25
+    }
+  }
+}
+
 function Write-Result {
+  $graphNodes = @(
+    foreach ($id in $nodeTitles.Keys) {
+      $extra = if ($nodeExtraFields.ContainsKey($id)) { [string]$nodeExtraFields[$id] } else { "" }
+      $createdBy = $null
+      if ($extra -match '"createdBy":"([^"]+)"') { $createdBy = $Matches[1] }
+      [ordered]@{
+        id = [string]$id
+        title = [string]$nodeTitles[$id]
+        loopType = if ($nodeLoopTypes.ContainsKey($id)) { [string]$nodeLoopTypes[$id] } else { "turnBased" }
+        createdBy = $createdBy
+      }
+    }
+  )
   $result = [ordered]@{
     protocolConnected = $connectionCount -gt 0
     correlatedRequests = $seenRequests.Count -ge 2 -and
@@ -145,10 +201,15 @@ function Write-Result {
     appliedEdgeUpdates = @($appliedEdgeUpdates)
     appliedEdgeCreateRequests = @($appliedEdgeCreateRequests)
     appliedEdgeUpdateRequests = @($appliedEdgeUpdateRequests)
+    appliedPromotions = @($appliedPromotions)
+    appliedPromotionRequests = @($appliedPromotionRequests)
+    receivedGraphCommands = @($receivedGraphCommands)
+    graphNodes = $graphNodes
     edges = @($edges)
     graphSequence = $graphSequence
   }
-  $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $ResultPath -NoNewline
+  $json = $result | ConvertTo-Json -Compress
+  $null = Write-StubResultFile $ResultPath $json
 }
 
 try {
@@ -197,9 +258,16 @@ try {
         $commandName = $frame.command.PSObject.Properties.Name | Select-Object -First 1
         $requestCommands[[string]$frame.requestID] = [string]$commandName
         if ($commandName) { $seenCommands.Add([string]$commandName) }
+        if ($commandName -eq "graphCommand") {
+          $receivedGraphCommands.Add([ordered]@{
+            requestID = [string]$frame.requestID
+            command = ($frame.command.graphCommand | ConvertTo-Json -Depth 16 -Compress)
+          })
+        }
         $renameApplied = $false
         $createApplied = $false
         $edgeApplied = $false
+        $promotionApplied = $false
         if ($ApplyGraphCommands -and $commandName -eq "graphCommand") {
           $rename = $frame.command.graphCommand.command.renameNode
           if ($null -ne $rename) {
@@ -211,7 +279,7 @@ try {
             }
           }
           # Apply exactly the createNode the shell sent: its own id, title, loop
-          # type, backend and model tier. Nothing is defaulted or invented; a
+          # type, backend, model tier and custody parent. Nothing is defaulted or invented; a
           # create without an id or with a duplicate id is not applied.
           $create = $frame.command.graphCommand.command.createNode._0
           if ($null -ne $create) {
@@ -221,7 +289,7 @@ try {
               $nodeStates[$createId] = @("idle", "idle")
               $nodeLoopTypes[$createId] = [string]$create.loopType
               $extraFields = ""
-              foreach ($field in @("backend", "modelTier", "triggerPrompt")) {
+              foreach ($field in @("backend", "modelTier", "triggerPrompt", "createdBy")) {
                 $fieldValue = $create.$field
                 if ($null -ne $fieldValue) {
                   $extraFields += ',"' + $field + '":"' + (ConvertTo-StubJsonText ([string]$fieldValue)) + '"'
@@ -232,7 +300,70 @@ try {
                 [string]$create.backend, [string]$create.modelTier, [string]$create.triggerPrompt) -join "|")
               $appliedCreateRequests.Add([string]$frame.requestID)
               $createApplied = $true
+              if ($SeedSketches -and $appliedCreates.Count -eq 1) {
+                for ($index = 1; $index -le 3; $index++) {
+                  $id = "66666666-6666-4666-8666-{0:x12}" -f $index
+                  $nodeTitles[$id] = "UIA sketch $index"
+                  $nodeStates[$id] = @("idle", "idle")
+                  $nodeLoopTypes[$id] = "sketch"
+                  $nodeExtraFields[$id] = ',"backend":"copilotCLI","firstInstruction":"Continue sketch work"'
+                }
+              }
             }
+          }
+          $promotion = $frame.command.graphCommand.command.promoteNode
+          if ($null -ne $promotion) {
+            $promotionId = [string]$promotion._0
+            $variant = @($promotion.promotion.PSObject.Properties.Name)
+            if ([string]$frame.command.graphCommand.projectPath -cne "graphcode://stub/project" -or
+                -not $nodeTitles.Contains($promotionId) -or
+                [string]$nodeLoopTypes[$promotionId] -cne "sketch" -or
+                $variant.Count -ne 1 -or
+                $variant[0] -cnotin @("goal", "turn", "timed") -or
+                $null -ne $promotion.promotedBy) {
+              throw "stub rejected invalid promoteNode request $($frame.requestID)"
+            }
+            $targetType = switch ($variant[0]) {
+              "goal" { "goalBased" }
+              "turn" { "turnBased" }
+              "timed" { "timeBased" }
+            }
+            switch ($variant[0]) {
+              "goal" {
+                $decision = $promotion.promotion.goal._0
+                if ($null -eq $decision -or [string]::IsNullOrWhiteSpace([string]$decision.summary) -or
+                    [int]$decision.pollIntervalSeconds -le 0 -or
+                    [string]$decision.metricDirection -notin @("maximize", "minimize")) {
+                  throw "stub rejected invalid goal promotion request $($frame.requestID)"
+                }
+                $summaryJson = ConvertTo-Json -InputObject ([string]$decision.summary) -Compress
+                $directionJson = ConvertTo-Json -InputObject ([string]$decision.metricDirection) -Compress
+                $skip = if ($decision.skipsUnchangedWorkspace) { "true" } else { "false" }
+                $nodePromotionFields[$promotionId] = ',"goal":{"summary":' + $summaryJson +
+                  ',"pollIntervalSeconds":' + [int]$decision.pollIntervalSeconds +
+                  ',"metricDirection":' + $directionJson +
+                  ',"skipsUnchangedWorkspace":' + $skip + '}'
+              }
+              "turn" {
+                $pause = $promotion.promotion.turn.pausesBeforeWritesOnly
+                if ($pause -isnot [bool]) {
+                  throw "stub rejected invalid turn promotion request $($frame.requestID)"
+                }
+                $pauseJson = if ($pause) { "true" } else { "false" }
+                $nodePromotionFields[$promotionId] = ',"pausesBeforeWritesOnly":' + $pauseJson
+              }
+              "timed" {
+                $triggerJson = ConvertTo-Json -InputObject ([string]$promotion.promotion.timed.triggerPrompt) -Compress
+                if ([string]::IsNullOrWhiteSpace([string]$promotion.promotion.timed.triggerPrompt)) {
+                  throw "stub rejected invalid timed promotion request $($frame.requestID)"
+                }
+                $nodePromotionFields[$promotionId] = ',"triggerPrompt":' + $triggerJson
+              }
+            }
+            $nodeLoopTypes[$promotionId] = $targetType
+            $appliedPromotions.Add("$promotionId|$targetType")
+            $appliedPromotionRequests.Add([string]$frame.requestID)
+            $promotionApplied = $true
           }
           $createEdge = $frame.command.graphCommand.command.createEdge
           if ($null -ne $createEdge) {
@@ -316,7 +447,7 @@ try {
           $graphSent = $true
           $graphSentOnConnection = $true
         }
-        if ($renameApplied -or $createApplied -or $edgeApplied) {
+        if ($renameApplied -or $createApplied -or $edgeApplied -or $promotionApplied) {
           $graphSequence++
           if (-not (Send-Frame $server (New-StubGraphEvent))) { break }
           $graphSent = $true
