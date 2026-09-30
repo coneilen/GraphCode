@@ -1398,6 +1398,32 @@ Start-Sleep -Seconds 60
   if ($uiaLiveGateSource -notmatch '(?s)nodeCreationSheet = \$nodeCreationSheetEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
     throw "RED: UIA final summary omits the parsable node creation sheet evidence"
   }
+  $nativeFormsSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\NativeForms.zig") -Raw
+  if ($nativeFormsSource -notmatch '(?s)const node_labels = \[_\]\[\]const u8\{(.*?)\};') {
+    throw "RED: NativeForms.zig node_labels table not found for node creation sheet label contract"
+  }
+  $nativeNodeLabels = @([regex]::Matches($Matches[1], '"((?:[^"\\]|\\.)*)"') | ForEach-Object { $_.Groups[1].Value })
+  $gateAst = [System.Management.Automation.Language.Parser]::ParseInput($uiaLiveGateSource, [ref]$null, [ref]$null)
+  $labelMapAst = $gateAst.Find({
+      param($node)
+      $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+      $node.Left.Extent.Text -eq '$nodeSheetFieldLabels'
+    }, $true)
+  $labelHashAst = if ($labelMapAst) { $labelMapAst.Right.Find({ param($node) $node -is [System.Management.Automation.Language.HashtableAst] }, $true) }
+  if (-not $labelHashAst) {
+    throw "RED: UIA live gate node creation sheet label map is missing"
+  }
+  $gateLabelMap = [System.Management.Automation.ScriptBlock]::Create($labelMapAst.Right.Extent.Text).InvokeReturnAsIs()
+  foreach ($labelId in @(9100, 9102, 9103, 9104, 9106, 9107, 9108, 9109, 9110, 9111, 9112, 9113, 9114)) {
+    $expectedLabel = $nativeNodeLabels[$labelId - 9100]
+    $actualLabel = [string]$gateLabelMap[$labelId]
+    if ([string]::IsNullOrWhiteSpace($expectedLabel) -or $actualLabel -ne $expectedLabel) {
+      throw "RED: UIA live gate node creation sheet label lookup for $labelId returned '$actualLabel', expected '$expectedLabel' from NativeForms.zig"
+    }
+  }
+  if ($uiaLiveGateSource -notmatch 'expected label list is empty or blank') {
+    throw "RED: UIA live gate node creation sheet label comparison can pass vacuously on an empty expected list"
+  }
   if ($shellTests -notmatch '(?s)Windows update feed executable tests.*?zig test src\\WindowsUpdates\.zig.*?-lwinhttp') {
     throw "RED: Windows shell validation does not run the native updater tests"
   }

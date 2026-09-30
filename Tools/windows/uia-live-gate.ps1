@@ -5822,7 +5822,7 @@ try {
     return ($logText -match '"createNode"')
   }
   $nodeSheetTitle = "Create or edit node"
-  $nodeSheetFieldLabels = [ordered]@{
+  $nodeSheetFieldLabels = @{
     9100 = "Name (optional)"; 9102 = "What are you checking for? (optional)"
     9103 = "What should it do each time?"; 9104 = "First instruction"
     9106 = "What does done look like?"; 9107 = "Done check command (optional)"
@@ -5830,6 +5830,8 @@ try {
     9110 = "Progress metric command (optional)"; 9111 = "When is the metric better?"
     9112 = "Agent"; 9113 = "Model"; 9114 = "Branch"
   }
+  # 9105 is a checkbox; NativeForms.zig gives checkbox fields an empty label.
+  $nodeSheetCheckboxIds = @(9105)
   $nodeSheetAlwaysVisible = @(9100, 9112, 9113, 9114)
   $nodeSheetTypes = @(
     [pscustomobject]@{ Tile = 2; Label = "Goal-based"; Value = "goalBased"; Extra = @(9106, 9107, 9108, 9109, 9110, 9111) },
@@ -5965,10 +5967,16 @@ try {
     $expectedIds = @($nodeSheetAlwaysVisible + $loopTypeCase.Extra | Sort-Object)
     $visibleIds = @(Wait-NodeSheetVisibleIds $expectedIds | Sort-Object)
     $visibleTexts = @([GraphCodeUiaGateState]::VisibleStaticTexts($nodeSheetWindow))
-    $visibleLabels = @($nodeSheetFieldLabels.Keys | Where-Object { $visibleTexts -contains $nodeSheetFieldLabels[$_] } |
+    $visibleLabels = @($nodeSheetFieldLabels.Keys | Sort-Object | Where-Object { $visibleTexts -contains $nodeSheetFieldLabels[$_] } |
       ForEach-Object { $nodeSheetFieldLabels[$_] })
-    $expectedLabels = @($nodeSheetFieldLabels.Keys | Where-Object { $expectedIds -contains $_ } |
+    $expectedLabels = @($nodeSheetFieldLabels.Keys | Sort-Object | Where-Object { $expectedIds -contains $_ } |
       ForEach-Object { $nodeSheetFieldLabels[$_] })
+    $expectedLabelIds = @($expectedIds | Where-Object { $nodeSheetCheckboxIds -notcontains $_ })
+    $blankExpectedLabels = @($expectedLabels | Where-Object { [string]::IsNullOrWhiteSpace([string]$_) })
+    Require ($expectedLabels.Count -gt 0 -and $expectedLabels.Count -eq $expectedLabelIds.Count -and
+      $blankExpectedLabels.Count -eq 0) `
+      ("node creation sheet $($loopTypeCase.Value) expected label list is empty or blank: " +
+       "$($expectedLabels.Count) labels for ids $($expectedLabelIds -join ','), blank=$($blankExpectedLabels.Count)")
     Write-Host ("UIA_NODE_CREATION_FIELDS type=$($loopTypeCase.Value) tile=$(9600 + $tileIndex) " +
       "point=$($tileClick.point -join ',') visible=$($visibleIds -join ',') expected=$($expectedIds -join ',') " +
       "labels='$($visibleLabels -join '; ')'")
