@@ -11,7 +11,7 @@ param(
   [string] $NodeBId = "",
   [string] $NodeATitle = "Stub node A",
   [string] $NodeBTitle = "Stub node B",
-  # Apply renameNode and createNode graph commands to the stub's own graph and
+  # Apply renameNode, createNode, createEdge and updateEdge to the stub's own graph and
   # publish the result as a new graphChanged event, so a caller can observe what
   # a daemon that accepted the command would send back.
   [switch] $ApplyGraphCommands
@@ -41,6 +41,11 @@ $nodeLoopTypes = @{}
 $nodeExtraFields = @{}
 $appliedCreates = [Collections.Generic.List[string]]::new()
 $appliedCreateRequests = [Collections.Generic.List[string]]::new()
+$edges = [Collections.Generic.List[object]]::new()
+$appliedEdgeCreates = [Collections.Generic.List[string]]::new()
+$appliedEdgeUpdates = [Collections.Generic.List[string]]::new()
+$appliedEdgeCreateRequests = [Collections.Generic.List[string]]::new()
+$appliedEdgeUpdateRequests = [Collections.Generic.List[string]]::new()
 
 function ConvertTo-StubJsonText([string] $value) {
   return $value.Replace('\', '\\').Replace('"', '\"')
@@ -55,9 +60,10 @@ function New-StubGraphEvent {
       '","loopType":"' + (ConvertTo-StubJsonText $loopType) + '"' + $extra + ',"state":"' + $state[0] +
       '","activity":"stub","presence":{"presence":"' + $state[1] + '","confidence":"reported"}}'
   }
+  $edgeJson = @($edges | ForEach-Object { $_ | ConvertTo-Json -Depth 8 -Compress })
   return '{"version":2,"kind":"event","sequence":' + $graphSequence +
     ',"event":{"graphChanged":{"id":"stub-graph","project":{"path":"graphcode://stub/project",' +
-    '"name":"Stub project","remote":false},"nodes":[' + ($nodes -join ",") + '],"edges":[]}}}'
+    '"name":"Stub project","remote":false},"nodes":[' + ($nodes -join ",") + '],"edges":[' + ($edgeJson -join ",") + ']}}}'
 }
 $recentProjects = '{"version":2,"kind":"response","requestID":"{0}","event":{"recentProjectsListed":[{"path":"graphcode://stub/project","name":"Stub project","remote":false}]}}'
 $quickChats = '{"version":2,"kind":"response","requestID":"{0}","event":{"quickChatsListed":[{"id":"33333333-3333-4333-8333-333333333333","title":"Stub quick chat","backend":"claudeCode","createdAt":0,"activity":{"sequence":1,"text":"ready","presence":{"presence":"idle","confidence":"reported"}}},{"id":"44444444-4444-4444-8444-444444444444","title":"Review notes","backend":"copilot","createdAt":1,"activity":null}]}}'
@@ -135,6 +141,12 @@ function Write-Result {
     appliedRenames = @($appliedRenames)
     appliedCreates = @($appliedCreates)
     appliedCreateRequests = @($appliedCreateRequests)
+    appliedEdgeCreates = @($appliedEdgeCreates)
+    appliedEdgeUpdates = @($appliedEdgeUpdates)
+    appliedEdgeCreateRequests = @($appliedEdgeCreateRequests)
+    appliedEdgeUpdateRequests = @($appliedEdgeUpdateRequests)
+    edges = @($edges)
+    graphSequence = $graphSequence
   }
   $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $ResultPath -NoNewline
 }
@@ -187,6 +199,7 @@ try {
         if ($commandName) { $seenCommands.Add([string]$commandName) }
         $renameApplied = $false
         $createApplied = $false
+        $edgeApplied = $false
         if ($ApplyGraphCommands -and $commandName -eq "graphCommand") {
           $rename = $frame.command.graphCommand.command.renameNode
           if ($null -ne $rename) {
@@ -221,6 +234,70 @@ try {
               $createApplied = $true
             }
           }
+          $createEdge = $frame.command.graphCommand.command.createEdge
+          if ($null -ne $createEdge) {
+            if ([string]$frame.command.graphCommand.projectPath -cne "graphcode://stub/project" -or
+                -not $nodeTitles.Contains([string]$createEdge.from) -or
+                -not $nodeTitles.Contains([string]$createEdge.to) -or
+                [string]$createEdge.from -ceq [string]$createEdge.to -or
+                $null -eq $createEdge.spec -or
+                [string]$createEdge.spec.kind -notin @("handoff", "message", "spawn") -or
+                [string]$createEdge.spec.condition -notin @("always", "onSuccess", "onFailure") -or
+                $null -eq $createEdge.spec.payloadTransform) {
+              throw "stub rejected invalid createEdge request $($frame.requestID)"
+            }
+            $edgeId = "55555555-5555-4555-8555-{0:x12}" -f ($edges.Count + 1)
+            $edge = [ordered]@{
+              id = $edgeId
+              from = [string]$createEdge.from
+              to = [string]$createEdge.to
+              kind = [string]$createEdge.spec.kind
+              condition = [string]$createEdge.spec.condition
+              fireCount = 0
+              payloadTransform = $createEdge.spec.payloadTransform
+              cycleGuard = $createEdge.spec.cycleGuard
+              spawnTargetProjectPath = $createEdge.spec.spawnTargetProjectPath
+            }
+            $edges.Add($edge)
+            $appliedEdgeCreates.Add($edgeId)
+            $appliedEdgeCreateRequests.Add([string]$frame.requestID)
+            $edgeApplied = $true
+          }
+          $updateEdge = $frame.command.graphCommand.command.updateEdge
+          if ($null -ne $updateEdge) {
+            $matches = @($edges | Where-Object { $_.id -ceq [string]$updateEdge.id })
+            if ([string]$frame.command.graphCommand.projectPath -cne "graphcode://stub/project" -or
+                $matches.Count -ne 1 -or
+                $matches[0].from -cne [string]$updateEdge.from -or
+                $matches[0].to -cne [string]$updateEdge.to -or
+                $null -eq $updateEdge.expectedSpec -or $null -eq $updateEdge.spec -or
+                [string]$updateEdge.spec.kind -notin @("handoff", "message", "spawn") -or
+                [string]$updateEdge.spec.condition -notin @("always", "onSuccess", "onFailure") -or
+                $null -eq $updateEdge.spec.payloadTransform) {
+              throw "stub rejected stale updateEdge identity $($frame.requestID)"
+            }
+            $current = $matches[0]
+            $currentSpec = [ordered]@{
+              kind = $current.kind; condition = $current.condition
+              payloadTransform = $current.payloadTransform; cycleGuard = $current.cycleGuard
+              spawnTargetProjectPath = $current.spawnTargetProjectPath
+            }
+            foreach ($field in @("kind", "condition", "payloadTransform", "cycleGuard", "spawnTargetProjectPath")) {
+              $before = ConvertTo-Json -InputObject $currentSpec[$field] -Depth 8 -Compress
+              $expected = ConvertTo-Json -InputObject $updateEdge.expectedSpec.$field -Depth 8 -Compress
+              if ($before -cne $expected) {
+                throw "stub rejected stale updateEdge expectedSpec.$field $($frame.requestID): current=$before expected=$expected"
+              }
+            }
+            $current.kind = [string]$updateEdge.spec.kind
+            $current.condition = [string]$updateEdge.spec.condition
+            $current.payloadTransform = $updateEdge.spec.payloadTransform
+            $current.cycleGuard = $updateEdge.spec.cycleGuard
+            $current.spawnTargetProjectPath = $updateEdge.spec.spawnTargetProjectPath
+            $appliedEdgeUpdates.Add([string]$current.id)
+            $appliedEdgeUpdateRequests.Add([string]$frame.requestID)
+            $edgeApplied = $true
+          }
         }
         $response = if ($commandName -eq "listRecentProjects") {
           $recentProjects.Replace("{0}", [string]$frame.requestID)
@@ -239,7 +316,7 @@ try {
           $graphSent = $true
           $graphSentOnConnection = $true
         }
-        if ($renameApplied -or $createApplied) {
+        if ($renameApplied -or $createApplied -or $edgeApplied) {
           $graphSequence++
           if (-not (Send-Frame $server (New-StubGraphEvent))) { break }
           $graphSent = $true

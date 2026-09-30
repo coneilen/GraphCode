@@ -1387,7 +1387,7 @@ Start-Sleep -Seconds 60
   if ($stubDaemonSource -notmatch '\$frame\.command\.graphCommand\.command\.createNode\._0' -or
       $stubDaemonSource -notmatch 'appliedCreates' -or
       $stubDaemonSource -notmatch '\$nodeLoopTypes\[\$id\]' -or
-      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied\)') {
+      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied\)') {
     throw "RED: stub daemon cannot apply exactly the createNode it received and republish the created loop type"
   }
   if ($uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_SHEET_EVIDENCE' -or
@@ -1412,6 +1412,47 @@ Start-Sleep -Seconds 60
   }
   if ($uiaLiveGateSource -notmatch '(?s)nodeCreationSheet = \$nodeCreationSheetEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
     throw "RED: UIA final summary omits the parsable node creation sheet evidence"
+  }
+  if ($uiaLiveGateSource -notmatch 'UIA_EDGE_WORKFLOW_EVIDENCE=' -or
+      $uiaLiveGateSource -notmatch '(?s)edgeWorkflow = \$edgeWorkflowEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress' -or
+      $uiaLiveGateSource -notmatch 'createEdge' -or
+      $uiaLiveGateSource -notmatch 'updateEdge' -or
+      $uiaLiveGateSource -notmatch 'Enter the template or script that should carry context\.' -or
+      $uiaLiveGateSource -notmatch 'WindowIsVisible\(\$edgeWorkflowWindow\)' -or
+      $uiaLiveGateSource -notmatch 'ClickPopupMenuItem' -or
+      $uiaLiveGateSource -notmatch 'appliedEdgeCreates' -or
+      $uiaLiveGateSource -notmatch 'appliedEdgeUpdates' -or
+      $uiaLiveGateSource -notmatch 'commandLogBytesUnchanged' -or
+      $uiaLiveGateSource -notmatch 'renderedEdgeId' -or
+      $uiaLiveGateSource -notmatch 'graphCommandsBefore' -or
+      $uiaLiveGateSource -notmatch 'graphCommandsAfter') {
+    throw "RED: UIA live gate does not prove the native edge create/edit round trip and no-mutation paths"
+  }
+  if ($uiaLiveGateSource -notmatch 'Open-EdgeMenu \$false 5120' -or
+      $uiaLiveGateSource -notmatch 'Open-EdgeMenu \$true 5110' -or
+      $uiaLiveGateSource -notmatch 'Edge-Combo 9100 0' -or
+      $uiaLiveGateSource -notmatch 'Edge-Combo 9101 1' -or
+      $uiaLiveGateSource -notmatch 'Edge-Combo 9102 0' -or
+      $uiaLiveGateSource -notmatch 'Edge-Combo 9103 2 "Only after failure"' -or
+      $uiaLiveGateSource -notmatch 'Edge-Combo 9103 1 "Only after success"' -or
+      $uiaLiveGateSource -notmatch 'Edge-Combo 9104 1 "Apply a text template"' -or
+      $uiaLiveGateSource -notmatch 'TypeEditTextById\(\$edgeWorkflowWindow, \$field\.Id, \$field\.Text\)' -or
+      $uiaLiveGateSource -notmatch 'Edge-Click 1 "invalid edge OK"' -or
+      $uiaLiveGateSource -notmatch 'Edge-Click 1 "valid edge OK"' -or
+      $uiaLiveGateSource -notmatch 'Edge-Click 1 "update edge OK"' -or
+      $uiaLiveGateSource -notmatch 'Edge-Click 2 "cancel changed edge"' -or
+      $uiaLiveGateSource -notmatch 'Assert-EdgePrefill "2\|Only after failure"' -or
+      $uiaLiveGateSource -notmatch 'Assert-EdgePrefill "1\|Only after success"' -or
+      $uiaLiveGateSource -notmatch 'Get-DirectChildren \$graph \$rawWalker' -or
+      $uiaLiveGateSource -notmatch 'edgeCreateWire\.command\.createEdge\.from' -or
+      $uiaLiveGateSource -notmatch 'edgeChange\.expectedSpec\.condition -eq "onFailure"' -or
+      $uiaLiveGateSource -notmatch 'edgeChange\.spec\.condition -eq "onSuccess"' -or
+      $uiaLiveGateSource -notmatch 'edgeCancelBytesUnchanged' -or
+      $uiaLiveGateSource -notmatch 'appliedEdgeUpdateRequests' -or
+      $stubDaemonSource -notmatch 'appliedEdgeCreateRequests' -or
+      $stubDaemonSource -notmatch 'appliedEdgeUpdateRequests' -or
+      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied\)') {
+    throw "RED: edge workflow does not pin native input, exact CAS wire, correlated application, and stable rendered identity"
   }
   $nativeFormsSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\NativeForms.zig") -Raw
   if ($nativeFormsSource -notmatch '(?s)const node_labels = \[_\]\[\]const u8\{(.*?)\};') {
