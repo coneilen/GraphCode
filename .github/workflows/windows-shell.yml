@@ -102,7 +102,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') }}
     runs-on: windows-2022
-    timeout-minutes: 70
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
@@ -118,7 +118,7 @@ jobs:
           path: |
             .ci-tools/zig-0.15.2
             .ci-tools/zig-0.16.0
-          key: windows-zig-v1-${{ hashFiles('Tools/windows/bootstrap.ps1') }}-measure-cold-9dd0d003
+          key: windows-zig-v1-${{ hashFiles('Tools/windows/bootstrap.ps1') }}
 
       - name: Restore pinned provider build caches
         id: provider-cache
@@ -127,7 +127,7 @@ jobs:
           path: |
             .ci-providers
             .ci-tools/zig-global
-          key: windows-providers-v1-${{ hashFiles('graphcode-windows/provider-pins.json', 'Tools/windows/bootstrap.ps1') }}-emit-win32-host-x86_64-windows-gnu-measure-cold-9dd0d003
+          key: windows-providers-v1-${{ hashFiles('graphcode-windows/provider-pins.json', 'Tools/windows/bootstrap.ps1') }}-emit-win32-host-x86_64-windows-gnu
 
       - name: Bootstrap exact Windows dependencies
         id: bootstrap
