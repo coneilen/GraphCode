@@ -613,6 +613,8 @@ public static class GraphCodeUiaGateState {
   private static extern IntPtr GetAncestor(IntPtr window, uint flags);
   [DllImport("user32.dll")]
   private static extern IntPtr RealChildWindowFromPoint(IntPtr parent, ScreenPoint clientPoint);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetWindow(IntPtr window, uint command);
   public sealed class ControlClick {
     public int ControlId, Left, Top, Right, Bottom, ScreenX, ScreenY;
     public int CursorBeforeX, CursorBeforeY, CursorAtX, CursorAtY;
@@ -634,6 +636,37 @@ public static class GraphCodeUiaGateState {
     public int CoveringId, CoveringLeft, CoveringTop, CoveringRight, CoveringBottom;
     public string CoveringClass, CoveringText;
     public string[] Samples;
+    public string[] CoveringWindows;
+    public int[][] UncoveredRectangles;
+    public int[] ChosenUncoveredRectangle;
+  }
+  public static int[][] SubtractCoveredRectangles(int[] visible, int[][] covers) {
+    var remaining = new System.Collections.ArrayList();
+    if (visible[2] > visible[0] && visible[3] > visible[1]) remaining.Add(visible);
+    foreach (int[] cover in covers) {
+      var next = new System.Collections.ArrayList();
+      foreach (int[] piece in remaining) {
+        int left = Math.Max(piece[0], cover[0]), top = Math.Max(piece[1], cover[1]);
+        int right = Math.Min(piece[2], cover[2]), bottom = Math.Min(piece[3], cover[3]);
+        if (left >= right || top >= bottom) { next.Add(piece); continue; }
+        if (piece[0] < left) next.Add(new[] { piece[0], piece[1], left, piece[3] });
+        if (right < piece[2]) next.Add(new[] { right, piece[1], piece[2], piece[3] });
+        if (piece[1] < top) next.Add(new[] { left, piece[1], right, top });
+        if (bottom < piece[3]) next.Add(new[] { left, bottom, right, piece[3] });
+      }
+      remaining = next;
+    }
+    var result = new int[remaining.Count][];
+    remaining.CopyTo(result);
+    Array.Sort(result, delegate(int[] a, int[] b) {
+      long areaA = (long)(a[2] - a[0]) * (a[3] - a[1]);
+      long areaB = (long)(b[2] - b[0]) * (b[3] - b[1]);
+      int byArea = areaB.CompareTo(areaA);
+      if (byArea != 0) return byArea;
+      int byTop = a[1].CompareTo(b[1]);
+      return byTop != 0 ? byTop : a[0].CompareTo(b[0]);
+    });
+    return result;
   }
   private static IntPtr ResolveChild(IntPtr dialog, ScreenPoint point) {
     var clientPoint = point;
@@ -714,10 +747,9 @@ public static class GraphCodeUiaGateState {
       WindowAtCenterClass = ClassOf(atRectCenter),
       WindowAtCenterRootClass = ClassOf(atRectCenter == IntPtr.Zero ? IntPtr.Zero : GetAncestor(atRectCenter, 2))
     };
-    // When sibling content covers the chosen point, look for an uncovered point
-    // on a fixed grid over the visible portion, as a user would click the part
-    // of the button they can see. Each candidate must still resolve to the
-    // control itself; the covering window and the covered count are recorded.
+    // Subtract visible siblings above the target in Z order. A narrow uncovered
+    // strip can fall between grid rows, so try the largest residual rectangle
+    // before scanning the fixed grid as a diagnostic fallback.
     if (!hit.HitTarget && !visibleEmpty && dialog != IntPtr.Zero) {
       IntPtr covering = realChild != IntPtr.Zero && realChild != target && realChild != dialog ? realChild : atPoint;
       RECT coveringRect;
@@ -728,6 +760,33 @@ public static class GraphCodeUiaGateState {
       hit.CoveringId = covering == IntPtr.Zero ? 0 : GetDlgCtrlID(covering);
       hit.CoveringClass = ClassOf(covering);
       hit.CoveringText = covering == IntPtr.Zero ? "" : EditBufferText(covering);
+      var covers = new System.Collections.ArrayList();
+      var coveringWindows = new System.Collections.ArrayList();
+      for (IntPtr sibling = GetWindow(target, 3); sibling != IntPtr.Zero; sibling = GetWindow(sibling, 3)) {
+        RECT siblingRect;
+        if (!IsWindowVisible(sibling) || !GetWindowRect(sibling, out siblingRect)) continue;
+        int left = Math.Max(visibleLeft, siblingRect.Left), top = Math.Max(visibleTop, siblingRect.Top);
+        int right = Math.Min(visibleRight, siblingRect.Right), bottom = Math.Min(visibleBottom, siblingRect.Bottom);
+        if (left >= right || top >= bottom) continue;
+        var overlapCenter = new ScreenPoint { X = (left + right) / 2, Y = (top + bottom) / 2 };
+        if (ResolveChild(dialog, overlapCenter) != sibling) continue;
+        covers.Add(new[] { siblingRect.Left, siblingRect.Top, siblingRect.Right, siblingRect.Bottom });
+        coveringWindows.Add(String.Format("{0}|{1}|{2}|{3},{4},{5},{6}", GetDlgCtrlID(sibling),
+          ClassOf(sibling), EditBufferText(sibling), siblingRect.Left, siblingRect.Top, siblingRect.Right, siblingRect.Bottom));
+      }
+      hit.CoveringWindows = (string[])coveringWindows.ToArray(typeof(string));
+      hit.UncoveredRectangles = SubtractCoveredRectangles(new[] { visibleLeft, visibleTop, visibleRight, visibleBottom },
+        (int[][])covers.ToArray(typeof(int[])));
+      foreach (int[] piece in hit.UncoveredRectangles) {
+        var candidate = new ScreenPoint { X = (piece[0] + piece[2]) / 2, Y = (piece[1] + piece[3]) / 2 };
+        if (!ResolvesToControl(target, dialog, candidate)) continue;
+        center = candidate;
+        hit.ScreenX = candidate.X; hit.ScreenY = candidate.Y;
+        hit.HitTarget = true;
+        hit.ScanUsed = true;
+        hit.ChosenUncoveredRectangle = piece;
+        break;
+      }
       int width = visibleRight - visibleLeft, height = visibleBottom - visibleTop;
       var samples = new string[15];
       for (int row = 1; row <= 3; row++) {
@@ -6065,6 +6124,9 @@ try {
           id = $hit.CoveringId; class = $hit.CoveringClass; text = $hit.CoveringText
           bounds = @($hit.CoveringLeft, $hit.CoveringTop, $hit.CoveringRight, $hit.CoveringBottom)
         }
+        coveringSiblings = @($hit.CoveringWindows)
+        uncoveredRectangles = @($hit.UncoveredRectangles | ForEach-Object { ,@($_) })
+        chosenUncoveredRectangle = if ($hit.ChosenUncoveredRectangle) { @($hit.ChosenUncoveredRectangle) } else { $null }
         sampledPoints = $hit.ScannedPoints
         coveredPoints = $hit.CoveredPoints
         coveredFraction = [Math]::Round($hit.CoveredPoints / [double]$hit.ScannedPoints, 3)
@@ -6077,10 +6139,11 @@ try {
       $nodeSheetContentOcclusions.Add($contentOcclusion)
       Write-Host ("UIA_NODE_CREATION_CONTENT_OCCLUSION " + ($contentOcclusion | ConvertTo-Json -Depth 5 -Compress))
       Require $hit.HitTarget `
-        ("node creation sheet $label has no uncovered point in [$($controlBounds -join ',')]: " +
+        ("node creation sheet $label has no verified uncovered point in [$($controlBounds -join ',')]: " +
          "$($hit.CoveredPoints)/$($hit.ScannedPoints) sampled points covered by control $($hit.CoveringId) " +
          "class '$($hit.CoveringClass)' text '$($hit.CoveringText)' at " +
-         "[$($hit.CoveringLeft),$($hit.CoveringTop),$($hit.CoveringRight),$($hit.CoveringBottom)]")
+         "[$($hit.CoveringLeft),$($hit.CoveringTop),$($hit.CoveringRight),$($hit.CoveringBottom)]; " +
+         "remaining $(@($hit.UncoveredRectangles | ForEach-Object { '[' + ($_ -join ',') + ']' }) -join '; ')")
     } elseif ($controlId -eq 1 -and $hit.HitTarget) {
       $nodeSheetCreateCentreClicks.Add($label)
     }

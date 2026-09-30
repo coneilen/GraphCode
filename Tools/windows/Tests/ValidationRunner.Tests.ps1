@@ -1458,8 +1458,38 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'coveredFraction = ' -or
       $uiaLiveGateSource -notmatch 'createCentreClicks = ' -or
       $uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_CONTENT_OCCLUSION' -or
-      $uiaLiveGateSource -notmatch 'has no uncovered point in') {
+      $uiaLiveGateSource -notmatch 'has no verified uncovered point in' -or
+      $uiaLiveGateSource -notmatch 'SubtractCoveredRectangles' -or
+      $uiaLiveGateSource -notmatch 'GetWindow\(target, 3\)' -or
+      $uiaLiveGateSource -notmatch 'ChosenUncoveredRectangle = piece' -or
+      $uiaLiveGateSource -notmatch 'uncoveredRectangles = ') {
     throw "RED: UIA live gate node creation sheet cannot click and record a footer control partly covered by scrolled content"
+  }
+  if ($uiaLiveGateSource -notmatch '(?s)Add-Type -TypeDefinition @"\r?\n(.*?)\r?\n"@ -ReferencedAssemblies @\(') {
+    throw "RED: UIA live gate native input helper is missing"
+  }
+  Add-Type -AssemblyName UIAutomationClient
+  Add-Type -AssemblyName UIAutomationTypes
+  Add-Type -TypeDefinition $Matches[1] -ReferencedAssemblies @(
+    [System.Windows.Automation.AutomationElement].Assembly.Location,
+    [System.Windows.Automation.AutomationEventArgs].Assembly.Location
+  )
+  $goalCover = [int[][]]::new(1)
+  $goalCover[0] = [int[]]@(84, 699, 763, 721)
+  $goalRemainder = [GraphCodeUiaGateState]::SubtractCoveredRectangles(
+    [int[]]@(667, 698, 763, 728), $goalCover)
+  if ($goalRemainder.Count -ne 2 -or
+      ($goalRemainder[0] -join ',') -ne '667,721,763,728') {
+    throw "RED: node sheet rectangle subtraction misses the real seven-pixel uncovered Create band"
+  }
+  $twoCovers = [int[][]]::new(2)
+  $twoCovers[0] = [int[]]@(84, 699, 763, 721)
+  $twoCovers[1] = [int[]]@(667, 721, 715, 728)
+  $twoRemainders = [GraphCodeUiaGateState]::SubtractCoveredRectangles(
+    [int[]]@(667, 698, 763, 728), $twoCovers)
+  if ($twoRemainders.Count -ne 2 -or
+      ($twoRemainders[0] -join ',') -ne '715,721,763,728') {
+    throw "RED: node sheet rectangle subtraction does not handle more than one covering control"
   }
   if ($shellTests -notmatch '(?s)Windows update feed executable tests.*?zig test src\\WindowsUpdates\.zig.*?-lwinhttp') {
     throw "RED: Windows shell validation does not run the native updater tests"
