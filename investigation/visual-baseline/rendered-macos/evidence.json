@@ -1,0 +1,3789 @@
+{
+  "schemaVersion": 1,
+  "platform": "macOS",
+  "source": {
+    "commit": "b0af051fe28a890bc9ebf3c6bd97fffaba51cc3b",
+    "tree": "9d556f40680a8dba4fade33c4ca787f66ac716d2",
+    "worktreeClean": true,
+    "submodules": {
+      "ThirdParty/ghostty": "30e1f3bb8c3d2949e9ae4aefc1c2b76142569cfb",
+      "ThirdParty/zmx": "929263d83d12432da497d7370ebb30b579754428"
+    }
+  },
+  "app": {
+    "configuration": "Debug, scheme graphcode, platform=macOS; generated and built with the Makefile dev-* identity overrides TUIST_BUNDLE_ID_PREFIX=local.graphcode.macref and TUIST_APP_DISPLAY_NAME='GraphCode (macref)' so the capture never touched an installed GraphCode or its daemon; no source changes",
+    "sdk": "macosx26.5",
+    "launch": "graphcode.app/Contents/MacOS/graphcode -AppleInterfaceStyle Dark, environment GRAPHCODE_SUPPORT_DIR set to a scratch directory",
+    "bundleIdentifier": "local.graphcode.macref.app",
+    "version": "0.1.77 (301)",
+    "binaries": {
+      "graphcode.app/Contents/MacOS/graphcode": {
+        "bytes": 58720,
+        "sha256": "2901ec06728922a3d18931d347f539d1dc6a063d348f89ecbd526180811c291c"
+      },
+      "graphcode.app/Contents/MacOS/graphcode.debug.dylib": {
+        "bytes": 58295248,
+        "sha256": "704fec5793dfa34359417bfcbc4987f9e99b8084af0b54dae2a352dac1b86eec"
+      },
+      "graphcode.app/Contents/MacOS/__preview.dylib": {
+        "sha256": "514facfdf927168e2fdaaec7d39739aa554aee83fe323181c239cf26829225ec"
+      },
+      "GraphcodeKit.framework/GraphcodeKit": {
+        "sha256": "f4ad9754966d601d27363ea5329e580ccb693ede677aa59b33f72635e8110ca2"
+      },
+      "MailroomKit": {
+        "sha256": "2bfe82c83db5c6ab31e4dbe1cdc36ebee1048438d0fc3fe1958608db9ecaf77f"
+      },
+      "graphcoded": {
+        "sha256": "3c0c046e1159dacdf4aea9e292f2db7c30e4b6ecfa318f66c57c3ca199927654"
+      },
+      "graphcode (CLI)": {
+        "sha256": "79ddf65b0bc9960573dc1422840db77da720bf40671de6c701afa2afe58d67c9"
+      }
+    },
+    "bundleManifestSha256": "950d3509a24dba7a59eef3b1b9a47b46bf488c2a307e7fd5d898f34ba4f89c80",
+    "bundleManifestDefinition": "SHA-256 of the sorted 'shasum -a 256' lines for the 22 files in graphcode.app, excluding _CodeSignature"
+  },
+  "host": {
+    "os": "macOS 26.7 (25G229)",
+    "xcode": "26.5 (17F42)"
+  },
+  "display": {
+    "model": "DELL P2719H",
+    "cgBoundsPoints": [
+      -1920,
+      -37,
+      1920,
+      1080
+    ],
+    "backingScaleFactor": 1.0,
+    "colorProfileDuringCapture": "sRGB IEC61966-2.1 (/System/Library/ColorSync/Profiles/sRGB Profile.icc, set as a temporary ColorSync custom profile; factory profile restored afterwards)"
+  },
+  "capture": {
+    "api": "ScreenCaptureKit SCScreenshotManager.captureImage, SCContentFilter(display, including: app windows), sourceRect = window frame (minus topInset), SCStreamConfiguration colorSpaceName = kCGColorSpaceSRGB, width/height = point size x 1",
+    "postProcessing": "none: CGImageDestination PNG write, no crop, no rescale, no re-encode",
+    "pngColourTag": "sRGB chunk (rendering intent 0), no iCCP, no gAMA/cHRM",
+    "alpha": "window corner radius is transparent (alpha 0) in every capture; all samples are inside the opaque client"
+  },
+  "appearance": {
+    "systemAppearance": "Dark (AppleInterfaceStyle=Dark, switched from Light for the capture and restored afterwards)",
+    "controlAccentColorSRGB": [
+      0.0,
+      0.4784,
+      1.0
+    ],
+    "AppleAccentColor": "unset (default multicolor/blue)",
+    "AppleHighlightColor": "unset",
+    "AppleReduceDesktopTinting": "unset (wallpaper tinting on, the default)",
+    "AppleFontSmoothing": "unset in global and currentHost domains (system default)",
+    "increaseContrast": false,
+    "reduceTransparency": false,
+    "reduceMotion": false,
+    "differentiateWithoutColor": false,
+    "invertColors": false
+  },
+  "terminal": {
+    "fontSizePoints": 11.7,
+    "fontSizeDerivation": "Ghostty default font-size 13 x graphcode default scale 0.9 (TerminalFontZoom), no zoom stored; source-derived, not measured",
+    "fontFamily": "Ghostty default (embedded JetBrains Mono); source-derived, not measured",
+    "userGhosttyConfig": "empty"
+  },
+  "captures": [
+    {
+      "file": "macos-canvas-sidebar.png",
+      "surface": "Graph/project canvas with sidebar",
+      "state": "ReferenceProject selected, zoom 100%, daemon disconnected, 3 loops, straight A->B edge, curved guarded C->A back-edge labelled 'retry x1'",
+      "backingScaleFactor": 1.0,
+      "clientPoints": [
+        1264,
+        761
+      ],
+      "geometry": {
+        "windowFrameCG": [
+          -1800,
+          60,
+          1264,
+          761
+        ],
+        "captureSourceRectPoints": [
+          0,
+          0,
+          1264,
+          761
+        ],
+        "topInsetPoints": 0
+      },
+      "samples": [
+        {
+          "id": "canvas-background-open-cell",
+          "rect": [
+            292,
+            117,
+            47,
+            47
+          ],
+          "countRGB": [
+            [
+              10,
+              12,
+              11
+            ]
+          ],
+          "measured": {
+            "pixels": 2209,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                10,
+                12,
+                11,
+                255,
+                2209
+              ]
+            ],
+            "maxChannelSpread": 2,
+            "exactOpaqueRGBCounts": [
+              [
+                10,
+                12,
+                11,
+                2209
+              ]
+            ]
+          }
+        },
+        {
+          "id": "canvas-grid-line-vertical",
+          "rect": [
+            291,
+            117,
+            1,
+            47
+          ],
+          "countRGB": [
+            [
+              21,
+              24,
+              22
+            ]
+          ],
+          "measured": {
+            "pixels": 47,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                21,
+                24,
+                22,
+                255,
+                47
+              ]
+            ],
+            "maxChannelSpread": 3,
+            "exactOpaqueRGBCounts": [
+              [
+                21,
+                24,
+                22,
+                47
+              ]
+            ]
+          }
+        },
+        {
+          "id": "canvas-grid-line-horizontal",
+          "rect": [
+            292,
+            116,
+            47,
+            1
+          ],
+          "countRGB": [
+            [
+              21,
+              24,
+              22
+            ]
+          ],
+          "measured": {
+            "pixels": 47,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                21,
+                24,
+                22,
+                255,
+                47
+              ]
+            ],
+            "maxChannelSpread": 3,
+            "exactOpaqueRGBCounts": [
+              [
+                21,
+                24,
+                22,
+                47
+              ]
+            ]
+          }
+        },
+        {
+          "id": "project-container-open-cell",
+          "rect": [
+            580,
+            453,
+            47,
+            47
+          ],
+          "countRGB": [
+            [
+              15,
+              17,
+              16
+            ]
+          ],
+          "measured": {
+            "pixels": 2209,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                15,
+                17,
+                16,
+                255,
+                2209
+              ]
+            ],
+            "maxChannelSpread": 2,
+            "exactOpaqueRGBCounts": [
+              [
+                15,
+                17,
+                16,
+                2209
+              ]
+            ]
+          }
+        },
+        {
+          "id": "project-container-left-border-row",
+          "rect": [
+            527,
+            470,
+            8,
+            1
+          ],
+          "measured": {
+            "pixels": 8,
+            "distinctRGBA": 5,
+            "top5RGBACount": [
+              [
+                15,
+                17,
+                16,
+                255,
+                3
+              ],
+              [
+                10,
+                12,
+                11,
+                255,
+                2
+              ],
+              [
+                16,
+                18,
+                17,
+                255,
+                1
+              ],
+              [
+                21,
+                23,
+                22,
+                255,
+                1
+              ],
+              [
+                26,
+                29,
+                27,
+                255,
+                1
+              ]
+            ],
+            "maxChannelSpread": 3
+          }
+        },
+        {
+          "id": "sidebar-panel-body",
+          "rect": [
+            20,
+            300,
+            200,
+            400
+          ],
+          "countRGB": [
+            [
+              19,
+              21,
+              20
+            ]
+          ],
+          "measured": {
+            "pixels": 80000,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                19,
+                21,
+                20,
+                255,
+                80000
+              ]
+            ],
+            "maxChannelSpread": 2,
+            "exactOpaqueRGBCounts": [
+              [
+                19,
+                21,
+                20,
+                80000
+              ]
+            ]
+          }
+        },
+        {
+          "id": "sidebar-selected-project-row",
+          "rect": [
+            170,
+            162,
+            60,
+            22
+          ],
+          "countRGB": [
+            [
+              0,
+              89,
+              209
+            ]
+          ],
+          "measured": {
+            "pixels": 1320,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                0,
+                89,
+                209,
+                255,
+                1320
+              ]
+            ],
+            "maxChannelSpread": 209,
+            "exactOpaqueRGBCounts": [
+              [
+                0,
+                89,
+                209,
+                1320
+              ]
+            ]
+          }
+        },
+        {
+          "id": "sidebar-row-A-type-stripe",
+          "rect": [
+            38,
+            194,
+            8,
+            24
+          ],
+          "countRGB": [
+            [
+              25,
+              158,
+              112
+            ]
+          ],
+          "measured": {
+            "pixels": 192,
+            "distinctRGBA": 6,
+            "top5RGBACount": [
+              [
+                19,
+                21,
+                20,
+                255,
+                150
+              ],
+              [
+                25,
+                158,
+                112,
+                255,
+                34
+              ],
+              [
+                22,
+                99,
+                72,
+                255,
+                2
+              ],
+              [
+                23,
+                104,
+                75,
+                255,
+                2
+              ],
+              [
+                24,
+                137,
+                98,
+                255,
+                2
+              ]
+            ],
+            "maxChannelSpread": 133,
+            "exactOpaqueRGBCounts": [
+              [
+                25,
+                158,
+                112,
+                34
+              ]
+            ]
+          }
+        },
+        {
+          "id": "sidebar-row-B-type-stripe",
+          "rect": [
+            54,
+            226,
+            8,
+            24
+          ],
+          "countRGB": [
+            [
+              144,
+              133,
+              233
+            ]
+          ],
+          "measured": {
+            "pixels": 192,
+            "distinctRGBA": 6,
+            "top5RGBACount": [
+              [
+                19,
+                21,
+                20,
+                255,
+                150
+              ],
+              [
+                144,
+                133,
+                233,
+                255,
+                34
+              ],
+              [
+                90,
+                85,
+                141,
+                255,
+                2
+              ],
+              [
+                94,
+                89,
+                149,
+                255,
+                2
+              ],
+              [
+                125,
+                116,
+                200,
+                255,
+                2
+              ]
+            ],
+            "maxChannelSpread": 100,
+            "exactOpaqueRGBCounts": [
+              [
+                144,
+                133,
+                233,
+                34
+              ]
+            ]
+          }
+        },
+        {
+          "id": "sidebar-row-A-title-glyphs",
+          "rect": [
+            48,
+            198,
+            100,
+            16
+          ],
+          "measured": {
+            "pixels": 1600,
+            "distinctRGBA": 187,
+            "top5RGBACount": [
+              [
+                19,
+                21,
+                20,
+                255,
+                962
+              ],
+              [
+                243,
+                243,
+                243,
+                255,
+                118
+              ],
+              [
+                242,
+                242,
+                242,
+                255,
+                19
+              ],
+              [
+                36,
+                38,
+                37,
+                255,
+                17
+              ],
+              [
+                22,
+                24,
+                23,
+                255,
+                13
+              ]
+            ],
+            "maxChannelSpread": 2
+          }
+        },
+        {
+          "id": "card-A-type-stripe-row",
+          "rect": [
+            546,
+            360,
+            12,
+            1
+          ],
+          "countRGB": [
+            [
+              25,
+              158,
+              112
+            ]
+          ],
+          "measured": {
+            "pixels": 12,
+            "distinctRGBA": 9,
+            "top5RGBACount": [
+              [
+                25,
+                158,
+                112,
+                255,
+                2
+              ],
+              [
+                39,
+                40,
+                43,
+                255,
+                2
+              ],
+              [
+                40,
+                39,
+                43,
+                255,
+                2
+              ],
+              [
+                13,
+                22,
+                18,
+                255,
+                1
+              ],
+              [
+                14,
+                23,
+                19,
+                255,
+                1
+              ]
+            ],
+            "maxChannelSpread": 133,
+            "exactOpaqueRGBCounts": [
+              [
+                25,
+                158,
+                112,
+                2
+              ]
+            ]
+          }
+        },
+        {
+          "id": "card-A-top-border-column",
+          "rect": [
+            600,
+            306,
+            1,
+            14
+          ],
+          "measured": {
+            "pixels": 14,
+            "distinctRGBA": 9,
+            "top5RGBACount": [
+              [
+                44,
+                44,
+                48,
+                255,
+                4
+              ],
+              [
+                15,
+                24,
+                21,
+                255,
+                3
+              ],
+              [
+                14,
+                24,
+                20,
+                255,
+                1
+              ],
+              [
+                15,
+                24,
+                20,
+                255,
+                1
+              ],
+              [
+                24,
+                33,
+                29,
+                255,
+                1
+              ]
+            ],
+            "maxChannelSpread": 11
+          }
+        },
+        {
+          "id": "card-A-title-glyphs",
+          "rect": [
+            560,
+            322,
+            118,
+            16
+          ],
+          "countRGB": [
+            [
+              244,
+              244,
+              244
+            ]
+          ],
+          "measured": {
+            "pixels": 1888,
+            "distinctRGBA": 341,
+            "top5RGBACount": [
+              [
+                244,
+                244,
+                244,
+                255,
+                298
+              ],
+              [
+                43,
+                43,
+                47,
+                255,
+                143
+              ],
+              [
+                43,
+                43,
+                46,
+                255,
+                115
+              ],
+              [
+                42,
+                42,
+                46,
+                255,
+                112
+              ],
+              [
+                42,
+                42,
+                45,
+                255,
+                69
+              ]
+            ],
+            "maxChannelSpread": 6,
+            "exactOpaqueRGBCounts": [
+              [
+                244,
+                244,
+                244,
+                298
+              ]
+            ]
+          }
+        },
+        {
+          "id": "card-A-body-gradient",
+          "rect": [
+            720,
+            340,
+            70,
+            8
+          ],
+          "measured": {
+            "pixels": 560,
+            "distinctRGBA": 20,
+            "top5RGBACount": [
+              [
+                41,
+                41,
+                45,
+                255,
+                145
+              ],
+              [
+                41,
+                41,
+                44,
+                255,
+                97
+              ],
+              [
+                41,
+                42,
+                45,
+                255,
+                61
+              ],
+              [
+                42,
+                41,
+                45,
+                255,
+                56
+              ],
+              [
+                40,
+                41,
+                45,
+                255,
+                26
+              ]
+            ],
+            "maxChannelSpread": 5
+          }
+        },
+        {
+          "id": "edge-A-to-B-straight-column",
+          "rect": [
+            815,
+            356,
+            1,
+            11
+          ],
+          "countRGB": [
+            [
+              93,
+              96,
+              95
+            ]
+          ],
+          "measured": {
+            "pixels": 11,
+            "distinctRGBA": 3,
+            "top5RGBACount": [
+              [
+                16,
+                20,
+                18,
+                255,
+                8
+              ],
+              [
+                93,
+                96,
+                95,
+                255,
+                2
+              ],
+              [
+                27,
+                32,
+                29,
+                255,
+                1
+              ]
+            ],
+            "maxChannelSpread": 5,
+            "exactOpaqueRGBCounts": [
+              [
+                93,
+                96,
+                95,
+                2
+              ]
+            ]
+          }
+        },
+        {
+          "id": "edge-A-to-B-straight-band",
+          "rect": [
+            803,
+            356,
+            34,
+            11
+          ],
+          "countRGB": [
+            [
+              93,
+              96,
+              95
+            ]
+          ],
+          "measured": {
+            "pixels": 374,
+            "distinctRGBA": 121,
+            "top5RGBACount": [
+              [
+                16,
+                20,
+                18,
+                255,
+                16
+              ],
+              [
+                19,
+                21,
+                24,
+                255,
+                16
+              ],
+              [
+                15,
+                22,
+                19,
+                255,
+                13
+              ],
+              [
+                16,
+                20,
+                19,
+                255,
+                13
+              ],
+              [
+                17,
+                20,
+                20,
+                255,
+                13
+              ]
+            ],
+            "maxChannelSpread": 128,
+            "exactOpaqueRGBCounts": [
+              [
+                93,
+                96,
+                95,
+                2
+              ]
+            ]
+          }
+        },
+        {
+          "id": "edge-C-to-A-curve-segment",
+          "rect": [
+            810,
+            442,
+            28,
+            36
+          ],
+          "measured": {
+            "pixels": 1008,
+            "distinctRGBA": 140,
+            "top5RGBACount": [
+              [
+                15,
+                18,
+                17,
+                255,
+                134
+              ],
+              [
+                15,
+                17,
+                16,
+                255,
+                122
+              ],
+              [
+                15,
+                19,
+                17,
+                255,
+                88
+              ],
+              [
+                15,
+                22,
+                19,
+                255,
+                72
+              ],
+              [
+                15,
+                18,
+                16,
+                255,
+                66
+              ]
+            ],
+            "maxChannelSpread": 130
+          }
+        },
+        {
+          "id": "edge-label-retry-x1",
+          "rect": [
+            793,
+            422,
+            46,
+            22
+          ],
+          "measured": {
+            "pixels": 1012,
+            "distinctRGBA": 232,
+            "top5RGBACount": [
+              [
+                15,
+                17,
+                16,
+                255,
+                267
+              ],
+              [
+                15,
+                18,
+                17,
+                255,
+                117
+              ],
+              [
+                15,
+                18,
+                16,
+                255,
+                73
+              ],
+              [
+                15,
+                19,
+                17,
+                255,
+                51
+              ],
+              [
+                15,
+                20,
+                18,
+                255,
+                32
+              ]
+            ],
+            "maxChannelSpread": 133
+          }
+        },
+        {
+          "id": "zoom-label-100-percent",
+          "rect": [
+            1156,
+            727,
+            34,
+            14
+          ],
+          "measured": {
+            "pixels": 476,
+            "distinctRGBA": 111,
+            "top5RGBACount": [
+              [
+                30,
+                34,
+                35,
+                255,
+                176
+              ],
+              [
+                30,
+                33,
+                35,
+                255,
+                123
+              ],
+              [
+                30,
+                35,
+                35,
+                255,
+                17
+              ],
+              [
+                30,
+                34,
+                36,
+                255,
+                8
+              ],
+              [
+                120,
+                124,
+                125,
+                255,
+                5
+              ]
+            ],
+            "maxChannelSpread": 6
+          }
+        }
+      ],
+      "sha256": "20146d973d56e6b06a451077a7e59f97781b229ddcb17de43adaf005b8bcf8ee",
+      "bytes": 136277,
+      "width": 1264,
+      "height": 761,
+      "bitDepth": 8,
+      "pngColourType": 6,
+      "chunks": {
+        "order": [
+          "IHDR",
+          "sRGB",
+          "eXIf",
+          "IEND"
+        ],
+        "sRGBRenderingIntent": 0,
+        "hasICCP": false,
+        "IDATCount": 9
+      }
+    },
+    {
+      "file": "macos-context-menu-canvas-background.png",
+      "surface": "Canvas context menu (background)",
+      "state": "right-click on empty canvas",
+      "backingScaleFactor": 1.0,
+      "clientPoints": [
+        1264,
+        761
+      ],
+      "geometry": {
+        "windowFrameCG": [
+          -1800,
+          60,
+          1264,
+          761
+        ],
+        "captureSourceRectPoints": [
+          0,
+          0,
+          1264,
+          761
+        ],
+        "topInsetPoints": 0
+      },
+      "samples": [
+        {
+          "id": "canvas-background-open-cell",
+          "rect": [
+            580,
+            117,
+            47,
+            47
+          ],
+          "countRGB": [
+            [
+              10,
+              12,
+              11
+            ]
+          ],
+          "measured": {
+            "pixels": 2209,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                10,
+                12,
+                11,
+                255,
+                2209
+              ]
+            ],
+            "maxChannelSpread": 2,
+            "exactOpaqueRGBCounts": [
+              [
+                10,
+                12,
+                11,
+                2209
+              ]
+            ]
+          }
+        },
+        {
+          "id": "menu-body",
+          "rect": [
+            304,
+            127,
+            136,
+            134
+          ],
+          "measured": {
+            "pixels": 18224,
+            "distinctRGBA": 487,
+            "top5RGBACount": [
+              [
+                22,
+                23,
+                23,
+                255,
+                4805
+              ],
+              [
+                21,
+                23,
+                23,
+                255,
+                3803
+              ],
+              [
+                22,
+                24,
+                24,
+                255,
+                2306
+              ],
+              [
+                21,
+                23,
+                22,
+                255,
+                1566
+              ],
+              [
+                21,
+                24,
+                25,
+                255,
+                861
+              ]
+            ],
+            "maxChannelSpread": 5
+          }
+        }
+      ],
+      "sha256": "05be8c073bb1ac15c7c049bb73f2febfde7b0a393b6874d9a49bc4f3281c3286",
+      "bytes": 149464,
+      "width": 1264,
+      "height": 761,
+      "bitDepth": 8,
+      "pngColourType": 6,
+      "chunks": {
+        "order": [
+          "IHDR",
+          "sRGB",
+          "eXIf",
+          "IEND"
+        ],
+        "sRGBRenderingIntent": 0,
+        "hasICCP": false,
+        "IDATCount": 10
+      }
+    },
+    {
+      "file": "macos-context-menu-node.png",
+      "surface": "Canvas context menu (node)",
+      "state": "right-click on ReferenceLoopA card",
+      "backingScaleFactor": 1.0,
+      "clientPoints": [
+        1264,
+        761
+      ],
+      "geometry": {
+        "windowFrameCG": [
+          -1800,
+          60,
+          1264,
+          761
+        ],
+        "captureSourceRectPoints": [
+          0,
+          0,
+          1264,
+          761
+        ],
+        "topInsetPoints": 0
+      },
+      "samples": [
+        {
+          "id": "canvas-background-open-cell",
+          "rect": [
+            580,
+            117,
+            47,
+            47
+          ],
+          "countRGB": [
+            [
+              10,
+              12,
+              11
+            ]
+          ],
+          "measured": {
+            "pixels": 2209,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                10,
+                12,
+                11,
+                255,
+                2209
+              ]
+            ],
+            "maxChannelSpread": 2,
+            "exactOpaqueRGBCounts": [
+              [
+                10,
+                12,
+                11,
+                2209
+              ]
+            ]
+          }
+        },
+        {
+          "id": "menu-body",
+          "rect": [
+            604,
+            378,
+            152,
+            168
+          ],
+          "measured": {
+            "pixels": 25536,
+            "distinctRGBA": 840,
+            "top5RGBACount": [
+              [
+                22,
+                24,
+                23,
+                255,
+                4770
+              ],
+              [
+                21,
+                23,
+                22,
+                255,
+                3531
+              ],
+              [
+                23,
+                25,
+                24,
+                255,
+                1882
+              ],
+              [
+                22,
+                25,
+                24,
+                255,
+                1692
+              ],
+              [
+                22,
+                24,
+                24,
+                255,
+                1343
+              ]
+            ],
+            "maxChannelSpread": 19
+          }
+        }
+      ],
+      "sha256": "c0113b591d5b32bbf3c1d2578867d6f0c07892cf3a618aa3c708d6cd30363f85",
+      "bytes": 154975,
+      "width": 1264,
+      "height": 761,
+      "bitDepth": 8,
+      "pngColourType": 6,
+      "chunks": {
+        "order": [
+          "IHDR",
+          "sRGB",
+          "eXIf",
+          "IEND"
+        ],
+        "sRGBRenderingIntent": 0,
+        "hasICCP": false,
+        "IDATCount": 10
+      }
+    },
+    {
+      "file": "macos-context-menu-edge.png",
+      "surface": "Canvas context menu (edge)",
+      "state": "right-click on A->B edge",
+      "backingScaleFactor": 1.0,
+      "clientPoints": [
+        1264,
+        761
+      ],
+      "geometry": {
+        "windowFrameCG": [
+          -1800,
+          60,
+          1264,
+          761
+        ],
+        "captureSourceRectPoints": [
+          0,
+          0,
+          1264,
+          761
+        ],
+        "topInsetPoints": 0
+      },
+      "samples": [
+        {
+          "id": "canvas-background-open-cell",
+          "rect": [
+            580,
+            117,
+            47,
+            47
+          ],
+          "countRGB": [
+            [
+              10,
+              12,
+              11
+            ]
+          ],
+          "measured": {
+            "pixels": 2209,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                10,
+                12,
+                11,
+                255,
+                2209
+              ]
+            ],
+            "maxChannelSpread": 2,
+            "exactOpaqueRGBCounts": [
+              [
+                10,
+                12,
+                11,
+                2209
+              ]
+            ]
+          }
+        },
+        {
+          "id": "menu-body",
+          "rect": [
+            834,
+            358,
+            128,
+            52
+          ],
+          "measured": {
+            "pixels": 6656,
+            "distinctRGBA": 433,
+            "top5RGBACount": [
+              [
+                39,
+                39,
+                41,
+                255,
+                1978
+              ],
+              [
+                38,
+                38,
+                40,
+                255,
+                914
+              ],
+              [
+                39,
+                39,
+                40,
+                255,
+                207
+              ],
+              [
+                40,
+                40,
+                42,
+                255,
+                165
+              ],
+              [
+                41,
+                41,
+                43,
+                255,
+                156
+              ]
+            ],
+            "maxChannelSpread": 35
+          }
+        }
+      ],
+      "sha256": "6dcfdda68954ffc383bd236d92dbca4b1fe9be058f14049fab4af6613eb4c590",
+      "bytes": 140597,
+      "width": 1264,
+      "height": 761,
+      "bitDepth": 8,
+      "pngColourType": 6,
+      "chunks": {
+        "order": [
+          "IHDR",
+          "sRGB",
+          "eXIf",
+          "IEND"
+        ],
+        "sRGBRenderingIntent": 0,
+        "hasICCP": false,
+        "IDATCount": 9
+      }
+    },
+    {
+      "file": "macos-node-creation-sheet-main.png",
+      "surface": "Node creation sheet",
+      "state": "opened by New Node; Main selected (default)",
+      "backingScaleFactor": 1.0,
+      "clientPoints": [
+        1264,
+        761
+      ],
+      "geometry": {
+        "windowFrameCG": [
+          -1800,
+          60,
+          1264,
+          761
+        ],
+        "captureSourceRectPoints": [
+          0,
+          0,
+          1264,
+          761
+        ],
+        "topInsetPoints": 0
+      },
+      "samples": [
+        {
+          "id": "sheet-background",
+          "rect": [
+            420,
+            630,
+            400,
+            80
+          ],
+          "countRGB": [
+            [
+              42,
+              42,
+              46
+            ]
+          ],
+          "measured": {
+            "pixels": 32000,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                42,
+                42,
+                46,
+                255,
+                32000
+              ]
+            ],
+            "maxChannelSpread": 4,
+            "exactOpaqueRGBCounts": [
+              [
+                42,
+                42,
+                46,
+                32000
+              ]
+            ]
+          }
+        },
+        {
+          "id": "dimmed-canvas-behind-sheet",
+          "rect": [
+            1150,
+            200,
+            80,
+            80
+          ],
+          "measured": {
+            "pixels": 6400,
+            "distinctRGBA": 2,
+            "top5RGBACount": [
+              [
+                17,
+                18,
+                19,
+                255,
+                6084
+              ],
+              [
+                22,
+                23,
+                23,
+                255,
+                316
+              ]
+            ],
+            "maxChannelSpread": 2
+          }
+        },
+        {
+          "id": "dimmed-sidebar-behind-sheet",
+          "rect": [
+            20,
+            300,
+            200,
+            400
+          ],
+          "measured": {
+            "pixels": 80000,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                21,
+                22,
+                22,
+                255,
+                80000
+              ]
+            ],
+            "maxChannelSpread": 1
+          }
+        },
+        {
+          "id": "sheet-title-new-node-glyphs",
+          "rect": [
+            394,
+            74,
+            80,
+            18
+          ],
+          "measured": {
+            "pixels": 1440,
+            "distinctRGBA": 155,
+            "top5RGBACount": [
+              [
+                42,
+                42,
+                46,
+                255,
+                811
+              ],
+              [
+                223,
+                223,
+                223,
+                255,
+                254
+              ],
+              [
+                198,
+                198,
+                199,
+                255,
+                17
+              ],
+              [
+                102,
+                102,
+                105,
+                255,
+                13
+              ],
+              [
+                137,
+                137,
+                139,
+                255,
+                10
+              ]
+            ],
+            "maxChannelSpread": 4
+          }
+        },
+        {
+          "id": "start-button",
+          "rect": [
+            797,
+            723,
+            73,
+            32
+          ],
+          "measured": {
+            "pixels": 2336,
+            "distinctRGBA": 142,
+            "top5RGBACount": [
+              [
+                10,
+                132,
+                255,
+                255,
+                1953
+              ],
+              [
+                255,
+                255,
+                255,
+                255,
+                57
+              ],
+              [
+                42,
+                42,
+                46,
+                255,
+                24
+              ],
+              [
+                115,
+                185,
+                255,
+                255,
+                11
+              ],
+              [
+                11,
+                130,
+                250,
+                255,
+                8
+              ]
+            ],
+            "maxChannelSpread": 245
+          }
+        }
+      ],
+      "notes": "sheet window 520x721 at client (372,52); its bottom 12 points extend past the client and are not in the capture",
+      "sha256": "d2d81934dcff5a231e9782bba4625e47239acfd9e3f1e070b7c5c38d8f73fc01",
+      "bytes": 159110,
+      "width": 1264,
+      "height": 761,
+      "bitDepth": 8,
+      "pngColourType": 6,
+      "chunks": {
+        "order": [
+          "IHDR",
+          "sRGB",
+          "eXIf",
+          "IEND"
+        ],
+        "sRGBRenderingIntent": 0,
+        "hasICCP": false,
+        "IDATCount": 10
+      }
+    },
+    {
+      "file": "macos-node-creation-sheet-goal-top.png",
+      "surface": "Node creation sheet",
+      "state": "Goal selected, done text typed, name empty; validation reason visible",
+      "backingScaleFactor": 1.0,
+      "clientPoints": [
+        1264,
+        761
+      ],
+      "geometry": {
+        "windowFrameCG": [
+          -1800,
+          60,
+          1264,
+          761
+        ],
+        "captureSourceRectPoints": [
+          0,
+          0,
+          1264,
+          761
+        ],
+        "topInsetPoints": 0
+      },
+      "samples": [
+        {
+          "id": "dimmed-canvas-behind-sheet",
+          "rect": [
+            1150,
+            200,
+            80,
+            80
+          ],
+          "measured": {
+            "pixels": 6400,
+            "distinctRGBA": 2,
+            "top5RGBACount": [
+              [
+                17,
+                18,
+                19,
+                255,
+                6084
+              ],
+              [
+                22,
+                23,
+                23,
+                255,
+                316
+              ]
+            ],
+            "maxChannelSpread": 2
+          }
+        },
+        {
+          "id": "dimmed-sidebar-behind-sheet",
+          "rect": [
+            20,
+            300,
+            200,
+            400
+          ],
+          "measured": {
+            "pixels": 80000,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                21,
+                22,
+                22,
+                255,
+                80000
+              ]
+            ],
+            "maxChannelSpread": 1
+          }
+        },
+        {
+          "id": "sheet-title-new-node-glyphs",
+          "rect": [
+            394,
+            74,
+            80,
+            18
+          ],
+          "measured": {
+            "pixels": 1440,
+            "distinctRGBA": 155,
+            "top5RGBACount": [
+              [
+                42,
+                42,
+                46,
+                255,
+                811
+              ],
+              [
+                223,
+                223,
+                223,
+                255,
+                254
+              ],
+              [
+                198,
+                198,
+                199,
+                255,
+                17
+              ],
+              [
+                102,
+                102,
+                105,
+                255,
+                13
+              ],
+              [
+                137,
+                137,
+                139,
+                255,
+                10
+              ]
+            ],
+            "maxChannelSpread": 4
+          }
+        },
+        {
+          "id": "goal-option-selected-body",
+          "rect": [
+            560,
+            236,
+            60,
+            8
+          ],
+          "measured": {
+            "pixels": 480,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                40,
+                56,
+                54,
+                255,
+                480
+              ]
+            ],
+            "maxChannelSpread": 16
+          }
+        },
+        {
+          "id": "create-loop-disabled-button",
+          "rect": [
+            756,
+            724,
+            114,
+            30
+          ],
+          "measured": {
+            "pixels": 3420,
+            "distinctRGBA": 96,
+            "top5RGBACount": [
+              [
+                37,
+                55,
+                75,
+                255,
+                2832
+              ],
+              [
+                83,
+                97,
+                113,
+                255,
+                133
+              ],
+              [
+                38,
+                56,
+                76,
+                255,
+                23
+              ],
+              [
+                76,
+                91,
+                107,
+                255,
+                17
+              ],
+              [
+                44,
+                61,
+                81,
+                255,
+                13
+              ]
+            ],
+            "maxChannelSpread": 38
+          }
+        },
+        {
+          "id": "validation-reason-glyphs",
+          "rect": [
+            544,
+            731,
+            200,
+            16
+          ],
+          "measured": {
+            "pixels": 3200,
+            "distinctRGBA": 149,
+            "top5RGBACount": [
+              [
+                42,
+                42,
+                46,
+                255,
+                2071
+              ],
+              [
+                174,
+                174,
+                176,
+                255,
+                134
+              ],
+              [
+                71,
+                71,
+                75,
+                255,
+                32
+              ],
+              [
+                115,
+                115,
+                117,
+                255,
+                25
+              ],
+              [
+                160,
+                160,
+                161,
+                255,
+                23
+              ]
+            ],
+            "maxChannelSpread": 4
+          }
+        }
+      ],
+      "notes": "sheet window 520x721 at client (372,52); its bottom 12 points extend past the client and are not in the capture",
+      "sha256": "303d8873e0a1417f3f5f5932600233263ee2ce67e0dd3484b8539e85f6ac989d",
+      "bytes": 162327,
+      "width": 1264,
+      "height": 761,
+      "bitDepth": 8,
+      "pngColourType": 6,
+      "chunks": {
+        "order": [
+          "IHDR",
+          "sRGB",
+          "eXIf",
+          "IEND"
+        ],
+        "sRGBRenderingIntent": 0,
+        "hasICCP": false,
+        "IDATCount": 10
+      }
+    },
+    {
+      "file": "macos-node-creation-sheet-goal-scrolled.png",
+      "surface": "Node creation sheet",
+      "state": "Goal selected, scrolled to recap",
+      "backingScaleFactor": 1.0,
+      "clientPoints": [
+        1264,
+        761
+      ],
+      "geometry": {
+        "windowFrameCG": [
+          -1800,
+          60,
+          1264,
+          761
+        ],
+        "captureSourceRectPoints": [
+          0,
+          0,
+          1264,
+          761
+        ],
+        "topInsetPoints": 0
+      },
+      "samples": [
+        {
+          "id": "dimmed-canvas-behind-sheet",
+          "rect": [
+            1150,
+            200,
+            80,
+            80
+          ],
+          "measured": {
+            "pixels": 6400,
+            "distinctRGBA": 2,
+            "top5RGBACount": [
+              [
+                17,
+                18,
+                19,
+                255,
+                6084
+              ],
+              [
+                22,
+                23,
+                23,
+                255,
+                316
+              ]
+            ],
+            "maxChannelSpread": 2
+          }
+        },
+        {
+          "id": "dimmed-sidebar-behind-sheet",
+          "rect": [
+            20,
+            300,
+            200,
+            400
+          ],
+          "measured": {
+            "pixels": 80000,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                21,
+                22,
+                22,
+                255,
+                80000
+              ]
+            ],
+            "maxChannelSpread": 1
+          }
+        },
+        {
+          "id": "create-loop-disabled-button",
+          "rect": [
+            756,
+            724,
+            114,
+            30
+          ],
+          "measured": {
+            "pixels": 3420,
+            "distinctRGBA": 96,
+            "top5RGBACount": [
+              [
+                37,
+                55,
+                75,
+                255,
+                2832
+              ],
+              [
+                83,
+                97,
+                113,
+                255,
+                133
+              ],
+              [
+                38,
+                56,
+                76,
+                255,
+                23
+              ],
+              [
+                76,
+                91,
+                107,
+                255,
+                17
+              ],
+              [
+                44,
+                61,
+                81,
+                255,
+                13
+              ]
+            ],
+            "maxChannelSpread": 38
+          }
+        }
+      ],
+      "notes": "sheet window 520x721 at client (372,52); its bottom 12 points extend past the client and are not in the capture",
+      "sha256": "ccbbb1dd0dab29a1e6d53ce0e9ed8a95557d749ab09af21a3024d508d77b9106",
+      "bytes": 161732,
+      "width": 1264,
+      "height": 761,
+      "bitDepth": 8,
+      "pngColourType": 6,
+      "chunks": {
+        "order": [
+          "IHDR",
+          "sRGB",
+          "eXIf",
+          "IEND"
+        ],
+        "sRGBRenderingIntent": 0,
+        "hasICCP": false,
+        "IDATCount": 10
+      }
+    },
+    {
+      "file": "macos-workspace-single-pane-disconnected.png",
+      "surface": "Loop workspace, single agent pane",
+      "state": "daemon disconnected; agent pane after await-daemon timeout",
+      "backingScaleFactor": 1.0,
+      "clientPoints": [
+        1264,
+        761
+      ],
+      "geometry": {
+        "windowFrameCG": [
+          -1800,
+          60,
+          1264,
+          761
+        ],
+        "captureSourceRectPoints": [
+          0,
+          0,
+          1264,
+          761
+        ],
+        "topInsetPoints": 0
+      },
+      "samples": [
+        {
+          "id": "windows-focus-roi-applied-to-macos",
+          "rect": [
+            500,
+            130,
+            64,
+            2
+          ],
+          "countRGB": [
+            [
+              10,
+              132,
+              255
+            ]
+          ],
+          "measured": {
+            "pixels": 128,
+            "distinctRGBA": 8,
+            "top5RGBACount": [
+              [
+                31,
+                31,
+                32,
+                255,
+                66
+              ],
+              [
+                31,
+                32,
+                32,
+                255,
+                24
+              ],
+              [
+                31,
+                31,
+                31,
+                255,
+                20
+              ],
+              [
+                30,
+                31,
+                32,
+                255,
+                6
+              ],
+              [
+                30,
+                31,
+                31,
+                255,
+                4
+              ]
+            ],
+            "maxChannelSpread": 2,
+            "exactOpaqueRGBCounts": [
+              [
+                10,
+                132,
+                255,
+                0
+              ]
+            ]
+          }
+        },
+        {
+          "id": "focus-dot-core",
+          "rect": [
+            257,
+            145,
+            3,
+            3
+          ],
+          "countRGB": [
+            [
+              10,
+              132,
+              255
+            ]
+          ],
+          "measured": {
+            "pixels": 9,
+            "distinctRGBA": 3,
+            "top5RGBACount": [
+              [
+                10,
+                124,
+                238,
+                255,
+                3
+              ],
+              [
+                10,
+                124,
+                239,
+                255,
+                3
+              ],
+              [
+                10,
+                125,
+                240,
+                255,
+                3
+              ]
+            ],
+            "maxChannelSpread": 230,
+            "exactOpaqueRGBCounts": [
+              [
+                10,
+                132,
+                255,
+                0
+              ]
+            ]
+          }
+        },
+        {
+          "id": "focused-pane-header-tint",
+          "rect": [
+            400,
+            136,
+            700,
+            19
+          ],
+          "measured": {
+            "pixels": 13300,
+            "distinctRGBA": 4,
+            "top5RGBACount": [
+              [
+                32,
+                46,
+                59,
+                255,
+                10347
+              ],
+              [
+                32,
+                46,
+                60,
+                255,
+                1443
+              ],
+              [
+                32,
+                47,
+                59,
+                255,
+                1400
+              ],
+              [
+                32,
+                47,
+                60,
+                255,
+                110
+              ]
+            ],
+            "maxChannelSpread": 28
+          }
+        },
+        {
+          "id": "focused-terminal-background",
+          "rect": [
+            400,
+            400,
+            600,
+            300
+          ],
+          "countRGB": [
+            [
+              15,
+              17,
+              16
+            ]
+          ],
+          "measured": {
+            "pixels": 180000,
+            "distinctRGBA": 2,
+            "top5RGBACount": [
+              [
+                15,
+                17,
+                16,
+                255,
+                159534
+              ],
+              [
+                15,
+                17,
+                17,
+                255,
+                20466
+              ]
+            ],
+            "maxChannelSpread": 2,
+            "exactOpaqueRGBCounts": [
+              [
+                15,
+                17,
+                16,
+                159534
+              ]
+            ]
+          }
+        },
+        {
+          "id": "terminal-line-process-exited",
+          "rect": [
+            249,
+            263,
+            370,
+            15
+          ],
+          "measured": {
+            "pixels": 5550,
+            "distinctRGBA": 275,
+            "top5RGBACount": [
+              [
+                15,
+                17,
+                16,
+                255,
+                3653
+              ],
+              [
+                15,
+                17,
+                17,
+                255,
+                465
+              ],
+              [
+                27,
+                29,
+                29,
+                255,
+                43
+              ],
+              [
+                120,
+                121,
+                120,
+                255,
+                35
+              ],
+              [
+                19,
+                22,
+                21,
+                255,
+                32
+              ]
+            ],
+            "maxChannelSpread": 3
+          }
+        }
+      ],
+      "sha256": "6017de38c6f99319267e7f1836683d3defb1024de21d36a0f22d32dffd835aed",
+      "bytes": 285288,
+      "width": 1264,
+      "height": 761,
+      "bitDepth": 8,
+      "pngColourType": 6,
+      "chunks": {
+        "order": [
+          "IHDR",
+          "sRGB",
+          "eXIf",
+          "IEND"
+        ],
+        "sRGBRenderingIntent": 0,
+        "hasICCP": false,
+        "IDATCount": 18
+      }
+    },
+    {
+      "file": "macos-workspace-focus-terminal.png",
+      "surface": "Loop workspace, split, shell pane focused; terminal glyph text",
+      "state": "daemon disconnected; right shell pane focused, glyph test lines printed",
+      "backingScaleFactor": 1.0,
+      "clientPoints": [
+        1264,
+        761
+      ],
+      "geometry": {
+        "windowFrameCG": [
+          -1800,
+          60,
+          1264,
+          761
+        ],
+        "captureSourceRectPoints": [
+          0,
+          0,
+          1264,
+          761
+        ],
+        "topInsetPoints": 0
+      },
+      "samples": [
+        {
+          "id": "windows-focus-roi-applied-to-macos",
+          "rect": [
+            500,
+            130,
+            64,
+            2
+          ],
+          "countRGB": [
+            [
+              10,
+              132,
+              255
+            ]
+          ],
+          "measured": {
+            "pixels": 128,
+            "distinctRGBA": 8,
+            "top5RGBACount": [
+              [
+                31,
+                31,
+                32,
+                255,
+                66
+              ],
+              [
+                31,
+                32,
+                32,
+                255,
+                24
+              ],
+              [
+                31,
+                31,
+                31,
+                255,
+                20
+              ],
+              [
+                30,
+                31,
+                32,
+                255,
+                6
+              ],
+              [
+                30,
+                31,
+                31,
+                255,
+                4
+              ]
+            ],
+            "maxChannelSpread": 2,
+            "exactOpaqueRGBCounts": [
+              [
+                10,
+                132,
+                255,
+                0
+              ]
+            ]
+          }
+        },
+        {
+          "id": "focus-dot-core",
+          "rect": [
+            766,
+            145,
+            3,
+            3
+          ],
+          "countRGB": [
+            [
+              10,
+              132,
+              255
+            ]
+          ],
+          "measured": {
+            "pixels": 9,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                10,
+                132,
+                255,
+                255,
+                9
+              ]
+            ],
+            "maxChannelSpread": 245,
+            "exactOpaqueRGBCounts": [
+              [
+                10,
+                132,
+                255,
+                9
+              ]
+            ]
+          }
+        },
+        {
+          "id": "focus-dot-extent",
+          "rect": [
+            764,
+            143,
+            7,
+            7
+          ],
+          "countRGB": [
+            [
+              10,
+              132,
+              255
+            ]
+          ],
+          "measured": {
+            "pixels": 49,
+            "distinctRGBA": 12,
+            "top5RGBACount": [
+              [
+                32,
+                46,
+                59,
+                255,
+                22
+              ],
+              [
+                10,
+                132,
+                255,
+                255,
+                9
+              ],
+              [
+                12,
+                124,
+                236,
+                255,
+                4
+              ],
+              [
+                15,
+                111,
+                206,
+                255,
+                2
+              ],
+              [
+                16,
+                109,
+                202,
+                255,
+                2
+              ]
+            ],
+            "maxChannelSpread": 245,
+            "exactOpaqueRGBCounts": [
+              [
+                10,
+                132,
+                255,
+                9
+              ]
+            ]
+          }
+        },
+        {
+          "id": "focused-pane-header-tint",
+          "rect": [
+            900,
+            136,
+            300,
+            19
+          ],
+          "countRGB": [
+            [
+              32,
+              46,
+              59
+            ]
+          ],
+          "measured": {
+            "pixels": 5700,
+            "distinctRGBA": 7,
+            "top5RGBACount": [
+              [
+                32,
+                46,
+                59,
+                255,
+                4348
+              ],
+              [
+                32,
+                46,
+                60,
+                255,
+                571
+              ],
+              [
+                32,
+                47,
+                59,
+                255,
+                556
+              ],
+              [
+                32,
+                47,
+                60,
+                255,
+                174
+              ],
+              [
+                32,
+                46,
+                58,
+                255,
+                44
+              ]
+            ],
+            "maxChannelSpread": 28,
+            "exactOpaqueRGBCounts": [
+              [
+                32,
+                46,
+                59,
+                4348
+              ]
+            ]
+          }
+        },
+        {
+          "id": "unfocused-pane-header",
+          "rect": [
+            320,
+            136,
+            300,
+            19
+          ],
+          "countRGB": [
+            [
+              42,
+              43,
+              44
+            ]
+          ],
+          "measured": {
+            "pixels": 5700,
+            "distinctRGBA": 4,
+            "top5RGBACount": [
+              [
+                42,
+                43,
+                44,
+                255,
+                4437
+              ],
+              [
+                42,
+                43,
+                45,
+                255,
+                615
+              ],
+              [
+                42,
+                44,
+                44,
+                255,
+                602
+              ],
+              [
+                42,
+                44,
+                45,
+                255,
+                46
+              ]
+            ],
+            "maxChannelSpread": 3,
+            "exactOpaqueRGBCounts": [
+              [
+                42,
+                43,
+                44,
+                4437
+              ]
+            ]
+          }
+        },
+        {
+          "id": "focused-header-bottom-row",
+          "rect": [
+            800,
+            156,
+            400,
+            1
+          ],
+          "measured": {
+            "pixels": 400,
+            "distinctRGBA": 5,
+            "top5RGBACount": [
+              [
+                29,
+                58,
+                86,
+                255,
+                317
+              ],
+              [
+                29,
+                59,
+                86,
+                255,
+                37
+              ],
+              [
+                29,
+                58,
+                87,
+                255,
+                35
+              ],
+              [
+                29,
+                59,
+                87,
+                255,
+                10
+              ],
+              [
+                30,
+                59,
+                87,
+                255,
+                1
+              ]
+            ],
+            "maxChannelSpread": 58
+          }
+        },
+        {
+          "id": "pane-divider-column",
+          "rect": [
+            756,
+            300,
+            1,
+            400
+          ],
+          "measured": {
+            "pixels": 400,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                62,
+                80,
+                98,
+                255,
+                400
+              ]
+            ],
+            "maxChannelSpread": 36
+          }
+        },
+        {
+          "id": "focused-ring-left-column",
+          "rect": [
+            757,
+            300,
+            1,
+            400
+          ],
+          "countRGB": [
+            [
+              14,
+              33,
+              50
+            ]
+          ],
+          "measured": {
+            "pixels": 400,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                14,
+                33,
+                50,
+                255,
+                400
+              ]
+            ],
+            "maxChannelSpread": 36,
+            "exactOpaqueRGBCounts": [
+              [
+                14,
+                33,
+                50,
+                400
+              ]
+            ]
+          }
+        },
+        {
+          "id": "focused-ring-right-column",
+          "rect": [
+            1263,
+            300,
+            1,
+            400
+          ],
+          "countRGB": [
+            [
+              14,
+              33,
+              50
+            ]
+          ],
+          "measured": {
+            "pixels": 400,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                14,
+                33,
+                50,
+                255,
+                400
+              ]
+            ],
+            "maxChannelSpread": 36,
+            "exactOpaqueRGBCounts": [
+              [
+                14,
+                33,
+                50,
+                400
+              ]
+            ]
+          }
+        },
+        {
+          "id": "focused-ring-bottom-row",
+          "rect": [
+            800,
+            760,
+            400,
+            1
+          ],
+          "countRGB": [
+            [
+              14,
+              33,
+              50
+            ]
+          ],
+          "measured": {
+            "pixels": 400,
+            "distinctRGBA": 2,
+            "top5RGBACount": [
+              [
+                14,
+                33,
+                50,
+                255,
+                399
+              ],
+              [
+                13,
+                33,
+                50,
+                255,
+                1
+              ]
+            ],
+            "maxChannelSpread": 37,
+            "exactOpaqueRGBCounts": [
+              [
+                14,
+                33,
+                50,
+                399
+              ]
+            ]
+          }
+        },
+        {
+          "id": "focused-terminal-background",
+          "rect": [
+            900,
+            400,
+            300,
+            300
+          ],
+          "countRGB": [
+            [
+              15,
+              17,
+              16
+            ],
+            [
+              15,
+              17,
+              17
+            ]
+          ],
+          "measured": {
+            "pixels": 90000,
+            "distinctRGBA": 3,
+            "top5RGBACount": [
+              [
+                15,
+                17,
+                16,
+                255,
+                77902
+              ],
+              [
+                15,
+                17,
+                17,
+                255,
+                11583
+              ],
+              [
+                14,
+                17,
+                16,
+                255,
+                515
+              ]
+            ],
+            "maxChannelSpread": 3,
+            "exactOpaqueRGBCounts": [
+              [
+                15,
+                17,
+                16,
+                77902
+              ],
+              [
+                15,
+                17,
+                17,
+                11583
+              ]
+            ]
+          }
+        },
+        {
+          "id": "unfocused-terminal-background",
+          "rect": [
+            300,
+            400,
+            300,
+            300
+          ],
+          "countRGB": [
+            [
+              20,
+              22,
+              21
+            ]
+          ],
+          "measured": {
+            "pixels": 90000,
+            "distinctRGBA": 2,
+            "top5RGBACount": [
+              [
+                20,
+                22,
+                21,
+                255,
+                79766
+              ],
+              [
+                20,
+                22,
+                22,
+                255,
+                10234
+              ]
+            ],
+            "maxChannelSpread": 2,
+            "exactOpaqueRGBCounts": [
+              [
+                20,
+                22,
+                21,
+                79766
+              ]
+            ]
+          }
+        },
+        {
+          "id": "terminal-line1-pangram-lower",
+          "rect": [
+            759,
+            158,
+            310,
+            15
+          ],
+          "measured": {
+            "pixels": 4650,
+            "distinctRGBA": 251,
+            "top5RGBACount": [
+              [
+                15,
+                17,
+                16,
+                255,
+                3092
+              ],
+              [
+                15,
+                17,
+                17,
+                255,
+                375
+              ],
+              [
+                240,
+                241,
+                241,
+                255,
+                39
+              ],
+              [
+                19,
+                22,
+                21,
+                255,
+                28
+              ],
+              [
+                238,
+                239,
+                239,
+                255,
+                27
+              ]
+            ],
+            "maxChannelSpread": 3
+          }
+        },
+        {
+          "id": "terminal-line2-pangram-upper-digits",
+          "rect": [
+            759,
+            173,
+            380,
+            15
+          ],
+          "measured": {
+            "pixels": 5700,
+            "distinctRGBA": 273,
+            "top5RGBACount": [
+              [
+                15,
+                17,
+                16,
+                255,
+                3433
+              ],
+              [
+                15,
+                17,
+                17,
+                255,
+                539
+              ],
+              [
+                145,
+                146,
+                145,
+                255,
+                55
+              ],
+              [
+                238,
+                239,
+                239,
+                255,
+                43
+              ],
+              [
+                240,
+                241,
+                241,
+                255,
+                37
+              ]
+            ],
+            "maxChannelSpread": 3
+          }
+        },
+        {
+          "id": "terminal-line3-ascii-symbols",
+          "rect": [
+            759,
+            188,
+            225,
+            15
+          ],
+          "measured": {
+            "pixels": 3375,
+            "distinctRGBA": 251,
+            "top5RGBACount": [
+              [
+                15,
+                17,
+                16,
+                255,
+                2227
+              ],
+              [
+                15,
+                17,
+                17,
+                255,
+                261
+              ],
+              [
+                19,
+                22,
+                21,
+                255,
+                26
+              ],
+              [
+                255,
+                255,
+                255,
+                255,
+                25
+              ],
+              [
+                16,
+                18,
+                17,
+                255,
+                19
+              ]
+            ],
+            "maxChannelSpread": 3
+          }
+        },
+        {
+          "id": "terminal-line4-confusables",
+          "rect": [
+            759,
+            203,
+            180,
+            15
+          ],
+          "measured": {
+            "pixels": 2700,
+            "distinctRGBA": 221,
+            "top5RGBACount": [
+              [
+                15,
+                17,
+                16,
+                255,
+                1713
+              ],
+              [
+                15,
+                17,
+                17,
+                255,
+                233
+              ],
+              [
+                22,
+                25,
+                24,
+                255,
+                21
+              ],
+              [
+                255,
+                255,
+                255,
+                255,
+                20
+              ],
+              [
+                19,
+                22,
+                21,
+                255,
+                17
+              ]
+            ],
+            "maxChannelSpread": 3
+          }
+        },
+        {
+          "id": "terminal-line5-arrows-marks-box",
+          "rect": [
+            759,
+            218,
+            140,
+            15
+          ],
+          "measured": {
+            "pixels": 2100,
+            "distinctRGBA": 108,
+            "top5RGBACount": [
+              [
+                15,
+                17,
+                16,
+                255,
+                1672
+              ],
+              [
+                15,
+                17,
+                17,
+                255,
+                205
+              ],
+              [
+                255,
+                255,
+                255,
+                255,
+                63
+              ],
+              [
+                160,
+                162,
+                162,
+                255,
+                8
+              ],
+              [
+                31,
+                34,
+                33,
+                255,
+                6
+              ]
+            ],
+            "maxChannelSpread": 3
+          }
+        },
+        {
+          "id": "terminal-line6-bold-italic-ansi",
+          "rect": [
+            759,
+            233,
+            325,
+            15
+          ],
+          "measured": {
+            "pixels": 4875,
+            "distinctRGBA": 704,
+            "top5RGBACount": [
+              [
+                15,
+                17,
+                16,
+                255,
+                3134
+              ],
+              [
+                15,
+                17,
+                17,
+                255,
+                405
+              ],
+              [
+                255,
+                255,
+                255,
+                255,
+                33
+              ],
+              [
+                17,
+                20,
+                19,
+                255,
+                12
+              ],
+              [
+                153,
+                128,
+                78,
+                255,
+                12
+              ]
+            ],
+            "maxChannelSpread": 124
+          }
+        }
+      ],
+      "sha256": "07981c553dfd6c55c515322c14e79fffa4441b16b1af638340cfaf948e6a841f",
+      "bytes": 302738,
+      "width": 1264,
+      "height": 761,
+      "bitDepth": 8,
+      "pngColourType": 6,
+      "chunks": {
+        "order": [
+          "IHDR",
+          "sRGB",
+          "eXIf",
+          "IEND"
+        ],
+        "sRGBRenderingIntent": 0,
+        "hasICCP": false,
+        "IDATCount": 19
+      }
+    },
+    {
+      "file": "macos-settings-1.png",
+      "surface": "Product Settings (GraphCode Settings window, opened with Command-comma), scrolled top",
+      "state": "client only (32-point title bar excluded)",
+      "backingScaleFactor": 1.0,
+      "clientPoints": [
+        900,
+        998
+      ],
+      "geometry": {
+        "windowFrameCG": [
+          -1410,
+          0,
+          900,
+          1030
+        ],
+        "captureSourceRectPoints": [
+          0,
+          32,
+          900,
+          998
+        ],
+        "topInsetPoints": 32
+      },
+      "samples": [
+        {
+          "id": "settings-window-background",
+          "rect": [
+            0,
+            10,
+            90,
+            390
+          ],
+          "countRGB": [
+            [
+              35,
+              41,
+              43
+            ]
+          ],
+          "measured": {
+            "pixels": 35100,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                35,
+                41,
+                43,
+                255,
+                35100
+              ]
+            ],
+            "maxChannelSpread": 8,
+            "exactOpaqueRGBCounts": [
+              [
+                35,
+                41,
+                43,
+                35100
+              ]
+            ]
+          }
+        },
+        {
+          "id": "settings-card-row-empty",
+          "rect": [
+            300,
+            52,
+            300,
+            34
+          ],
+          "measured": {
+            "pixels": 10200,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                42,
+                47,
+                49,
+                255,
+                10200
+              ]
+            ],
+            "maxChannelSpread": 7
+          }
+        }
+      ],
+      "sha256": "6627c33aecf5f93a47909a2a3b331e87893787295a00ed816f86baa1a7ba65fe",
+      "bytes": 144033,
+      "width": 900,
+      "height": 998,
+      "bitDepth": 8,
+      "pngColourType": 6,
+      "chunks": {
+        "order": [
+          "IHDR",
+          "sRGB",
+          "eXIf",
+          "IEND"
+        ],
+        "sRGBRenderingIntent": 0,
+        "hasICCP": false,
+        "IDATCount": 9
+      }
+    },
+    {
+      "file": "macos-settings-2.png",
+      "surface": "Product Settings, scrolled middle",
+      "state": "client only",
+      "backingScaleFactor": 1.0,
+      "clientPoints": [
+        900,
+        998
+      ],
+      "geometry": {
+        "windowFrameCG": [
+          -1410,
+          0,
+          900,
+          1030
+        ],
+        "captureSourceRectPoints": [
+          0,
+          32,
+          900,
+          998
+        ],
+        "topInsetPoints": 32
+      },
+      "samples": [
+        {
+          "id": "settings-window-background",
+          "rect": [
+            0,
+            10,
+            90,
+            390
+          ],
+          "countRGB": [
+            [
+              35,
+              41,
+              43
+            ]
+          ],
+          "measured": {
+            "pixels": 35100,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                35,
+                41,
+                43,
+                255,
+                35100
+              ]
+            ],
+            "maxChannelSpread": 8,
+            "exactOpaqueRGBCounts": [
+              [
+                35,
+                41,
+                43,
+                35100
+              ]
+            ]
+          }
+        }
+      ],
+      "sha256": "d5b7a2691f40ca232cc1aea4189de37d431446406ad586eb4bd3ccfe3f1b89a5",
+      "bytes": 183306,
+      "width": 900,
+      "height": 998,
+      "bitDepth": 8,
+      "pngColourType": 6,
+      "chunks": {
+        "order": [
+          "IHDR",
+          "sRGB",
+          "eXIf",
+          "IEND"
+        ],
+        "sRGBRenderingIntent": 0,
+        "hasICCP": false,
+        "IDATCount": 12
+      }
+    },
+    {
+      "file": "macos-settings-3.png",
+      "surface": "Product Settings, scrolled bottom",
+      "state": "client only",
+      "backingScaleFactor": 1.0,
+      "clientPoints": [
+        900,
+        998
+      ],
+      "geometry": {
+        "windowFrameCG": [
+          -1410,
+          0,
+          900,
+          1030
+        ],
+        "captureSourceRectPoints": [
+          0,
+          32,
+          900,
+          998
+        ],
+        "topInsetPoints": 32
+      },
+      "samples": [
+        {
+          "id": "settings-window-background",
+          "rect": [
+            0,
+            10,
+            90,
+            390
+          ],
+          "countRGB": [
+            [
+              35,
+              41,
+              43
+            ]
+          ],
+          "measured": {
+            "pixels": 35100,
+            "distinctRGBA": 1,
+            "top5RGBACount": [
+              [
+                35,
+                41,
+                43,
+                255,
+                35100
+              ]
+            ],
+            "maxChannelSpread": 8,
+            "exactOpaqueRGBCounts": [
+              [
+                35,
+                41,
+                43,
+                35100
+              ]
+            ]
+          }
+        }
+      ],
+      "sha256": "8d8778340c6b9473a94e8cf4aeb365f371951bbf3642a4a89857e537e1561237",
+      "bytes": 149031,
+      "width": 900,
+      "height": 998,
+      "bitDepth": 8,
+      "pngColourType": 6,
+      "chunks": {
+        "order": [
+          "IHDR",
+          "sRGB",
+          "eXIf",
+          "IEND"
+        ],
+        "sRGBRenderingIntent": 0,
+        "hasICCP": false,
+        "IDATCount": 10
+      }
+    },
+    {
+      "file": "rejected-settings-light-appearance.png",
+      "surface": "REJECTED - not a reference. Product Settings captured while the system appearance was Light",
+      "state": "app launched with -AppleInterfaceStyle Dark; main window dark (forced by AppView), Settings window rendered Light; whole window including title bar",
+      "backingScaleFactor": 1.0,
+      "clientPoints": [
+        900,
+        450
+      ],
+      "geometry": {
+        "windowFrameCG": "not retained",
+        "captureSourceRectPoints": [
+          0,
+          0,
+          900,
+          450
+        ],
+        "topInsetPoints": 0
+      },
+      "samples": [
+        {
+          "id": "settings-window-background-light",
+          "rect": [
+            0,
+            40,
+            90,
+            400
+          ],
+          "countRGB": [
+            [
+              255,
+              255,
+              255
+            ]
+          ],
+          "measured": {
+            "pixels": 36000,
+            "distinctRGBA": 16,
+            "top5RGBACount": [
+              [
+                255,
+                255,
+                255,
+                255,
+                35985
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                1
+              ],
+              [
+                255,
+                255,
+                255,
+                13,
+                1
+              ],
+              [
+                255,
+                255,
+                255,
+                38,
+                1
+              ],
+              [
+                255,
+                255,
+                255,
+                71,
+                1
+              ]
+            ],
+            "maxChannelSpread": 0,
+            "exactOpaqueRGBCounts": [
+              [
+                255,
+                255,
+                255,
+                35985
+              ]
+            ]
+          }
+        }
+      ],
+      "role": "rejected-red-observation",
+      "sha256": "eab962d6eb4f54426549db5a79b97f4bff43d72cf425e74c36ddd74e221695b7",
+      "bytes": 50455,
+      "width": 900,
+      "height": 450,
+      "bitDepth": 8,
+      "pngColourType": 6,
+      "chunks": {
+        "order": [
+          "IHDR",
+          "sRGB",
+          "eXIf",
+          "IEND"
+        ],
+        "sRGBRenderingIntent": 0,
+        "hasICCP": false,
+        "IDATCount": 4
+      }
+    }
+  ]
+}
