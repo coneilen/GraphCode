@@ -1332,6 +1332,27 @@ Start-Sleep -Seconds 60
       $appSource -notmatch '(?s)wparam == MainWindow\.menu_watchdog_timer_id.*?c\.EndMenu\(\)') {
     throw "RED: the shell cannot open a gate-requested context menu, or an abandoned popup can block its message loop forever"
   }
+  if ($uiaLiveGateSource -notmatch 'UIA_CANVAS_CONTEXT_MENU_EVIDENCE' -or
+      $uiaLiveGateSource -notmatch '\$canvasContextMenuEvidence' -or
+      $uiaLiveGateSource -notmatch '"canvas background"' -or
+      $uiaLiveGateSource -notmatch '"canvas node"' -or
+      $uiaLiveGateSource -notmatch '"canvas edge"' -or
+      $uiaLiveGateSource -notmatch 'BoundingRectangle' -or
+      $uiaLiveGateSource -notmatch 'PostRightClickAt\(\$ownerWindow' -or
+      $uiaLiveGateSource -notmatch 'PostRightClickAt\(\$shellWindow' -or
+      $uiaLiveGateSource -notmatch 'PopupMenuItemState' -or
+      $uiaLiveGateSource -notmatch 'Checked\s+=\s+\(\(\$state -band 0x8\) -ne 0\)' -or
+      $uiaLiveGateSource -notmatch 'function ConvertTo-PopupMenuEvidence' -or
+      $uiaLiveGateSource -notmatch 'checked = \$_.Checked' -or
+      $uiaLiveGateSource -notmatch 'state = \$_.State' -or
+      $uiaLiveGateSource -notmatch 'Close-PopupMenu' -or
+      $uiaLiveGateSource -notmatch 'SelectPopupMenuItem' -or
+      $uiaLiveGateSource -notmatch 'Create or edit edge' -or
+      $uiaLiveGateSource -notmatch 'editActionDialogOpened = \$canvasEdgeEditDialogOpened' -or
+      $uiaLiveGateSource -notmatch 'daemonCommandUnchanged = \$canvasEdgeDaemonCommandUnchanged' -or
+      $uiaLiveGateSource -notmatch 'UIA loop A|UIA loop B') {
+    throw "RED: UIA live gate does not measure blank-canvas, node-card, and edge context menus from live geometry"
+  }
   if ($shellTests -notmatch '(?s)Windows update feed executable tests.*?zig test src\\WindowsUpdates\.zig.*?-lwinhttp') {
     throw "RED: Windows shell validation does not run the native updater tests"
   }
