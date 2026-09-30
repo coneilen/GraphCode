@@ -1427,6 +1427,10 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'TypeEditTextById' -or
       $uiaLiveGateSource -notmatch 'Read-EdgeStableText' -or
       $uiaLiveGateSource -notmatch 'renderedHitTests' -or
+      $uiaLiveGateSource -notmatch 'function ConvertTo-SketchCanonicalJson' -or
+      $uiaLiveGateSource -notmatch 'function Test-SketchPromotionReceipt' -or
+      $uiaLiveGateSource -notmatch 'Test-SketchPromotionReceipt \$after \$request \$expectedWire' -or
+      $uiaLiveGateSource -notmatch 'receivedWireRaw = \$receivedWireRaw' -or
       $stubDaemonSource -notmatch 'appliedPromotions' -or
       $stubDaemonSource -notmatch 'appliedPromotionRequests' -or
       $stubDaemonSource -notmatch 'promoteNode' -or

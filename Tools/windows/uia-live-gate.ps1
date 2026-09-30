@@ -7090,6 +7090,44 @@ try {
       "sketch/custody stub has no positive graph-command baseline"
     return $result
   }
+  function ConvertTo-SketchCanonicalJson($value) {
+    if ($null -eq $value) { return "null" }
+    if ($value -is [System.Collections.IDictionary]) {
+      $keys = [string[]]@($value.Keys)
+      [Array]::Sort($keys, [StringComparer]::Ordinal)
+      $properties = foreach ($key in $keys) {
+        $name = ConvertTo-Json -InputObject $key -Compress
+        $content = ConvertTo-SketchCanonicalJson $value[$key]
+        "$name`:$content"
+      }
+      return "{" + ($properties -join ",") + "}"
+    }
+    if ($value -is [System.Management.Automation.PSCustomObject]) {
+      $keys = [string[]]@($value.PSObject.Properties | ForEach-Object Name)
+      [Array]::Sort($keys, [StringComparer]::Ordinal)
+      $properties = foreach ($key in $keys) {
+        $name = ConvertTo-Json -InputObject $key -Compress
+        $content = ConvertTo-SketchCanonicalJson $value.PSObject.Properties[$key].Value
+        "$name`:$content"
+      }
+      return "{" + ($properties -join ",") + "}"
+    }
+    if ($value -is [System.Array]) {
+      $items = foreach ($item in $value) { ConvertTo-SketchCanonicalJson $item }
+      return "[" + ($items -join ",") + "]"
+    }
+    return ConvertTo-Json -InputObject $value -Compress
+  }
+  function Test-SketchPromotionReceipt($result, [string] $requestId, $expectedWire) {
+    if ([string]::IsNullOrWhiteSpace($requestId)) { return $false }
+    $applied = @($result.appliedPromotionRequests | Where-Object { $_ -ceq $requestId })
+    $received = @($result.receivedGraphCommands | Where-Object { $_.requestID -ceq $requestId })
+    $unanswered = @($result.unansweredRequests | Where-Object { $_ -ceq $requestId })
+    if ($applied.Count -ne 1 -or $received.Count -ne 1 -or $unanswered.Count -ne 0) { return $false }
+    $receivedWire = [string]$received[0].command | ConvertFrom-Json -ErrorAction Stop
+    return (ConvertTo-SketchCanonicalJson $receivedWire) -ceq
+      (ConvertTo-SketchCanonicalJson $expectedWire)
+  }
   function Assert-SketchModal([string] $title) {
     $script:edgeWorkflowTitle = $title
     $script:edgeWorkflowWindow = [IntPtr]::Zero
@@ -7372,15 +7410,33 @@ try {
       -not [string]::IsNullOrWhiteSpace($request) -and
       @($after.unansweredRequests) -notcontains $request) `
       "sketch $($case.Target) request was not applied exactly once and answered: $(Read-UiaTextFile $renameStubResultPath)"
-    $logged = (Read-DaemonCommandLog $renameCommandLogPath | ConvertFrom-Json).graphCommand
     $received = @($after.receivedGraphCommands | Where-Object { $_.requestID -ceq $request })
-    Require ($received.Count -eq 1 -and
-      ($logged | ConvertTo-Json -Depth 16 -Compress) -ceq
-      (($received[0].command | ConvertFrom-Json) | ConvertTo-Json -Depth 16 -Compress)) `
-      "sketch $($case.Target) recorder command differs from exact stub-received command"
-    $wire = $logged.command.promoteNode
-    Require ($logged.projectPath -ceq "graphcode://stub/project" -and
+    Require ($received.Count -eq 1) `
+      "sketch $($case.Target) correlated stub-received command count was $($received.Count)"
+    $receivedWireRaw = [string]$received[0].command
+    $receivedWire = $receivedWireRaw | ConvertFrom-Json
+    $expectedPromotion = switch ($case.Target) {
+      "Goal" { [ordered]@{ goal = [ordered]@{ _0 = [ordered]@{
+        summary = "UIA done check"; pollIntervalSeconds = 60
+        metricDirection = "maximize"; skipsUnchangedWorkspace = $false
+      } } } }
+      "Turn" { [ordered]@{ turn = [ordered]@{ pausesBeforeWritesOnly = $true } } }
+      "Timed" { [ordered]@{ timed = [ordered]@{ triggerPrompt = "/loop 2h Continue sketch work" } } }
+    }
+    $expectedWire = [ordered]@{
+      projectPath = "graphcode://stub/project"
+      command = [ordered]@{
+        promoteNode = [ordered]@{
+          _0 = $id; promotion = $expectedPromotion; promotedBy = $null
+        }
+      }
+    }
+    Require (Test-SketchPromotionReceipt $after $request $expectedWire) `
+      "sketch $($case.Target) stub-received command differed structurally from exact native decision: $receivedWireRaw"
+    $wire = $receivedWire.command.promoteNode
+    Require ($receivedWire.projectPath -ceq "graphcode://stub/project" -and
       $wire._0 -ceq $id -and $null -eq $wire.promotedBy -and
+      @($wire.PSObject.Properties.Name).Count -eq 3 -and
       @($wire.promotion.PSObject.Properties.Name).Count -eq 1) `
       "sketch $($case.Target) exact promoteNode wire payload differs from native decision"
     switch ($case.Target) {
@@ -7422,8 +7478,9 @@ try {
       rejected = if ($case.Target -eq "Goal") { $rejected } else { $null }
       cancelled = $cancelled; cancelInput = if ($case.Target -eq "Turn") { $cancelAction } else { $null }
       submit = $submit; requestId = $request; requestAnswered = $true
-      receivedWire = ($received[0].command | ConvertFrom-Json)
-      commandLogBase64 = Edge-LogBytes
+      receivedWire = $receivedWire
+      receivedWireRaw = $receivedWireRaw
+      recorderSnapshotBase64 = Edge-LogBytes
       appliedCount = @($after.appliedPromotions).Count
       graphSequence = [int]$after.graphSequence
       republishedNode = $promotedGraphNode[0]
@@ -7539,14 +7596,14 @@ try {
       backend = [string]$custodyWire.backend; requestId = $custodyRequest
       requestAnswered = $true
       receivedWire = ($custodyReceived[0].command | ConvertFrom-Json)
-      commandLogBase64 = Edge-LogBytes
+      recorderSnapshotBase64 = Edge-LogBytes
       appliedCount = @($custodyAfter.appliedCreates).Count
       graphSequence = [int]$custodyAfter.graphSequence
       republishedNode = $custodyGraphNode[0]
       renderedHitTest = @{ point = $custodyRendered.point; cardId = $custodyRendered.cardId }
     }
     renderedHitTests = 4
-    limit = "Stub graphChanged and live node-card hit tests; not a production daemon session, active session preservation, glyph rendering, or macOS runtime parity."
+    limit = "The promoteNode path bypasses the UIA command recorder, so exact accepted wire is compared against the correlated stub request; raw recorder bytes establish rejected/cancelled non-mutation. Stub graphChanged and live node-card hit tests do not establish a production daemon session, active session preservation, glyph rendering, or macOS runtime parity."
   }
   Require ([GraphCodeUiaGateState]::PostCommand($renameShellWindow, 0x5002)) `
     "connected-daemon shell rejected the tray Exit command"
