@@ -89,8 +89,8 @@ pub const relaunch_message =
     "running through a relaunch — the background daemon holds them, not this window.";
 
 // ---------------------------------------------------------------------------
-// Native window — exercised live, not by fixture-driven unit tests: there is
-// nothing meaningful to fake about a real download/extract/install cycle.
+// Native window — the message pump is covered by a headless test, but a real
+// download/extract/install cycle still needs live exercise.
 // ---------------------------------------------------------------------------
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeUpdateInstall");
@@ -195,21 +195,28 @@ pub fn run(
     };
     const thread = try startInstall(StartupApi, hwnd, parent, options);
 
+    return finishInstall(StartupApi, hwnd, parent, thread);
+}
+
+fn finishInstall(comptime Api: type, hwnd: c.HWND, parent: c.HWND, thread: std.Thread) Outcome {
     var message: c.MSG = undefined;
+    var quit_code: ?c.WPARAM = null;
     while (!active_state.closed) {
         const code = c.GetMessageW(&message, null, 0, 0);
         if (code <= 0) {
             active_state.closed = true;
+            if (code == 0) quit_code = message.wParam;
             break;
         }
         if (c.IsDialogMessageW(hwnd, &message) != 0) continue;
         _ = c.TranslateMessage(&message);
         _ = c.DispatchMessageW(&message);
     }
-    thread.join();
-    ModalTeardown.dismiss(hwnd, parent);
+    Api.join(thread);
+    ModalTeardown.dismissWith(Api, hwnd, parent);
     active_hwnd = null;
     active = false;
+    if (quit_code) |value| c.PostQuitMessage(@intCast(value));
     return closedOutcome(active_state.outcome);
 }
 
@@ -242,6 +249,10 @@ const StartupApi = struct {
 
     pub fn spawn(options: WindowsUpdateInstall.InstallOptions) !std.Thread {
         return std.Thread.spawn(.{}, worker, .{options});
+    }
+
+    pub fn join(thread: std.Thread) void {
+        thread.join();
     }
 };
 
@@ -438,7 +449,7 @@ fn wideZ(allocator: std.mem.Allocator, value: []const u8) ![]u16 {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — pure presentation logic only.
+// Tests — presentation logic and headless window lifecycle.
 // ---------------------------------------------------------------------------
 
 test "download progress text reports a real percentage" {
@@ -545,7 +556,7 @@ var startup_calls_len: usize = 0;
 var startup_owner_enabled: bool = true;
 var startup_dialog_alive: bool = false;
 
-const StartupCall = enum { disable_owner, enable_owner, show_dialog, destroy_dialog, activate_owner, spawn };
+const StartupCall = enum { disable_owner, enable_owner, show_dialog, destroy_dialog, activate_owner, spawn, join_worker };
 
 fn recordStartup(call: StartupCall) void {
     startup_calls[startup_calls_len] = call;
@@ -612,4 +623,49 @@ test "a worker thread that cannot start restores the owner and tears the window 
         &.{ .disable_owner, .show_dialog, .spawn, .enable_owner, .destroy_dialog, .activate_owner },
         startup_calls[0..startup_calls_len],
     );
+}
+
+const QuitTestApi = struct {
+    pub fn join(thread: std.Thread) void {
+        _ = thread;
+        recordStartup(.join_worker);
+    }
+
+    pub fn enableWindow(window: c.HWND, enabled: c_int) void {
+        _ = window;
+        std.debug.assert(enabled != 0);
+        recordStartup(.enable_owner);
+    }
+
+    pub fn destroyWindow(window: c.HWND) void {
+        _ = window;
+        recordStartup(.destroy_dialog);
+    }
+
+    pub fn setActiveWindow(window: c.HWND) void {
+        _ = window;
+        recordStartup(.activate_owner);
+    }
+};
+
+test "update install dialog preserves WM_QUIT exit code after teardown" {
+    var pending: c.MSG = undefined;
+    defer _ = c.PeekMessageW(&pending, null, c.WM_QUIT, c.WM_QUIT, c.PM_REMOVE);
+    startup_calls_len = 0;
+    active_state = .{ .allocator = std.testing.allocator };
+    active_hwnd = fakeWindow(0x2000);
+    active = true;
+    c.PostQuitMessage(73);
+
+    const outcome = finishInstall(QuitTestApi, fakeWindow(0x2000), fakeWindow(0x1000), undefined);
+    try std.testing.expectEqualSlices(
+        StartupCall,
+        &.{ .join_worker, .enable_owner, .destroy_dialog, .activate_owner },
+        startup_calls[0..startup_calls_len],
+    );
+    try std.testing.expect(outcome == .failed);
+    try std.testing.expect(!active);
+    try std.testing.expect(active_hwnd == null);
+    try std.testing.expectEqual(@as(c.BOOL, 1), c.PeekMessageW(&pending, null, c.WM_QUIT, c.WM_QUIT, c.PM_REMOVE));
+    try std.testing.expectEqual(@as(c.WPARAM, 73), pending.wParam);
 }
