@@ -14,6 +14,7 @@ param(
     "visual-baseline",
     "tdd-evidence",
     "privacy",
+    "provider-build",
     "terminal-gate",
     "windows-shell",
     "packaging",
@@ -35,6 +36,7 @@ param(
     "visual-baseline",
     "tdd-evidence",
     "privacy",
+    "provider-build",
     "terminal-gate",
     "windows-shell",
     "packaging",
@@ -84,8 +86,11 @@ $tasks = @(
   "packaging",
   "hardening"
 )
+# Selectable on its own but not part of "all": terminal-gate already runs it.
+$buildOnlyTasks = @("provider-build")
 
 if ($List) {
+  $buildOnlyTasks
   $tasks
   exit 0
 }
@@ -507,6 +512,40 @@ function Resolve-ZigVersion([string] $version, [string] $environmentName) {
   throw "Zig $version is required for the pinned Windows provider; set $environmentName."
 }
 
+function Resolve-ProviderRoots([string] $defaultZmxWorktree, [string] $label) {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $zmxRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX_ROOT")
+  if (-not $zmxRoot) {
+    $zmxRoot = Join-Path $depotRoot $defaultZmxWorktree
+  }
+  if (-not (Test-Path -LiteralPath $winghosttyRoot -PathType Container) -or
+    -not (Test-Path -LiteralPath $zmxRoot -PathType Container)) {
+    throw "$label provider worktrees unavailable; real smoke is mandatory."
+  }
+  [pscustomobject]@{
+    Winghostty = $winghosttyRoot
+    Zmx = $zmxRoot
+    Zig0152 = Resolve-ZigVersion "0.15.2" "GRAPHCODE_ZIG0152"
+    Zig0160 = Resolve-ZigVersion "0.16.0" "GRAPHCODE_ZIG0160"
+  }
+}
+
+# The single build-only provider compile (Tools\windows\provider-build.ps1),
+# shared by the provider-build and terminal-gate tasks.
+function Invoke-ProviderBuild([object] $roots) {
+  Invoke-Native "Pinned provider build (build-only)" {
+    & (Join-Path $repoRoot "Tools\windows\provider-build.ps1") `
+      -WinghosttyRoot $roots.Winghostty `
+      -ZmxRoot $roots.Zmx `
+      -Zig0152 $roots.Zig0152 `
+      -Zig0160 $roots.Zig0160
+  }
+}
+
 function Invoke-Task([string] $name) {
   if ($DryRun) {
     $detail = ""
@@ -827,35 +866,25 @@ function Invoke-Task([string] $name) {
       }
       Write-Host "Privacy checks passed"
     }
+    "provider-build" {
+      $roots = Resolve-ProviderRoots "zmx-worktrees\quickchat-hang" "Pinned provider build"
+      Invoke-ProviderBuild $roots
+    }
     "terminal-gate" {
       & (Join-Path $repoRoot "Tools\windows\Tests\ProviderPins.Tests.ps1")
       & (Join-Path $repoRoot "Tools\windows\Tests\TerminalGate.Tests.ps1")
       if ($LASTEXITCODE -ne 0) {
         throw "Windows terminal gate contract failed with exit code $LASTEXITCODE"
       }
-      $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
-      $winghosttyRoot = [Environment]::GetEnvironmentVariable(
-        "GRAPHCODE_WINGHOSTTY_ROOT"
-      )
-      if (-not $winghosttyRoot) {
-        $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
-      }
-      $zmxRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX_ROOT")
-      if (-not $zmxRoot) {
-        $zmxRoot = Join-Path $depotRoot "zmx-worktrees\attach"
-      }
-      if (-not (Test-Path -LiteralPath $winghosttyRoot -PathType Container) -or
-        -not (Test-Path -LiteralPath $zmxRoot -PathType Container)) {
-        throw "Windows terminal gate provider worktrees unavailable; real smoke is mandatory."
-      }
-      $zig0152 = Resolve-ZigVersion "0.15.2" "GRAPHCODE_ZIG0152"
-      $zig0160 = Resolve-ZigVersion "0.16.0" "GRAPHCODE_ZIG0160"
+      $roots = Resolve-ProviderRoots "zmx-worktrees\attach" "Windows terminal gate"
+      Invoke-ProviderBuild $roots
       Invoke-Native "Pinned Windows terminal gate build and smoke" {
         & (Join-Path $repoRoot "Tools\windows\terminal-gate.ps1") `
-          -WinghosttyRoot $winghosttyRoot `
-          -ZmxRoot $zmxRoot `
-          -Zig0152 $zig0152 `
-          -Zig0160 $zig0160 `
+          -WinghosttyRoot $roots.Winghostty `
+          -ZmxRoot $roots.Zmx `
+          -Zig0152 $roots.Zig0152 `
+          -Zig0160 $roots.Zig0160 `
+          -SkipProviderBuild `
           -Stress
       }
     }
@@ -1047,8 +1076,9 @@ function Invoke-Task([string] $name) {
   }
 }
 
-$selected = @($tasks | Where-Object {
-    ($Task -contains "all" -or $Task -contains $_) -and $SkipTask -notcontains $_
+$selected = @(@($buildOnlyTasks) + @($tasks) | Where-Object {
+    (($Task -contains "all" -and $buildOnlyTasks -notcontains $_) -or $Task -contains $_) -and
+      $SkipTask -notcontains $_
   })
 if ($selected.Count -eq 0) {
   throw "No validation tasks remain after applying -Task $($Task -join ',') and -SkipTask $($SkipTask -join ',')"

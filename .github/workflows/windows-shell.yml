@@ -102,7 +102,11 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.windows == 'true') }}
     runs-on: windows-2022
-    timeout-minutes: 35
+    # A cold miss measured 40m08s end to end (setup/Swift 1m54s + bootstrap
+    # 26m34s + build-only 4m01s + save 10s + gate 7m17s + ~12s restores/checks/
+    # post; see ValidationRunner.Tests.ps1). 45 leaves 4m52s (~12%) headroom,
+    # and the provider cache is saved before the gate by about 32m42s regardless.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
@@ -130,27 +134,39 @@ jobs:
           key: windows-providers-v1-${{ hashFiles('graphcode-windows/provider-pins.json', 'Tools/windows/bootstrap.ps1') }}-emit-win32-host-x86_64-windows-gnu
 
       - name: Bootstrap exact Windows dependencies
+        id: bootstrap
         shell: pwsh
         run: ./Tools/windows/bootstrap.ps1 -ToolRoot .ci-tools -ProviderRoot .ci-providers
 
       - name: Verify provider pins after cache restore
+        id: verify-pins
         shell: pwsh
         run: ./Tools/windows/Assert-ProviderCheckout.ps1 -ProviderRoot .ci-providers
 
-      - name: Verify shell build, pinned-provider smoke, and live UI Automation
+      # Build-only: compiles both pinned providers with the canonical flags the
+      # cache key names, and runs no terminal tests.
+      - name: Build pinned provider artifacts
+        id: provider-build
         shell: pwsh
-        run: ./Tools/windows/validate.ps1 -Task windows-shell -SkipTrayLive -ShellPart integration
+        run: ./Tools/windows/validate.ps1 -Task provider-build
 
       # Only this job builds both providers with the canonical flags, so it is
-      # the single writer of the provider cache.
+      # the single writer of the provider cache. It saves before the gate so a
+      # cold miss still seeds its key when the gate later fails or is cancelled,
+      # and never after a failed or cancelled bootstrap, pin check, or build.
+      # `!cancelled()` replaces the implicit whole-job success() check.
       - name: Save pinned provider build caches
-        if: success() && steps.provider-cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && steps.bootstrap.conclusion == 'success' && steps.verify-pins.conclusion == 'success' && steps.provider-build.conclusion == 'success' && steps.provider-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             .ci-providers
             .ci-tools/zig-global
           key: ${{ steps.provider-cache.outputs.cache-primary-key }}
+
+      - name: Verify shell build, pinned-provider smoke, and live UI Automation
+        shell: pwsh
+        run: ./Tools/windows/validate.ps1 -Task windows-shell -SkipTrayLive -ShellPart integration
 
       - name: Retain UIA failure diagnostics
         if: failure()

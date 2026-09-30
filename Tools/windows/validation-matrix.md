@@ -107,6 +107,7 @@ host contracts:
 | Surface | Required command |
 |---|---|
 | Pinned provider build | `pwsh Tools/windows/validate.ps1 -Task windows-shell` |
+| Build-only pinned provider compile (no tests; CI cache seeding) | `pwsh Tools/windows/validate.ps1 -Task provider-build` (not part of `-Task all`; `terminal-gate` runs it first) |
 | Host lifecycle and rendering contracts | `pwsh Tools/windows/validate.ps1 -Task terminal-gate` |
 | Interactive Win32 smoke | `pwsh Tools/windows/validate.ps1 -Task windows-shell -SkipTrayLive` on hosted runners; omit `-SkipTrayLive` on an owned interactive desktop |
 | Embeddable one/two-surface stress | `pwsh Tools/windows/validate.ps1 -Task terminal-gate` |
