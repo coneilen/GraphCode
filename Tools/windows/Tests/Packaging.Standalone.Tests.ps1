@@ -93,6 +93,11 @@ try {
   }
   $provenance | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $root "provider-provenance.json") -Encoding utf8
   Write-PackageSetup $root
+  $ReleaseTag = "v1.2.3"
+  $ReleaseTagCommit = "1234567890abcdef1234567890abcdef12345678"
+  $SourceCommit = $ReleaseTagCommit
+  $ReleaseTagMatchesSource = "true"
+  $TagMismatchAllowed = "false"
   Write-Metadata $root "1.2.3"
   @{ schemaVersion = 1; files = @(Get-Manifest $root) } |
     ConvertTo-Json -Depth 10 | Set-Content (Join-Path $root "manifest.json") -Encoding utf8

@@ -222,10 +222,27 @@ pwsh -NoProfile -File Tools\windows\release.ps1 -Tag v1.2.3 -Publish
 
 The tag supplies the package version (`v1.2.3` and `1.2.3-beta1` are accepted;
 `dev` versions and anything that is not a release version are refused before
-anything is built). `release.ps1` then builds through `package.ps1`, re-runs
-`package.ps1 -Command Verify`, reads the built package's own `metadata.json`, and
-**refuses to continue unless the package reports the standard unsigned release
-state**.
+anything is built). The workflow checks out that tag before staging or building.
+`release.ps1` independently peels the tag to a commit and compares it with
+`HEAD`; a mismatch is refused before packaging, including when `-Publish` is
+absent, because the workflow artifact is itself a durable release object.
+
+For local development of packaging changes from an untagged commit, the
+deliberate `-AllowTagMismatch` switch permits an unpublished package:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\release.ps1 -Tag v1.2.3 -AllowTagMismatch
+```
+
+The package records the requested tag, peeled tag commit, actual source commit,
+failed match, and explicit mismatch allowance in its own `metadata.json` before
+the manifest and ZIP are created. `-AllowTagMismatch` can never be combined
+with `-Publish`.
+
+After the provenance gate, `release.ps1` builds through `package.ps1`, re-runs
+`package.ps1 -Command Verify`, reads the built package's own `metadata.json`,
+and **refuses to continue unless the package reports both the supplied source
+provenance and the standard unsigned release state**.
 
 Locally, `Tools\windows\stage-swift-products.ps1` produces the Swift half of the
 release inputs (`graphcoded.exe`, `graphcode.exe`, and the Swift runtime DLLs in
@@ -238,6 +255,8 @@ The release asset is `graphcode-windows-x86_64.zip` with a `.sha256` sidecar,
 matching the versionless macOS asset convention so
 `releases/latest/download/graphcode-windows-x86_64.zip` resolves. The package's
 `metadata.json` and `SIGNING.txt` continue to say explicitly that it is unsigned.
+`metadata.json` also carries the source provenance described above; it is part
+of the package manifest rather than a workflow-log-only claim.
 
 Low-level `package.ps1` support for `-SignCertificate`,
 `-SignTimestampUrl`, and `-TrustedSignerThumbprint` remains available for
