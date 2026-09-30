@@ -17,6 +17,15 @@ param(
   [string] $ZmxRoot,
   [string] $Zig0152 = $env:GRAPHCODE_ZIG0152,
   [string] $Zig0160 = $env:GRAPHCODE_ZIG0160,
+  [string] $ReleaseTag,
+  [ValidatePattern("^[0-9a-fA-F]{40}$")]
+  [string] $ReleaseTagCommit,
+  [ValidatePattern("^[0-9a-fA-F]{40}$")]
+  [string] $SourceCommit,
+  [ValidateSet("true", "false")]
+  [string] $ReleaseTagMatchesSource,
+  [ValidateSet("true", "false")]
+  [string] $TagMismatchAllowed,
   [switch] $KeepUserData,
   [switch] $RemoveUserData,
   [switch] $NoScheduledTask,
@@ -72,6 +81,13 @@ function Write-Metadata([string] $root, [string] $version) {
       Where-Object { $_.Name -match "winghostty|host" } | ForEach-Object { "bin/$($_.Name)" })
     providerPins = $pins
     signing = if ($SignCertificate) { "signed" } else { "UNSIGNED (not code signed)" }
+    sourceProvenance = [ordered]@{
+      tag = $ReleaseTag
+      tagCommit = $ReleaseTagCommit.ToLowerInvariant()
+      sourceCommit = $SourceCommit.ToLowerInvariant()
+      tagMatchesSource = ($ReleaseTagMatchesSource -eq "true")
+      tagMismatchAllowed = ($TagMismatchAllowed -eq "true")
+    }
     userData = "%USERPROFILE%/.graphcode (preserved by uninstall)"
     providerProvenance = "provider-provenance.json"
     setup = "GraphCode-Setup.ps1"
@@ -102,6 +118,11 @@ function Write-PackageSetup([string] $root) {
 }
 function Build-Package {
   Require ($Version -and $Version -notin @("dev", "0.0.0-dev")) "release packaging requires a non-dev package version"
+  Require ([bool] $ReleaseTag) "release packaging requires -ReleaseTag provenance"
+  Require ([bool] $ReleaseTagCommit) "release packaging requires -ReleaseTagCommit provenance"
+  Require ([bool] $SourceCommit) "release packaging requires -SourceCommit provenance"
+  Require ([bool] $ReleaseTagMatchesSource) "release packaging requires -ReleaseTagMatchesSource provenance"
+  Require ([bool] $TagMismatchAllowed) "release packaging requires -TagMismatchAllowed provenance"
   if ($SignCertificate) {
     Require ($SignCertificate -match "^[0-9a-fA-F]{40}$") "signing certificate thumbprint is invalid"
     Require (-not $TrustedSignerThumbprint -or $TrustedSignerThumbprint -eq $SignCertificate) `

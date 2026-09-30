@@ -94,16 +94,51 @@ try {
   $hiddenFixture = Join-Path $fixtureBin "hidden-payload.txt"
   Set-Content $hiddenFixture "preserve hidden package contents"
   (Get-Item $hiddenFixture).Attributes = [IO.FileAttributes]::Hidden
+  $releaseTag = "v1.2.3"
+  $releaseCommit = "1234567890abcdef1234567890abcdef12345678"
+  $missingProvenance = & pwsh -NoProfile -File $script -Command Build `
+    -InputDirectory $fixtureBin -OutputDirectory $out -Version "1.2.3" 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $missingProvenance -notmatch "ReleaseTag provenance") {
+    throw "release packaging accepted missing source provenance: $missingProvenance"
+  }
   $untrusted = & pwsh -NoProfile -File $script -Command Build -InputDirectory $fixtureBin `
-    -OutputDirectory $out -Version "untrusted" 2>&1 | Out-String
+    -OutputDirectory $out -Version "untrusted" -ReleaseTag "vuntrusted" `
+    -ReleaseTagCommit $releaseCommit -SourceCommit $releaseCommit `
+    -ReleaseTagMatchesSource true -TagMismatchAllowed false 2>&1 | Out-String
   if ($LASTEXITCODE -eq 0 -or $untrusted -notmatch "trusted pinned") {
     throw "untrusted provider input was accepted: $untrusted"
   }
-  Invoke-Package "Build" @{ InputDirectory = $fixtureBin; OutputDirectory = $out; Version = "1.2.3"; WinghosttyRoot = $wingRoot; ZmxRoot = $testZmxRoot; Zig0152 = $zig0152; Zig0160 = $zig0160 }
+  Invoke-Package "Build" @{
+    InputDirectory = $fixtureBin
+    OutputDirectory = $out
+    Version = "1.2.3"
+    WinghosttyRoot = $wingRoot
+    ZmxRoot = $testZmxRoot
+    Zig0152 = $zig0152
+    Zig0160 = $zig0160
+    ReleaseTag = $releaseTag
+    ReleaseTagCommit = $releaseCommit
+    SourceCommit = $releaseCommit
+    ReleaseTagMatchesSource = "true"
+    TagMismatchAllowed = "false"
+  }
   $providerZmx = Join-Path $testZmxRoot "zig-out\bin\zmx.exe"
   Set-Content $providerZmx stale-provider-output
   $staleZmxHash = (Get-FileHash $providerZmx -Algorithm SHA256).Hash
-  Invoke-Package "Build" @{ InputDirectory = $fixtureBin; OutputDirectory = $out; Version = "1.2.3"; WinghosttyRoot = $wingRoot; ZmxRoot = $testZmxRoot; Zig0152 = $zig0152; Zig0160 = $zig0160 }
+  Invoke-Package "Build" @{
+    InputDirectory = $fixtureBin
+    OutputDirectory = $out
+    Version = "1.2.3"
+    WinghosttyRoot = $wingRoot
+    ZmxRoot = $testZmxRoot
+    Zig0152 = $zig0152
+    Zig0160 = $zig0160
+    ReleaseTag = $releaseTag
+    ReleaseTagCommit = $releaseCommit
+    SourceCommit = $releaseCommit
+    ReleaseTagMatchesSource = "true"
+    TagMismatchAllowed = "false"
+  }
   $rebuiltZmxHash = (Get-FileHash $providerZmx -Algorithm SHA256).Hash
   if ($rebuiltZmxHash -eq $staleZmxHash) {
     throw "provider packaging did not rebuild stale ignored output"
@@ -111,6 +146,23 @@ try {
   $artifact = Join-Path $out "GraphCode-1.2.3-windows-x86_64"
   if ((Get-FileHash (Join-Path $artifact "bin\zmx.exe") -Algorithm SHA256).Hash -ne $rebuiltZmxHash) {
     throw "provider packaging did not use the rebuilt zmx artifact"
+  }
+  $metadata = Get-Content -LiteralPath (Join-Path $artifact "metadata.json") -Raw |
+    ConvertFrom-Json
+  if ($metadata.sourceProvenance.tag -ne $releaseTag -or
+      $metadata.sourceProvenance.tagCommit -ne $releaseCommit -or
+      $metadata.sourceProvenance.sourceCommit -ne $releaseCommit -or
+      $metadata.sourceProvenance.tagMatchesSource -ne $true -or
+      $metadata.sourceProvenance.tagMismatchAllowed -ne $false) {
+    throw "package metadata did not preserve explicit source provenance: $($metadata | ConvertTo-Json -Compress)"
+  }
+  $manifest = Get-Content -LiteralPath (Join-Path $artifact "manifest.json") -Raw |
+    ConvertFrom-Json
+  $metadataEntry = @($manifest.files | Where-Object path -eq "metadata.json")
+  if ($metadataEntry.Count -ne 1 -or
+      $metadataEntry[0].sha256 -ne
+        (Get-FileHash -LiteralPath (Join-Path $artifact "metadata.json") -Algorithm SHA256).Hash.ToLowerInvariant()) {
+    throw "package manifest does not cover source provenance metadata"
   }
   $zip = "$artifact.zip"
   Invoke-Package "Verify" @{ Package = $zip }
