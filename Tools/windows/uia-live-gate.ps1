@@ -3539,7 +3539,7 @@ try {
     Add-Type -AssemblyName UIAutomationTypes
     $element = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$window)
     $reads = 0
-    for ($index = 0; $index -lt ($requestedReads - 1); $index++) {
+    for ($index = 0; $index -lt $requestedReads; $index++) {
       $null = $element.Current.Name
       $reads++
       Start-Sleep -Milliseconds 5
