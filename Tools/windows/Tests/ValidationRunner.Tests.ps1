@@ -1179,6 +1179,21 @@ Start-Sleep -Seconds 60
     }
     Remove-Item -LiteralPath $treeFixturePath -Force -ErrorAction SilentlyContinue
   }
+  $pidReuseAdopted = & {
+    $rootCreated = [datetime]"2026-01-01T12:00:00"
+    function Get-CimInstance {
+      @(
+        [pscustomobject]@{ ProcessId = 624; ParentProcessId = 7416; Name = "conhost.exe"; ExecutablePath = ""; CreationDate = $rootCreated }
+        [pscustomobject]@{ ProcessId = 700; ParentProcessId = 624; Name = "child.exe"; ExecutablePath = ""; CreationDate = $rootCreated.AddSeconds(5) }
+        [pscustomobject]@{ ProcessId = 636; ParentProcessId = 624; Name = "csrss.exe"; ExecutablePath = ""; CreationDate = $rootCreated.AddHours(-3) }
+        [pscustomobject]@{ ProcessId = 732; ParentProcessId = 636; Name = "wininit.exe"; ExecutablePath = ""; CreationDate = $rootCreated.AddHours(-2) }
+      )
+    }
+    @(Get-UiaOwnedProcessDescendants @(624) | ForEach-Object { $_.Name })
+  }
+  if (($pidReuseAdopted -join ",") -ne "child.exe") {
+    throw "RED: UIA owned-process traversal adopts processes older than a reused parent PID: $($pidReuseAdopted -join ',')"
+  }
   if ($uiaLiveGateSource -notmatch 'UIA_ROOT_ACCESS' -or
       $uiaLiveGateSource -notmatch 'UIA_UPDATE_DIALOG_DIAGNOSTICS' -or
       $uiaLiveGateSource -notmatch 'maxSandboxRootUtf16' -or
@@ -1425,7 +1440,8 @@ Start-Sleep -Seconds 60
     throw "RED: UIA live gate node creation sheet label comparison can pass vacuously on an empty expected list"
   }
   if ($uiaLiveGateSource -notmatch 'SystemParametersInfoRect\(0x0030' -or
-      $uiaLiveGateSource -notmatch 'HitTarget = !visibleEmpty && atPoint == target' -or
+      $uiaLiveGateSource -notmatch 'HitTarget = !visibleEmpty && sameTopLevel && realChild == target' -or
+      $uiaLiveGateSource -notmatch 'RealChildWindowFromPoint\(dialog, clientPoint\)' -or
       $uiaLiveGateSource -notmatch 'Require \(-not \$hit\.VisibleEmpty\)' -or
       $uiaLiveGateSource -notmatch 'has no visible portion inside' -or
       $uiaLiveGateSource -notmatch 'footerOccludedByTaskbar = ' -or

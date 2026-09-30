@@ -611,13 +611,18 @@ public static class GraphCodeUiaGateState {
   private static extern bool SystemParametersInfoRect(uint action, uint param, out RECT rect, uint winIni);
   [DllImport("user32.dll")]
   private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+  [DllImport("user32.dll")]
+  private static extern IntPtr RealChildWindowFromPoint(IntPtr parent, ScreenPoint clientPoint);
   public sealed class ControlClick {
     public int ControlId, Left, Top, Right, Bottom, ScreenX, ScreenY;
     public int CursorBeforeX, CursorBeforeY, CursorAtX, CursorAtY;
     public bool HitTarget;
     public int WindowAtPointId;
-    public string WindowAtPointClass, WindowAtPointRootClass;
+    public string WindowAtPointClass, WindowAtPointRootClass, WindowAtPointText;
     public int WindowAtPointProcessId;
+    public int RealChildId;
+    public string RealChildClass, RealChildText;
+    public bool SameTopLevel;
     public bool VisibleEmpty;
     public int WorkLeft, WorkTop, WorkRight, WorkBottom;
     public bool OutsideWorkArea;
@@ -660,15 +665,31 @@ public static class GraphCodeUiaGateState {
     IntPtr rootAtPoint = atPoint == IntPtr.Zero ? IntPtr.Zero : GetAncestor(atPoint, 2);
     uint ownerProcess = 0;
     if (rootAtPoint != IntPtr.Zero) GetWindowThreadProcessId(rootAtPoint, out ownerProcess);
+    // Real mouse input skips HTTRANSPARENT children such as plain static text;
+    // cross-process WindowFromPoint does not. RealChildWindowFromPoint applies
+    // the same rule within the dialog, and the top-level check still rejects
+    // any other window (for example the taskbar) covering the point.
+    IntPtr dialog = GetAncestor(target, 1);
+    IntPtr realChild = IntPtr.Zero;
+    if (!visibleEmpty && dialog != IntPtr.Zero) {
+      var clientPoint = center;
+      if (ScreenToClient(dialog, ref clientPoint)) realChild = RealChildWindowFromPoint(dialog, clientPoint);
+    }
+    bool sameTopLevel = rootAtPoint != IntPtr.Zero && rootAtPoint == GetAncestor(target, 2);
     var hit = new ControlClick {
       ControlId = GetDlgCtrlID(target), Left = rect.Left, Top = rect.Top, Right = rect.Right,
       Bottom = rect.Bottom, ScreenX = center.X, ScreenY = center.Y,
-      HitTarget = !visibleEmpty && atPoint == target,
+      HitTarget = !visibleEmpty && sameTopLevel && realChild == target,
       VisibleEmpty = visibleEmpty,
       WindowAtPointId = atPoint == IntPtr.Zero ? 0 : GetDlgCtrlID(atPoint),
       WindowAtPointClass = ClassOf(atPoint),
+      WindowAtPointText = atPoint == IntPtr.Zero ? "" : EditBufferText(atPoint),
       WindowAtPointRootClass = ClassOf(rootAtPoint),
       WindowAtPointProcessId = (int)ownerProcess,
+      RealChildId = realChild == IntPtr.Zero ? 0 : GetDlgCtrlID(realChild),
+      RealChildClass = ClassOf(realChild),
+      RealChildText = realChild == IntPtr.Zero ? "" : EditBufferText(realChild),
+      SameTopLevel = sameTopLevel,
       WorkLeft = work.Left, WorkTop = work.Top, WorkRight = work.Right, WorkBottom = work.Bottom,
       OutsideWorkArea = rect.Left < work.Left || rect.Top < work.Top || rect.Right > work.Right || rect.Bottom > work.Bottom,
       CenterX = rectCenter.X, CenterY = rectCenter.Y,
@@ -1782,6 +1803,12 @@ function Get-UiaOwnedProcessDescendants([int[]] $rootProcessIds) {
   $descendants = [Collections.Generic.List[object]]::new()
   $depthById = @{}
   foreach ($rootProcessId in $rootProcessIds) { $depthById[$rootProcessId] = 0 }
+  # A process only descends from a parent created no later than itself; this
+  # stops a reused parent PID from adopting older, unrelated processes.
+  $creationById = @{}
+  foreach ($candidate in $all) {
+    if ($known.Contains([int]$candidate.ProcessId)) { $creationById[[int]$candidate.ProcessId] = $candidate.CreationDate }
+  }
   $changed = $true
   while ($changed) {
     $changed = $false
@@ -1789,7 +1816,11 @@ function Get-UiaOwnedProcessDescendants([int[]] $rootProcessIds) {
       $processId = [int]$candidate.ProcessId
       $parentProcessId = [int]$candidate.ParentProcessId
       if ($known.Contains($processId) -or -not $known.Contains($parentProcessId)) { continue }
+      $parentCreation = $creationById[$parentProcessId]
+      if ($null -eq $parentCreation -or $null -eq $candidate.CreationDate -or
+          $candidate.CreationDate -lt $parentCreation) { continue }
       [void]$known.Add($processId)
+      $creationById[$processId] = $candidate.CreationDate
       $depthById[$processId] = $depthById[$parentProcessId] + 1
       $descendants.Add([pscustomobject]@{
         ProcessId = $processId
@@ -5967,8 +5998,10 @@ try {
     }
     Require $hit.HitTarget `
       ("node creation sheet $label point ($($hit.ScreenX),$($hit.ScreenY)) inside " +
-       "[$($controlBounds -join ',')] hit control $($hit.WindowAtPointId) class '$($hit.WindowAtPointClass)' " +
-       "root '$($hit.WindowAtPointRootClass)' pid $($hit.WindowAtPointProcessId), not $controlId; " +
+       "[$($controlBounds -join ',')] resolved to child $($hit.RealChildId) class '$($hit.RealChildClass)' " +
+       "text '$($hit.RealChildText)' (sameTopLevel=$($hit.SameTopLevel)), not $controlId; WindowFromPoint " +
+       "control $($hit.WindowAtPointId) class '$($hit.WindowAtPointClass)' text '$($hit.WindowAtPointText)' " +
+       "root '$($hit.WindowAtPointRootClass)' pid $($hit.WindowAtPointProcessId); " +
        "work area [$($workArea -join ',')], dialog [$($dialogBounds -join ',')]")
     return [ordered]@{
       label = $label
@@ -5978,6 +6011,12 @@ try {
       uiaBounds = @([int]$uiaBounds.Left, [int]$uiaBounds.Top, [int]$uiaBounds.Right, [int]$uiaBounds.Bottom)
       point = @($hit.ScreenX, $hit.ScreenY)
       outsideWorkArea = $hit.OutsideWorkArea
+      hitTest = [ordered]@{
+        realChildId = $hit.RealChildId
+        windowFromPointId = $hit.WindowAtPointId
+        windowFromPointClass = $hit.WindowAtPointClass
+        windowFromPointText = $hit.WindowAtPointText
+      }
       cursorBefore = @($hit.CursorBeforeX, $hit.CursorBeforeY)
       cursorAt = @($hit.CursorAtX, $hit.CursorAtY)
     }
