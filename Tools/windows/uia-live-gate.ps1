@@ -138,6 +138,25 @@ public static class GraphCodeUiaGateState {
   private static extern uint GetMenuItemID(IntPtr menu, int position);
   [DllImport("user32.dll")]
   private static extern uint GetMenuState(IntPtr menu, uint item, uint flags);
+  [DllImport("user32.dll")]
+  private static extern bool GetMenuItemRect(IntPtr window, IntPtr menu, uint position, out RECT rect);
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern bool GetCursorPos(out ScreenPoint point);
+  [StructLayout(LayoutKind.Sequential)]
+  private struct MouseInput {
+    public int X, Y;
+    public uint MouseData, Flags, Time;
+    public UIntPtr ExtraInfo;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct Input {
+    public uint Type;
+    public MouseInput Mouse;
+  }
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern uint SendInput(uint count, Input[] inputs, int size);
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMenuStringW")]
   private static extern int GetMenuString(IntPtr menu, uint item, StringBuilder text, int max, uint flags);
   // The File/Loop/Terminal/Workspace/View/Help bar is a real SetMenu menu bar,
@@ -425,6 +444,58 @@ public static class GraphCodeUiaGateState {
     return PostMouseButtonAt(window, 0x0201, clientX, clientY) &&
       PostMouseButtonAt(window, 0x0202, clientX, clientY);
   }
+  public static bool PostRightClickAt(IntPtr window, int clientX, int clientY) {
+    IntPtr point = MouseLParam(clientX, clientY);
+    return PostMessage(window, 0x0204, (UIntPtr)0x0002, point) &&
+      PostMessage(window, 0x0205, UIntPtr.Zero, point);
+  }
+  public sealed class PopupItemHit {
+    public int Position, ItemId, Left, Top, Right, Bottom;
+    public int ScreenX, ScreenY, ClientX, ClientY, CursorBeforeX, CursorBeforeY;
+    public int CursorAtX, CursorAtY;
+    public bool Hilite;
+  }
+  public static PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position, int commandId) {
+    if (popup == IntPtr.Zero || position < 0) return null;
+    IntPtr menu = PopupMenuHandle(popup);
+    RECT item;
+    if (menu == IntPtr.Zero || !GetMenuItemRect(owner, menu, (uint)position, out item) ||
+        item.Right <= item.Left || item.Bottom <= item.Top ||
+        PopupMenuItemId(menu, position) != (uint)commandId) return null;
+    int screenX = (item.Left + item.Right) / 2;
+    int screenY = (item.Top + item.Bottom) / 2;
+    if (screenX < item.Left || screenX >= item.Right ||
+        screenY < item.Top || screenY >= item.Bottom) return null;
+    var point = new ScreenPoint {
+      X = screenX,
+      Y = screenY
+    };
+    if (!ScreenToClient(popup, ref point)) return null;
+    ScreenPoint before, at;
+    if (!GetCursorPos(out before))
+      throw new InvalidOperationException(String.Format("GetCursorPos before popup click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
+    if (!SetCursorPos(screenX, screenY))
+      throw new InvalidOperationException(String.Format("SetCursorPos for popup click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
+    if (!GetCursorPos(out at))
+      throw new InvalidOperationException(String.Format("GetCursorPos after popup move failed: Win32Error={0}", Marshal.GetLastWin32Error()));
+    if (at.X != screenX || at.Y != screenY)
+      throw new InvalidOperationException(String.Format("Popup cursor landed at ({0},{1}), expected ({2},{3})", at.X, at.Y, screenX, screenY));
+    bool hilite = (GetMenuState(menu, (uint)commandId, 0x0000) & 0x0080) != 0;
+    var inputs = new[] {
+      new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0002 } },
+      new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0004 } }
+    };
+    uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
+    if (sent != inputs.Length)
+      throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} popup mouse events: Win32Error={2}", sent, inputs.Length, Marshal.GetLastWin32Error()));
+    return new PopupItemHit {
+      Position = position, ItemId = commandId, Left = item.Left, Top = item.Top,
+      Right = item.Right, Bottom = item.Bottom,
+      ScreenX = screenX, ScreenY = screenY, ClientX = point.X, ClientY = point.Y,
+      CursorBeforeX = before.X, CursorBeforeY = before.Y,
+      CursorAtX = at.X, CursorAtY = at.Y, Hilite = hilite
+    };
+  }
   // Sidebar.updateBannerRect/updateBannerAt are pixel-only hit-test geometry with
   // no UIA identity of their own, so a genuine click requires the real live client
   // height rather than an assumed window size.
@@ -702,6 +773,7 @@ function Get-NativeMenuItems([IntPtr] $menu) {
       State     = $state
       # MF_GRAYED (0x1) and MF_DISABLED (0x2) both render an unavailable item.
       Enabled   = (($state -band 0x3) -eq 0)
+      Checked   = (($state -band 0x8) -ne 0)
       Separator = (($state -band 0x800) -ne 0)
     }
   }
@@ -711,8 +783,62 @@ function Get-NativeMenuItems([IntPtr] $menu) {
 function Format-PopupMenuItems($items) {
   if ($null -eq $items -or @($items).Count -eq 0) { return "<none>" }
   return (@($items) | ForEach-Object {
-    "[$($_.Position)] id=$($_.Id) enabled=$($_.Enabled) separator=$($_.Separator) '$($_.Text)'"
+    "[$($_.Position)] id=$($_.Id) enabled=$($_.Enabled) checked=$($_.Checked) separator=$($_.Separator) '$($_.Text)'"
   }) -join '; '
+}
+
+function ConvertTo-PopupMenuEvidence($items) {
+  return @($items | ForEach-Object {
+    [ordered]@{
+      position = $_.Position
+      id = $_.Id
+      text = $_.Text
+      enabled = $_.Enabled
+      checked = $_.Checked
+      separator = $_.Separator
+      state = $_.State
+    }
+  })
+}
+
+function Read-CanvasContextMenu(
+  [System.Diagnostics.Process] $process,
+  [IntPtr] $ownerWindow,
+  [int] $screenX,
+  [int] $screenY,
+  [string] $label
+) {
+  $popup = [IntPtr]::Zero
+  for ($attempt = 1; $attempt -le 3 -and $popup -eq [IntPtr]::Zero; $attempt++) {
+    Require (Ensure-ShellForeground $ownerWindow "$label context menu") `
+      "GraphCode shell did not reacquire foreground before the $label context menu"
+    $clientX = 0
+    $clientY = 0
+    Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
+      $ownerWindow, $screenX, $screenY, [ref]$clientX, [ref]$clientY
+    )) "$label context menu point could not be converted to client coordinates"
+    Require ([GraphCodeUiaGateState]::PostRightClickAt($ownerWindow, $clientX, $clientY)) `
+      "$label right-click request was rejected"
+    $popup = Wait-ForPopupMenu $process $ownerWindow $label
+  }
+  Require ($popup -ne [IntPtr]::Zero) "$label context menu never opened a native popup window"
+  $items = @(Get-PopupMenuItems $popup)
+  $description = Format-PopupMenuItems $items
+  $dismissed = Close-PopupMenu $process $popup $ownerWindow $label
+  Require $dismissed `
+    "$label context menu did not dismiss, leaving the shell blocked in its modal loop"
+  $process.Refresh()
+  Require (-not $process.HasExited) `
+    "shell exited with code $($process.ExitCode) while the $label context menu was inspected"
+  return [pscustomobject]@{
+    Items = $items
+    Description = $description
+    ScreenX = $screenX
+    ScreenY = $screenY
+    ClientX = $clientX
+    ClientY = $clientY
+    Dismissed = $dismissed
+  }
 }
 
 function Close-PopupMenu(
@@ -4525,6 +4651,263 @@ try {
   Require ($null -ne $liveStatusAfterLoopMenus) `
     "shell UIA tree stopped answering after the loop context menus were dismissed"
 
+  # GraphContextMenu.zig's nodeMenuPlan (178-202), .background target
+  # (252-259), and .edge target (303-305) define the ordered native menu
+  # contents. Unlike the test-only target hook above, these probes send an
+  # actual WM_RBUTTONUP at screen points derived from live UIA card bounds.
+  # The fixture reset above replaces the graph but retains the canvas zoom/pan
+  # exercised earlier in this gate. Restore the default view before hit-testing
+  # so the card centers and edge remain inside the native canvas viewport.
+  $actualSizeAction = Find-FragmentByIdWithRetry $root "actual-size" $rawWalker
+  Require ($null -ne $actualSizeAction) `
+    "canvas context menu probes could not find the Actual Size action"
+  $actualSizeAction.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+  $canvasContextCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^canvas-card-' -and
+    $_.Current.Name -in @("UIA loop A", "UIA loop B")
+  })
+  Require (($canvasContextCards.Count -eq 2) -and
+           ((@($canvasContextCards | ForEach-Object { $_.Current.Name }) -join "|") -eq
+             "UIA loop A|UIA loop B")) `
+    "canvas context menu probes could not identify both fixture loop cards"
+  $canvasCardA = @($canvasContextCards | Where-Object { $_.Current.Name -eq "UIA loop A" })[0]
+  $canvasCardB = @($canvasContextCards | Where-Object { $_.Current.Name -eq "UIA loop B" })[0]
+  foreach ($card in @($canvasCardA, $canvasCardB)) {
+    Require (($card.Current.BoundingRectangle.Width -gt 0) -and
+             ($card.Current.BoundingRectangle.Height -gt 0)) `
+      "canvas context menu fixture card has empty UIA bounds: $($card.Current.Name)"
+  }
+  $canvasBounds = $graph.Current.BoundingRectangle
+  $blankPoint = $null
+  foreach ($candidate in @(
+    @{ X = [int]$canvasBounds.Right - 32; Y = [int]$canvasBounds.Bottom - 32 },
+    @{ X = [int]$canvasBounds.Left + 32; Y = [int]$canvasBounds.Bottom - 32 },
+    @{ X = [int]$canvasBounds.Right - 32; Y = [int]$canvasBounds.Top + 48 }
+  )) {
+    $insideCard = @($canvasContextCards | Where-Object {
+      $rect = $_.Current.BoundingRectangle
+      $candidate.X -ge $rect.Left -and $candidate.X -lt $rect.Right -and
+      $candidate.Y -ge $rect.Top -and $candidate.Y -lt $rect.Bottom
+    }).Count -gt 0
+    if (-not $insideCard -and
+        $candidate.X -gt $canvasBounds.Left -and $candidate.X -lt $canvasBounds.Right -and
+        $candidate.Y -gt $canvasBounds.Top -and $candidate.Y -lt $canvasBounds.Bottom) {
+      $blankPoint = $candidate
+      break
+    }
+  }
+  Require ($null -ne $blankPoint) `
+    "canvas context menu probe could not find a blank point inside the live graph bounds"
+  $nodeBounds = $canvasCardA.Current.BoundingRectangle
+  $nodePoint = @{
+    X = [int](($nodeBounds.Left + $nodeBounds.Right) / 2)
+    Y = [int](($nodeBounds.Top + $nodeBounds.Bottom) / 2)
+  }
+  $sourceBounds = $canvasCardA.Current.BoundingRectangle
+  $targetBounds = $canvasCardB.Current.BoundingRectangle
+  $edgePoint = @{
+    # GraphCanvas.hitTestEdge follows a cubic from the source's right-center to
+    # the target's left-center; its midpoint is the midpoint of these bounds.
+    X = [int](($sourceBounds.Right + $targetBounds.Left) / 2)
+    Y = [int](($sourceBounds.Top + $sourceBounds.Bottom +
+      $targetBounds.Top + $targetBounds.Bottom) / 4)
+  }
+  foreach ($probe in @(
+    @{ Label = "node"; Point = $nodePoint },
+    @{ Label = "edge"; Point = $edgePoint }
+  )) {
+    Require ($probe.Point.X -ge $canvasBounds.Left -and
+             $probe.Point.X -lt $canvasBounds.Right -and
+             $probe.Point.Y -ge $canvasBounds.Top -and
+             $probe.Point.Y -lt $canvasBounds.Bottom) `
+      "canvas $($probe.Label) context menu point ($($probe.Point.X),$($probe.Point.Y)) is outside live graph bounds $canvasBounds"
+  }
+  $backgroundCanvasMenu = Read-CanvasContextMenu $process $shellWindow `
+    $blankPoint.X $blankPoint.Y "canvas background"
+  $nodeCanvasMenu = Read-CanvasContextMenu $process $shellWindow `
+    $nodePoint.X $nodePoint.Y "canvas node"
+  $edgeCanvasMenu = Read-CanvasContextMenu $process $shellWindow `
+    $edgePoint.X $edgePoint.Y "canvas edge"
+
+  $backgroundMenuOrder = @($backgroundCanvasMenu.Items | ForEach-Object {
+    if ($_.Separator) { "<separator>" } else { [string]$_.Text }
+  })
+  Require (($backgroundMenuOrder -join "|") -ceq
+           "Worktrees...|Project Settings...|Show in Explorer|<separator>|Create Edge") `
+    "canvas background context menu had unexpected ordered items: $($backgroundCanvasMenu.Description)"
+  Require (@($backgroundCanvasMenu.Items | Where-Object {
+    -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
+  }).Count -eq 0) `
+    "canvas background context menu had an unexpected disabled or checked item: $($backgroundCanvasMenu.Description)"
+  Require (@($backgroundCanvasMenu.Items | Where-Object {
+    $_.Id -ge 5100 -and $_.Id -le 5119
+  }).Count -eq 0) `
+    "canvas background context menu unexpectedly offered a node or edge action: $($backgroundCanvasMenu.Description)"
+
+  $nodeCanvasMenuOrder = @($nodeCanvasMenu.Items | ForEach-Object {
+    if ($_.Separator) { "<separator>" } else { [string]$_.Text }
+  })
+  Require (($nodeCanvasMenuOrder -join "|") -ceq
+           "Open Terminal|Edit Details...|Save as Template...|Rename...`tF2|Delete Loop...`tDelete") `
+    "canvas node context menu had unexpected ordered items for UIA loop A at screen ($($nodeCanvasMenu.ScreenX),$($nodeCanvasMenu.ScreenY)) client ($($nodeCanvasMenu.ClientX),$($nodeCanvasMenu.ClientY)) bounds $nodeBounds : $($nodeCanvasMenu.Description)"
+  Require (@($nodeCanvasMenu.Items | Where-Object {
+    -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
+  }).Count -eq 0) `
+    "canvas node context menu had an unexpected disabled or checked item: $($nodeCanvasMenu.Description)"
+  Require (@($nodeCanvasMenu.Items | Where-Object { $_.Id -in @(5109, 5112, 5113, 5107, 5108) }).Count -eq 0) `
+    "canvas node context menu exposed actions for a different node shape: $($nodeCanvasMenu.Description)"
+
+  $edgeCanvasMenuOrder = @($edgeCanvasMenu.Items | ForEach-Object {
+    if ($_.Separator) { "<separator>" } else { [string]$_.Text }
+  })
+  Require (($edgeCanvasMenuOrder -join "|") -ceq "Edit Edge...|Delete Edge") `
+    "canvas edge context menu had unexpected ordered items: $($edgeCanvasMenu.Description)"
+  Require (@($edgeCanvasMenu.Items | Where-Object {
+    -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
+  }).Count -eq 0) `
+    "canvas edge context menu had an unexpected disabled or checked item: $($edgeCanvasMenu.Description)"
+  Require ((@($edgeCanvasMenu.Items | ForEach-Object { $_.Id }) -join "|") -ceq "5110|5111") `
+    "canvas edge context menu did not expose the edge-specific Edit/Delete commands: $($edgeCanvasMenu.Description)"
+
+  # Exercise Edit Edge only after all three menus were dismissed with Escape.
+  # The read-only dialog fields prove the hit-tested edge is the fixture's
+  # UIA loop A -> UIA loop B connection before the dialog is cancelled.
+  $edgeActionPopup = [IntPtr]::Zero
+  for ($attempt = 1; $attempt -le 3 -and $edgeActionPopup -eq [IntPtr]::Zero; $attempt++) {
+    Require (Ensure-ShellForeground $shellWindow "canvas edge Edit Edge action") `
+      "GraphCode shell did not reacquire foreground before the canvas edge Edit Edge action"
+    $edgeClientX = 0
+    $edgeClientY = 0
+    Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
+      $shellWindow, $edgePoint.X, $edgePoint.Y, [ref]$edgeClientX, [ref]$edgeClientY
+    )) "canvas edge Edit Edge point could not be converted to client coordinates"
+    Require ([GraphCodeUiaGateState]::PostRightClickAt($shellWindow, $edgeClientX, $edgeClientY)) `
+      "canvas edge Edit Edge right-click request was rejected"
+    $edgeActionPopup = Wait-ForPopupMenu $process $shellWindow "canvas edge Edit Edge action"
+  }
+  Require ($edgeActionPopup -ne [IntPtr]::Zero) `
+    "canvas edge Edit Edge action did not open the native popup window"
+  $edgeActionItems = @(Get-PopupMenuItems $edgeActionPopup)
+  $editEdgeMenuItem = @($edgeActionItems | Where-Object { $_.Id -eq 5110 }) | Select-Object -First 1
+  Require ($null -ne $editEdgeMenuItem) `
+    "canvas edge action menu omitted Edit Edge: $(Format-PopupMenuItems $edgeActionItems)"
+  $editEdgeClick = [GraphCodeUiaGateState]::ClickPopupMenuItem(
+    $edgeActionPopup, $shellWindow, [int]$editEdgeMenuItem.Position, [int]$editEdgeMenuItem.Id
+  )
+  Require ($null -ne $editEdgeClick) "canvas edge Edit Edge item could not be clicked"
+  $editEdgeClickEvidence = [ordered]@{
+    position = $editEdgeClick.Position
+    id = $editEdgeClick.ItemId
+    itemRect = @($editEdgeClick.Left, $editEdgeClick.Top,
+      $editEdgeClick.Right, $editEdgeClick.Bottom)
+    screenPoint = @($editEdgeClick.ScreenX, $editEdgeClick.ScreenY)
+    clientPoint = @($editEdgeClick.ClientX, $editEdgeClick.ClientY)
+    cursorBefore = @($editEdgeClick.CursorBeforeX, $editEdgeClick.CursorBeforeY)
+    cursorAtItem = @($editEdgeClick.CursorAtX, $editEdgeClick.CursorAtY)
+    hilite = $editEdgeClick.Hilite
+  }
+  Write-Host ("UIA_CANVAS_EDGE_ACTION_CLICK_EVIDENCE=" +
+    ($editEdgeClickEvidence | ConvertTo-Json -Compress))
+  $edgePopupClosed = $false
+  for ($attempt = 0; $attempt -lt 100 -and -not $edgePopupClosed; $attempt++) {
+    $edgePopupClosed = [GraphCodeUiaGateState]::FindPopupMenuWindow([uint32]$process.Id) -eq [IntPtr]::Zero
+    if (-not $edgePopupClosed) { Start-Sleep -Milliseconds 50 }
+  }
+  Require $edgePopupClosed `
+    "canvas edge Edit Edge popup remained open after the measured click: $($editEdgeClickEvidence | ConvertTo-Json -Compress)"
+  $edgeDialogCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    (New-Object System.Windows.Automation.AndCondition(
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, "Edit edge"
+      )),
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Window
+      ))
+    ))
+  )
+  $canvasEdgeDialog = Wait-ForDesktopElement `
+    -desktop $desktop `
+    -condition $edgeDialogCondition `
+    -label "canvas edge Edit Edge dialog" `
+    -diagnosticWindow $shellWindow `
+    -RecoverForeground
+  $canvasEdgeEditDialogOpened = $null -ne $canvasEdgeDialog
+  Require $canvasEdgeEditDialogOpened `
+    "clicking Edit Edge from the canvas did not open the edge editor: $($editEdgeClickEvidence | ConvertTo-Json -Compress)"
+  $canvasEdgeFrom = $canvasEdgeDialog.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::AutomationIdProperty, "9100"
+    ))
+  )
+  $canvasEdgeTo = $canvasEdgeDialog.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::AutomationIdProperty, "9101"
+    ))
+  )
+  Require (($null -ne $canvasEdgeFrom) -and ($null -ne $canvasEdgeTo)) `
+    "canvas edge Edit Edge dialog omitted its locked endpoint identities"
+  $canvasEdgeFromId = [string]$canvasEdgeFrom.Current.Name
+  $canvasEdgeToId = [string]$canvasEdgeTo.Current.Name
+  Require ($canvasEdgeFromId -eq "11111111-1111-4111-8111-111111111111") `
+    "canvas edge Edit Edge action targeted the wrong source: $canvasEdgeFromId"
+  Require ($canvasEdgeToId -eq "22222222-2222-4222-8222-222222222222") `
+    "canvas edge Edit Edge action targeted the wrong destination: $canvasEdgeToId"
+  $edgeCommandBeforeCancel = if (Test-Path -LiteralPath $daemonCommandLogPath) {
+    Read-DaemonCommandLog $daemonCommandLogPath
+  } else { $null }
+  Require ([GraphCodeUiaGateState]::SendCommand(
+    [IntPtr]$canvasEdgeDialog.Current.NativeWindowHandle, 2
+  )) "canvas edge Edit Edge dialog rejected Cancel"
+  $canvasEdgeEditCancelled = Wait-ForDesktopElementGone `
+    -desktop $desktop `
+    -condition $edgeDialogCondition `
+    -label "canvas edge Edit Edge dialog close" `
+    -diagnosticWindow $shellWindow
+  Require $canvasEdgeEditCancelled `
+    "canvas edge Edit Edge dialog did not close after cancellation"
+  $edgeCommandAfterCancel = if (Test-Path -LiteralPath $daemonCommandLogPath) {
+    Read-DaemonCommandLog $daemonCommandLogPath
+  } else { $null }
+  $canvasEdgeDaemonCommandUnchanged = $edgeCommandAfterCancel -ceq $edgeCommandBeforeCancel
+  Require $canvasEdgeDaemonCommandUnchanged `
+    "canvas edge Edit Edge cancellation dispatched a daemon command"
+  $canvasContextMenuEvidence = [ordered]@{
+    background = [ordered]@{
+      screenPoint = @($backgroundCanvasMenu.ScreenX, $backgroundCanvasMenu.ScreenY)
+      clientPoint = @($backgroundCanvasMenu.ClientX, $backgroundCanvasMenu.ClientY)
+      items = @(ConvertTo-PopupMenuEvidence $backgroundCanvasMenu.Items)
+      dismissed = $backgroundCanvasMenu.Dismissed
+    }
+    node = [ordered]@{
+      name = [string]$canvasCardA.Current.Name
+      automationId = [string]$canvasCardA.Current.AutomationId
+      screenPoint = @($nodePoint.X, $nodePoint.Y)
+      items = @(ConvertTo-PopupMenuEvidence $nodeCanvasMenu.Items)
+      dismissed = $nodeCanvasMenu.Dismissed
+    }
+    edge = [ordered]@{
+      source = [string]$canvasEdgeFromId
+      destination = [string]$canvasEdgeToId
+      screenPoint = @($edgePoint.X, $edgePoint.Y)
+      items = @(ConvertTo-PopupMenuEvidence $edgeCanvasMenu.Items)
+      dismissed = $edgeCanvasMenu.Dismissed
+      actionClick = $editEdgeClickEvidence
+      actionPopupClosed = $edgePopupClosed
+      editActionDialogOpened = $canvasEdgeEditDialogOpened
+      editActionCancelled = $canvasEdgeEditCancelled
+      daemonCommandUnchanged = $canvasEdgeDaemonCommandUnchanged
+    }
+  }
+  Write-Host ("UIA_CANVAS_CONTEXT_MENU_EVIDENCE=" +
+    ($canvasContextMenuEvidence | ConvertTo-Json -Compress -Depth 6))
+
   # Add Folder menu / Recent Folders submenu: this is the persistent native menu
   # bar installed once by MainWindow.installMenu and kept attached via SetMenu,
   # not an ephemeral TrackPopupMenu popup, so its structure is read directly off
@@ -5374,13 +5757,14 @@ try {
     focusFallbackSource = [GraphCodeUiaGateState]::FocusSourceAutomationId
     providerTeardownSafe = $retainedProviderSafe
     connectionFailureBanner = $connectionFailureBannerEvidence
+    canvasContextMenu = $canvasContextMenuEvidence
     contextMenuItemCount = $projectMenuItems.Count
     contextMenuMoveProjectText = $moveProjectItem.Text
     contextMenuMoveProjectEnabled = $moveProjectItem.Enabled
     contextMenuMoveProjectState = ("0x{0:x}" -f $moveProjectItem.State)
     contextMenuDismissed = $projectMenuClosed
     remoteContextMenuItemCount = $remoteMenuItems.Count
-  } | ConvertTo-Json -Compress
+  } | ConvertTo-Json -Depth 8 -Compress
 } catch {
   $gateFailure = $_
   if ($sandboxCreated) {

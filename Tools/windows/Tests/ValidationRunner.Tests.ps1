@@ -1332,6 +1332,43 @@ Start-Sleep -Seconds 60
       $appSource -notmatch '(?s)wparam == MainWindow\.menu_watchdog_timer_id.*?c\.EndMenu\(\)') {
     throw "RED: the shell cannot open a gate-requested context menu, or an abandoned popup can block its message loop forever"
   }
+  if ($uiaLiveGateSource -notmatch 'UIA_CANVAS_CONTEXT_MENU_EVIDENCE' -or
+      $uiaLiveGateSource -notmatch '\$canvasContextMenuEvidence' -or
+      $uiaLiveGateSource -notmatch 'canvasContextMenu = \$canvasContextMenuEvidence' -or
+      $uiaLiveGateSource -notmatch '"canvas background"' -or
+      $uiaLiveGateSource -notmatch '"canvas node"' -or
+      $uiaLiveGateSource -notmatch '"canvas edge"' -or
+      $uiaLiveGateSource -notmatch '(?s)Find-FragmentByIdWithRetry \$root "actual-size" \$rawWalker.*?\.Invoke\(\).*?\$graph = Find-FragmentByIdWithRetry \$root "graph" \$rawWalker.*?\$canvasContextCards' -or
+      $uiaLiveGateSource -notmatch 'canvas \$\(\$probe\.Label\) context menu point .*? is outside live graph bounds' -or
+      $uiaLiveGateSource -notmatch 'BoundingRectangle' -or
+      $uiaLiveGateSource -notmatch 'PostRightClickAt\(\$ownerWindow' -or
+      $uiaLiveGateSource -notmatch 'PostRightClickAt\(\$shellWindow' -or
+      $uiaLiveGateSource -notmatch 'PopupMenuItemState' -or
+      $uiaLiveGateSource -notmatch 'Checked\s+=\s+\(\(\$state -band 0x8\) -ne 0\)' -or
+      $uiaLiveGateSource -notmatch 'function ConvertTo-PopupMenuEvidence' -or
+      $uiaLiveGateSource -notmatch 'checked = \$_.Checked' -or
+      $uiaLiveGateSource -notmatch 'state = \$_.State' -or
+      $uiaLiveGateSource -notmatch 'Close-PopupMenu' -or
+      $uiaLiveGateSource -notmatch 'GetMenuItemRect' -or
+      $uiaLiveGateSource -notmatch 'ClickPopupMenuItem' -or
+      $uiaLiveGateSource -notmatch 'SetCursorPos' -or
+      $uiaLiveGateSource -notmatch 'GetCursorPos' -or
+      $uiaLiveGateSource -notmatch 'SendInput' -or
+      $uiaLiveGateSource -notmatch 'cursorBefore = @\(\$editEdgeClick\.CursorBeforeX' -or
+      $uiaLiveGateSource -notmatch 'hilite = \$editEdgeClick\.Hilite' -or
+      $uiaLiveGateSource -notmatch 'actionPopupClosed = \$edgePopupClosed' -or
+      $uiaLiveGateSource -notmatch 'UIA_CANVAS_EDGE_ACTION_CLICK_EVIDENCE' -or
+      $uiaLiveGateSource -notmatch 'actionClick = \$editEdgeClickEvidence' -or
+      $uiaLiveGateSource -notmatch 'NameProperty, "Edit edge"' -or
+      $uiaLiveGateSource -notmatch 'Create or edit edge' -or
+      $uiaLiveGateSource -notmatch 'editActionDialogOpened = \$canvasEdgeEditDialogOpened' -or
+      $uiaLiveGateSource -notmatch 'daemonCommandUnchanged = \$canvasEdgeDaemonCommandUnchanged' -or
+      $uiaLiveGateSource -notmatch 'UIA loop A|UIA loop B') {
+    throw "RED: UIA live gate does not measure blank-canvas, node-card, and edge context menus from live geometry"
+  }
+  if ($uiaLiveGateSource -notmatch '(?s)canvasContextMenu = \$canvasContextMenuEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
+    throw "RED: UIA final summary loses nested canvas menu items and edge action measurements"
+  }
   if ($shellTests -notmatch '(?s)Windows update feed executable tests.*?zig test src\\WindowsUpdates\.zig.*?-lwinhttp') {
     throw "RED: Windows shell validation does not run the native updater tests"
   }
