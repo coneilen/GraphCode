@@ -4293,7 +4293,7 @@ try {
   } | ConvertTo-Json -Compress))
   Require (($checkUpdatesCheckingState -band 0x1) -ne 0) `
     "Check for Updates stayed enabled immediately after being invoked, instead of disabling while checking"
-  Require ($checkUpdatesCheckingStatus -eq "Checking for updates (perturbed)...") `
+  Require ($checkUpdatesCheckingStatus -eq "Checking for updates...") `
     "Check for Updates did not report the checking status; saw '$checkUpdatesCheckingStatus'"
   $checkUpdatesSettled = $false
   for ($index = 0; $index -lt 150 -and -not $checkUpdatesSettled; $index++) {
@@ -4939,7 +4939,7 @@ try {
     "Pick a model for each loop" = 1
     "Show the activity strip" = 1
     "Tell sessions they're part of a graph" = 0
-    "Get beta releases" = 1
+    "Get beta releases" = 0
   }
   $productSettingsToggleStates = @()
   foreach ($entry in $expectedToggles.GetEnumerator()) {
