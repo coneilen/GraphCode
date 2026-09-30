@@ -4293,7 +4293,7 @@ try {
   } | ConvertTo-Json -Compress))
   Require (($checkUpdatesCheckingState -band 0x1) -ne 0) `
     "Check for Updates stayed enabled immediately after being invoked, instead of disabling while checking"
-  Require ($checkUpdatesCheckingStatus -eq "Checking for updates...") `
+  Require ($checkUpdatesCheckingStatus -eq "Checking for updates (perturbed)...") `
     "Check for Updates did not report the checking status; saw '$checkUpdatesCheckingStatus'"
   $checkUpdatesSettled = $false
   for ($index = 0; $index -lt 150 -and -not $checkUpdatesSettled; $index++) {
