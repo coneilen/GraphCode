@@ -81,9 +81,79 @@ pub fn failureMessage(err: WindowsUpdateInstall.InstallError) []const u8 {
     };
 }
 
-/// Session-continuity copy for the relaunch prompt, matching the macOS
-/// wording's substance: the daemon and zmx-backed terminal sessions are
-/// independent of the GUI process and survive a relaunch.
+/// What a terminal install failure offers. The in-app install cannot be
+/// retried from this window, so the reason has to come with a way to still
+/// get the build, not just a way to dismiss the message.
+pub const FailureAction = enum { download_in_browser, close };
+
+pub fn failureActions() []const FailureAction {
+    return &.{ .download_in_browser, .close };
+}
+
+/// Whether Download in Browser actually handed the URL to the shell. A
+/// refused hand-off must not look like a started download.
+pub const DownloadOutcome = enum { opened, open_failed };
+
+pub const ShellOpenError = error{ShellOpenFailed};
+
+/// The shell hand-off used by Download in Browser, injected so the refusal
+/// path can be asserted without launching a browser.
+const ShellApi = struct {
+    pub fn openUrl(owner: c.HWND, allocator: std.mem.Allocator, url: []const u8) ShellOpenError!void {
+        const wide = wideZ(allocator, url) catch return error.ShellOpenFailed;
+        defer allocator.free(wide);
+        const result = c.ShellExecuteW(
+            owner,
+            std.unicode.utf8ToUtf16LeStringLiteral("open").ptr,
+            wide.ptr,
+            null,
+            null,
+            c.SW_SHOWNORMAL,
+        );
+        // ShellExecuteW reports failure as a pseudo-instance handle of 32 or less.
+        if (@intFromPtr(result) <= 32) return error.ShellOpenFailed;
+    }
+};
+
+fn downloadInBrowserWith(comptime Api: type, owner: c.HWND, allocator: std.mem.Allocator, url: []const u8) DownloadOutcome {
+    // No URL is as much a refusal as a shell that says no: neither started a
+    // download, so neither may report one.
+    if (url.len == 0) return .open_failed;
+    Api.openUrl(owner, allocator, url) catch return .open_failed;
+    return .opened;
+}
+
+const download_open_failed_message = "GraphCode couldn't open the download in your browser.";
+
+/// Keeps the install failure on screen when the shell refuses the URL: the
+/// window is still reporting a failed install, and the browser is a second,
+/// separate problem.
+fn downloadFailedText(buffer: []u8, reason: []const u8) []const u8 {
+    if (reason.len == 0) return download_open_failed_message;
+    return std.fmt.bufPrint(buffer, "{s} {s}", .{ reason, download_open_failed_message }) catch download_open_failed_message;
+}
+
+fn actionLabel(action: FailureAction) []const u8 {
+    return switch (action) {
+        .download_in_browser => "Download in Browser",
+        .close => "Close",
+    };
+}
+
+fn actionId(action: FailureAction) u16 {
+    return switch (action) {
+        .download_in_browser => download_id,
+        .close => close_id,
+    };
+}
+
+fn actionWidth(action: FailureAction) i32 {
+    return switch (action) {
+        .download_in_browser => 160,
+        .close => 110,
+    };
+}
+
 pub const relaunch_message =
     "GraphCode is installed and takes over on the next launch. Sessions keep " ++
     "running through a relaunch — the background daemon holds them, not this window.";
@@ -98,12 +168,17 @@ const cancel_id: u16 = 9711;
 const relaunch_id: u16 = 9712;
 const later_id: u16 = 9713;
 const close_id: u16 = 9714;
+const download_id: u16 = 9715;
 const tick_message: c.UINT = c.WM_APP + 1;
 
 const Stage = enum { progress, relaunch, failed };
 
 const State = struct {
     allocator: std.mem.Allocator,
+    /// The asset the install was working on, kept so a terminal failure can
+    /// hand the same URL to a browser. Borrowed from the caller for the
+    /// lifetime of `run`.
+    asset_url: []const u8 = "",
     stage: Stage = .progress,
     outcome: ?Outcome = null,
     closed: bool = false,
@@ -157,7 +232,7 @@ pub fn run(
     checksum_url: ?[]const u8,
 ) !Outcome {
     registerClass() catch return error.DialogClassRegistrationFailed;
-    active_state = .{ .allocator = allocator };
+    active_state = .{ .allocator = allocator, .asset_url = asset_url };
     active = true;
     errdefer active = false;
     shared_phase.store(0, .release);
@@ -283,7 +358,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
     switch (message) {
         c.WM_CREATE => {
             active_state.status_hwnd = createStatic(hwnd, active_state.allocator, "Preparing…", 18, 20, 420, 24);
-            active_state.button_hwnd[0] = createButton(hwnd, "Cancel", cancel_id, 320, 90);
+            active_state.button_hwnd[0] = createButton(hwnd, "Cancel", cancel_id, 320, 90, 110);
             return 0;
         },
         tick_message => {
@@ -309,6 +384,18 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 },
                 close_id => {
                     requestClose(hwnd);
+                },
+                download_id => {
+                    switch (downloadInBrowserWith(ShellApi, hwnd, active_state.allocator, active_state.asset_url)) {
+                        // Teardown stays the same as Close: the decided
+                        // failure outcome is what the caller still receives.
+                        .opened => requestClose(hwnd),
+                        .open_failed => {
+                            var buffer: [FailureMessage.capacity + download_open_failed_message.len + 1]u8 = undefined;
+                            const reason = if (active_state.outcome != null) failureTextOf(&active_state.outcome.?) orelse "" else "";
+                            setStatusText(active_state.status_hwnd, active_state.allocator, downloadFailedText(&buffer, reason));
+                        },
+                    }
                 },
                 else => {},
             }
@@ -370,14 +457,26 @@ fn onTick(hwnd: c.HWND) void {
 fn transitionToRelaunch(hwnd: c.HWND) void {
     if (active_state.button_hwnd[0]) |button| _ = c.DestroyWindow(button);
     setStatusText(active_state.status_hwnd, active_state.allocator, "Update installed. " ++ relaunch_message);
-    active_state.button_hwnd[0] = createButton(hwnd, "Relaunch Now", relaunch_id, 220, 90);
-    active_state.button_hwnd[1] = createButton(hwnd, "Later", later_id, 350, 90);
+    active_state.button_hwnd[0] = createButton(hwnd, "Relaunch Now", relaunch_id, 220, 90, 110);
+    active_state.button_hwnd[1] = createButton(hwnd, "Later", later_id, 350, 90, 110);
 }
 
 fn transitionToFailed(hwnd: c.HWND, message: []const u8) void {
     if (active_state.button_hwnd[0]) |button| _ = c.DestroyWindow(button);
     setStatusText(active_state.status_hwnd, active_state.allocator, message);
-    active_state.button_hwnd[0] = createButton(hwnd, "Close", close_id, 350, 90);
+    const actions = failureActions();
+    std.debug.assert(actions.len <= active_state.button_hwnd.len);
+    // Laid out from the right edge so the action order reads the same as the
+    // list the contract test asserts.
+    var right: i32 = 460;
+    var index = actions.len;
+    while (index > 0) {
+        index -= 1;
+        const width = actionWidth(actions[index]);
+        right -= width;
+        active_state.button_hwnd[index] = createButton(hwnd, actionLabel(actions[index]), actionId(actions[index]), right, 90, width);
+        right -= 10;
+    }
 }
 
 fn requestClose(hwnd: c.HWND) void {
@@ -413,7 +512,7 @@ fn createStatic(hwnd: c.HWND, allocator: std.mem.Allocator, text: []const u8, x:
     return control;
 }
 
-fn createButton(hwnd: c.HWND, label: []const u8, id: u16, x: i32, y: i32) c.HWND {
+fn createButton(hwnd: c.HWND, label: []const u8, id: u16, x: i32, y: i32, width: i32) c.HWND {
     const wide = wideZ(std.heap.c_allocator, label) catch return null;
     defer std.heap.c_allocator.free(wide);
     const button = c.CreateWindowExW(
@@ -423,7 +522,7 @@ fn createButton(hwnd: c.HWND, label: []const u8, id: u16, x: i32, y: i32) c.HWND
         c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON,
         x,
         y,
-        110,
+        width,
         30,
         hwnd,
         controlId(id),
@@ -623,6 +722,81 @@ test "a worker thread that cannot start restores the owner and tears the window 
         &.{ .disable_owner, .show_dialog, .spawn, .enable_owner, .destroy_dialog, .activate_owner },
         startup_calls[0..startup_calls_len],
     );
+}
+
+var shell_open_calls: usize = 0;
+var shell_open_url: [512]u8 = undefined;
+var shell_open_len: usize = 0;
+
+/// A shell that accepts whatever URL it is handed, so the test can assert the
+/// exact URL Download in Browser passes on without launching a browser.
+const OpeningShellApi = struct {
+    pub fn openUrl(owner: c.HWND, allocator: std.mem.Allocator, url: []const u8) !void {
+        _ = owner;
+        _ = allocator;
+        shell_open_calls += 1;
+        @memcpy(shell_open_url[0..url.len], url);
+        shell_open_len = url.len;
+    }
+};
+
+test "a terminal install failure offers a browser download of the asset that failed" {
+    // ChecksumMismatch is terminal: nothing can be retried from this window,
+    // so the reason has to come with a way to get the build anyway.
+    try std.testing.expect(failureMessage(error.ChecksumMismatch).len > 0);
+    try std.testing.expectEqualSlices(FailureAction, &.{ .download_in_browser, .close }, failureActions());
+
+    shell_open_calls = 0;
+    shell_open_len = 0;
+    const asset = "https://example.invalid/GraphCode-windows-x86_64.zip";
+    const result = downloadInBrowserWith(OpeningShellApi, fakeWindow(0x2000), std.testing.allocator, asset);
+    try std.testing.expectEqual(DownloadOutcome.opened, result);
+    try std.testing.expectEqual(@as(usize, 1), shell_open_calls);
+    try std.testing.expectEqualStrings(asset, shell_open_url[0..shell_open_len]);
+}
+
+/// A shell that refuses the URL, so the refusal path can be asserted without
+/// a machine that has no browser registered.
+const RefusingShellApi = struct {
+    pub fn openUrl(owner: c.HWND, allocator: std.mem.Allocator, url: []const u8) !void {
+        _ = owner;
+        _ = allocator;
+        _ = url;
+        shell_open_calls += 1;
+        return error.ShellOpenFailed;
+    }
+};
+
+test "a shell that refuses the download is surfaced instead of looking like a started download" {
+    shell_open_calls = 0;
+    const result = downloadInBrowserWith(RefusingShellApi, fakeWindow(0x2000), std.testing.allocator, "https://example.invalid/GraphCode.zip");
+    try std.testing.expectEqual(DownloadOutcome.open_failed, result);
+    try std.testing.expectEqual(@as(usize, 1), shell_open_calls);
+
+    // The install failure stays on screen; the browser problem is added to it.
+    var buffer: [FailureMessage.capacity + download_open_failed_message.len + 1]u8 = undefined;
+    const reason = failureMessage(error.ChecksumMismatch);
+    const text = downloadFailedText(&buffer, reason);
+    try std.testing.expect(std.mem.startsWith(u8, text, reason));
+    try std.testing.expect(std.mem.endsWith(u8, text, download_open_failed_message));
+}
+
+test "a failure with no asset URL reports a refusal rather than an opened download" {
+    shell_open_calls = 0;
+    const result = downloadInBrowserWith(OpeningShellApi, fakeWindow(0x2000), std.testing.allocator, "");
+    try std.testing.expectEqual(DownloadOutcome.open_failed, result);
+    try std.testing.expectEqual(@as(usize, 0), shell_open_calls);
+}
+
+test "the failure stage's actions each have a distinct label, id, and width" {
+    for (failureActions(), 0..) |action, i| {
+        try std.testing.expect(actionLabel(action).len > 0);
+        try std.testing.expect(actionWidth(action) > 0);
+        for (failureActions()[i + 1 ..]) |other| {
+            try std.testing.expect(actionId(action) != actionId(other));
+            try std.testing.expect(!std.mem.eql(u8, actionLabel(action), actionLabel(other)));
+        }
+    }
 }
 
 const QuitTestApi = struct {
