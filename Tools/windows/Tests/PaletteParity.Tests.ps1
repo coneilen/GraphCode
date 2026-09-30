@@ -3,6 +3,7 @@ param()
 
 $ErrorActionPreference = "Stop"
 
+BeforeAll {
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 $themePath = if ($env:GRAPHCODE_PALETTE_THEME_PATH) {
   $env:GRAPHCODE_PALETTE_THEME_PATH
@@ -424,6 +425,7 @@ foreach ($path in @($themePath, $attentionPath, $summaryPath)) {
 }
 $designTokensText = Get-Content -LiteralPath $designTokensPath -Raw
 $windowsTokens = @(Get-WindowsPaletteTokens $designTokensText $designTokensPath)
+}
 
 Describe "Windows/macOS palette parity" {
   It "parses supported white, RGB, and hexadecimal literals with baseline quantization" {
