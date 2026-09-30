@@ -4601,6 +4601,14 @@ try {
   # (252-259), and .edge target (303-305) define the ordered native menu
   # contents. Unlike the test-only target hook above, these probes send an
   # actual WM_RBUTTONUP at screen points derived from live UIA card bounds.
+  # The fixture reset above replaces the graph but retains the canvas zoom/pan
+  # exercised earlier in this gate. Restore the default view before hit-testing
+  # so the card centers and edge remain inside the native canvas viewport.
+  $actualSizeAction = Find-FragmentByIdWithRetry $root "actual-size" $rawWalker
+  Require ($null -ne $actualSizeAction) `
+    "canvas context menu probes could not find the Actual Size action"
+  $actualSizeAction.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
   $canvasContextCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^canvas-card-' -and
     $_.Current.Name -in @("UIA loop A", "UIA loop B")
@@ -4651,6 +4659,16 @@ try {
     Y = [int](($sourceBounds.Top + $sourceBounds.Bottom +
       $targetBounds.Top + $targetBounds.Bottom) / 4)
   }
+  foreach ($probe in @(
+    @{ Label = "node"; Point = $nodePoint },
+    @{ Label = "edge"; Point = $edgePoint }
+  )) {
+    Require ($probe.Point.X -ge $canvasBounds.Left -and
+             $probe.Point.X -lt $canvasBounds.Right -and
+             $probe.Point.Y -ge $canvasBounds.Top -and
+             $probe.Point.Y -lt $canvasBounds.Bottom) `
+      "canvas $($probe.Label) context menu point ($($probe.Point.X),$($probe.Point.Y)) is outside live graph bounds $canvasBounds"
+  }
   $backgroundCanvasMenu = Read-CanvasContextMenu $process $shellWindow `
     $blankPoint.X $blankPoint.Y "canvas background"
   $nodeCanvasMenu = Read-CanvasContextMenu $process $shellWindow `
@@ -4678,7 +4696,7 @@ try {
   })
   Require (($nodeCanvasMenuOrder -join "|") -ceq
            "Open Terminal|Edit Details...|Save as Template...|Rename...`tF2|Delete Loop...`tDelete") `
-    "canvas node context menu had unexpected ordered items for UIA loop A: $($nodeCanvasMenu.Description)"
+    "canvas node context menu had unexpected ordered items for UIA loop A at screen ($($nodeCanvasMenu.ScreenX),$($nodeCanvasMenu.ScreenY)) client ($($nodeCanvasMenu.ClientX),$($nodeCanvasMenu.ClientY)) bounds $nodeBounds : $($nodeCanvasMenu.Description)"
   Require (@($nodeCanvasMenu.Items | Where-Object {
     -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
   }).Count -eq 0) `

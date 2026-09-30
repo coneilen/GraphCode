@@ -1337,6 +1337,8 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '"canvas background"' -or
       $uiaLiveGateSource -notmatch '"canvas node"' -or
       $uiaLiveGateSource -notmatch '"canvas edge"' -or
+      $uiaLiveGateSource -notmatch '(?s)Find-FragmentByIdWithRetry \$root "actual-size" \$rawWalker.*?\.Invoke\(\).*?\$graph = Find-FragmentByIdWithRetry \$root "graph" \$rawWalker.*?\$canvasContextCards' -or
+      $uiaLiveGateSource -notmatch 'canvas \$\(\$probe\.Label\) context menu point .*? is outside live graph bounds' -or
       $uiaLiveGateSource -notmatch 'BoundingRectangle' -or
       $uiaLiveGateSource -notmatch 'PostRightClickAt\(\$ownerWindow' -or
       $uiaLiveGateSource -notmatch 'PostRightClickAt\(\$shellWindow' -or
