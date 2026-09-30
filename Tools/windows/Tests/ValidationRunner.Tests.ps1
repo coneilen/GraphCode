@@ -1387,7 +1387,7 @@ Start-Sleep -Seconds 60
   if ($stubDaemonSource -notmatch '\$frame\.command\.graphCommand\.command\.createNode\._0' -or
       $stubDaemonSource -notmatch 'appliedCreates' -or
       $stubDaemonSource -notmatch '\$nodeLoopTypes\[\$id\]' -or
-      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied\)') {
+      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied\)') {
     throw "RED: stub daemon cannot apply exactly the createNode it received and republish the created loop type"
   }
   if ($uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_SHEET_EVIDENCE' -or
@@ -1412,6 +1412,112 @@ Start-Sleep -Seconds 60
   }
   if ($uiaLiveGateSource -notmatch '(?s)nodeCreationSheet = \$nodeCreationSheetEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
     throw "RED: UIA final summary omits the parsable node creation sheet evidence"
+  }
+  $uiaLiveGateType = [regex]::Match(
+    $uiaLiveGateSource, '(?s)Add-Type -TypeDefinition @"\s*(?<source>.*?)\r?\n"@'
+  )
+  if (-not $uiaLiveGateType.Success) {
+    throw "RED: UIA gate embedded C# type source is missing"
+  }
+  $uiaGateSource = $uiaLiveGateType.Groups[1].Value
+  $uiaGateDefinedMembers = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach ($member in [regex]::Matches(
+      $uiaGateSource,
+      '(?m)^\s*public\s+(?:(?:static|volatile|readonly)\s+)*(?:[\w<>\[\],.?]+\s+)+(?<member>[\w]+)\s*(?:\(|[;=])')) {
+    [void]$uiaGateDefinedMembers.Add($member.Groups["member"].Value)
+  }
+  $uiaGateMissingMembers = @(
+    [regex]::Matches($uiaLiveGateSource, '\[GraphCodeUiaGateState\]::(?<member>[\w]+)') |
+      ForEach-Object { $_.Groups["member"].Value } |
+      Sort-Object -Unique |
+      Where-Object { -not $uiaGateDefinedMembers.Contains($_) }
+  )
+  if ($uiaGateMissingMembers.Count -gt 0) {
+    throw "RED: UIA gate calls undefined embedded C# member(s): $($uiaGateMissingMembers -join ', ')"
+  }
+  if ($uiaLiveGateSource -notmatch 'UIA_EDGE_WORKFLOW_EVIDENCE=' -or
+      $uiaLiveGateSource -notmatch '(?s)edgeWorkflow = \$edgeWorkflowEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress' -or
+      $uiaLiveGateSource -notmatch 'createEdge' -or
+      $uiaLiveGateSource -notmatch 'updateEdge' -or
+      $uiaLiveGateSource -notmatch 'Enter the template or script that should carry context\.' -or
+      $uiaLiveGateSource -notmatch 'WindowIsVisible\(\$edgeWorkflowWindow\)' -or
+      $uiaLiveGateSource -notmatch 'ClickPopupMenuItem' -or
+      $uiaLiveGateSource -notmatch 'appliedEdgeCreates' -or
+      $uiaLiveGateSource -notmatch 'appliedEdgeUpdates' -or
+      $uiaLiveGateSource -notmatch 'commandLogBytesUnchanged' -or
+      $uiaLiveGateSource -notmatch 'renderedEdgeId' -or
+      $uiaLiveGateSource -notmatch 'graphCommandsBefore' -or
+      $uiaLiveGateSource -notmatch 'graphCommandsAfter') {
+    throw "RED: UIA live gate does not prove the native edge create/edit round trip and no-mutation paths"
+  }
+  if ($uiaLiveGateSource -notmatch 'FindVisibleProcessWindow\(\[uint32\]\$renameProcess\.Id, \$title\)' -or
+      $uiaLiveGateSource -notmatch 'WindowIsVisible\(\$edgeWorkflowWindow\)' -or
+      $uiaLiveGateSource -notmatch 'UIA_EDGE_MODAL_CENSUS' -or
+      $uiaLiveGateSource -notmatch '\$delta = \$index - \[int\]\(\$after\.Split\("\|"\)\[0\]\)' -or
+      $uiaLiveGateSource -notmatch 'UIA_EDGE_COMBO id=\$id attempt=\$attempt' -or
+      $uiaLiveGateSource -notmatch 'Require \(\$after -eq "\$index\|\$expected"\)' -or
+      $uiaLiveGateSource -match '\$Matches\[1\] -in @\(') {
+    throw "RED: UIA edge retry/modal/identity proof regressed"
+  }
+  if ($uiaLiveGateSource -notmatch 'function Edge-TypeText\(' -or
+      $uiaLiveGateSource -notmatch 'Edge-TypeText \$field\.Id \$field\.Text' -or
+      $uiaLiveGateSource -notmatch 'UIA_EDGE_TEXT_STABLE id=\$id attempt=\$attempt' -or
+      $uiaLiveGateSource -notmatch '\[GraphCodeUiaGateState\]::TypeEditTextById\(\$edgeWorkflowWindow, \$id, \$text\)' -or
+      $uiaLiveGateSource -notmatch 'Require \(\$stable -and \$after -ceq \$text\)' -or
+      $uiaLiveGateSource -notmatch 'IsControlOwnedBy\(\$edgeWorkflowWindow, \$control, \$id\)' -or
+      $uiaLiveGateSource -notmatch 'HasVisibleBounds\(\$control\)' -or
+      $uiaLiveGateSource -notmatch 'FocusedControlInDialog\(\$edgeWorkflowWindow\)' -or
+      $uiaLiveGateSource -notmatch 'WindowProcessId\(\$edgeWorkflowWindow\) -eq \$renameProcess\.Id' -or
+      $uiaLiveGateSource -notmatch 'WindowTextOf\(\$edgeWorkflowWindow\) -eq \$script:edgeWorkflowTitle' -or
+      $uiaLiveGateSource -notmatch 'VirtualKey = 0x2E' -or
+      $uiaLiveGateSource -notmatch 'SendMessageText\(edit, 0x000D' -or
+      $uiaLiveGateSource -notmatch 'SendMessage\(edit, 0x00B1, UIntPtr\.Zero, new IntPtr\(-1\)\)' -or
+      $uiaLiveGateSource -notmatch '(?s)var clear = new KeyInputRecord\[2\].*?EditBufferText\(edit\).*?var records = new KeyInputRecord\[text\.Length \* 2\]' -or
+      $uiaLiveGateSource -notmatch 'for \(\$stableRetry = 0; \$stableRetry -lt 10' -or
+      $uiaLiveGateSource -notmatch 'UIA_EDGE_TEXT_STABLE id=\$id attempt=\$attempt' -or
+      $uiaLiveGateSource -notmatch '\$renameProcess\.WaitForInputIdle\(1000\)' -or
+      $uiaLiveGateSource -notmatch 'function Read-EdgeStableText\(' -or
+      $uiaLiveGateSource -notmatch 'UIA_EDGE_SUBMIT_FIELD name=\$label id=\$id' -or
+      $uiaLiveGateSource -notmatch 'Read-EdgeStableText 9105 "payload"' -or
+      $uiaLiveGateSource -notmatch 'Read-EdgeStableText 9106 "cycle guard until"' -or
+      $uiaLiveGateSource -notmatch 'Read-EdgeStableText 9107 "cycle guard max"' -or
+      $uiaLiveGateSource -notmatch 'LastEditClearExpected' -or
+      $uiaLiveGateSource -notmatch 'LastEditClearSent' -or
+      $uiaLiveGateSource -notmatch 'LastEditTextExpected' -or
+      $uiaLiveGateSource -notmatch 'LastEditTextSent' -or
+      $uiaLiveGateSource -notmatch 'LastEditClearSent = SendKeyInputs\(LastEditClearExpected' -or
+      $uiaLiveGateSource -notmatch 'LastEditTextSent = SendKeyInputs\(LastEditTextExpected' -or
+      $uiaLiveGateSource -notmatch 'Require \(\$inputCountsFull\)' -or
+      $uiaLiveGateSource -notmatch 'clearSent=\$clearSent/\$clearExpected textSent=\$textSent/\$textExpected' -or
+      $uiaLiveGateSource -notmatch 'for \(\$attempt = 1; \$attempt -le 5' -or
+      $uiaLiveGateSource -notmatch 'for \(\$layoutRetry = 0; \$layoutRetry -lt 20') {
+    throw "RED: edge native text entry lacks native ownership, live layout, focus, clear/retype, or exact verification"
+  }
+  if ($uiaLiveGateSource -notmatch 'Open-EdgeMenu \$false 5120' -or
+      $uiaLiveGateSource -notmatch 'Open-EdgeMenu \$true 5110' -or
+      $uiaLiveGateSource -notmatch 'Edge-Combo 9100 0' -or
+      $uiaLiveGateSource -notmatch 'Edge-Combo 9101 1' -or
+      $uiaLiveGateSource -notmatch 'Edge-Combo 9102 0' -or
+      $uiaLiveGateSource -notmatch 'Edge-Combo 9103 2 "Only after failure"' -or
+      $uiaLiveGateSource -notmatch 'Edge-Combo 9103 1 "Only after success"' -or
+      $uiaLiveGateSource -notmatch 'Edge-Combo 9104 1 "Apply a text template"' -or
+      $uiaLiveGateSource -notmatch 'Edge-TypeText \$field\.Id \$field\.Text' -or
+      $uiaLiveGateSource -notmatch 'Edge-Click 1 "invalid edge OK"' -or
+      $uiaLiveGateSource -notmatch 'Edge-Click 1 "valid edge OK"' -or
+      $uiaLiveGateSource -notmatch 'Edge-Click 1 "update edge OK"' -or
+      $uiaLiveGateSource -notmatch 'Edge-Click 2 "cancel changed edge"' -or
+      $uiaLiveGateSource -notmatch 'Assert-EdgePrefill "2\|Only after failure"' -or
+      $uiaLiveGateSource -notmatch 'Assert-EdgePrefill "1\|Only after success"' -or
+      $uiaLiveGateSource -notmatch 'Get-DirectChildren \$graph \$rawWalker' -or
+      $uiaLiveGateSource -notmatch 'edgeCreateWire\.command\.createEdge\.from' -or
+      $uiaLiveGateSource -notmatch 'edgeChange\.expectedSpec\.condition -eq "onFailure"' -or
+      $uiaLiveGateSource -notmatch 'edgeChange\.spec\.condition -eq "onSuccess"' -or
+      $uiaLiveGateSource -notmatch 'edgeCancelBytesUnchanged' -or
+      $uiaLiveGateSource -notmatch 'appliedEdgeUpdateRequests' -or
+      $stubDaemonSource -notmatch 'appliedEdgeCreateRequests' -or
+      $stubDaemonSource -notmatch 'appliedEdgeUpdateRequests' -or
+      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied\)') {
+    throw "RED: edge workflow does not pin native input, exact CAS wire, correlated application, and stable rendered identity"
   }
   $nativeFormsSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\NativeForms.zig") -Raw
   if ($nativeFormsSource -notmatch '(?s)const node_labels = \[_\]\[\]const u8\{(.*?)\};') {

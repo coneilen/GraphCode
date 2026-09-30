@@ -25,6 +25,10 @@ public static class GraphCodeUiaGateState {
   public static int AddedEvents;
   public static int RemovedEvents;
   public static int TogglePropertyEvents;
+  public static uint LastEditClearExpected;
+  public static uint LastEditClearSent;
+  public static uint LastEditTextExpected;
+  public static uint LastEditTextSent;
   public static string LiveSourceAutomationId;
   public static string LiveSourceName;
   public static string LiveSourceRuntimeId;
@@ -301,6 +305,31 @@ public static class GraphCodeUiaGateState {
       if (attached) AttachThreadInput(currentThread, parentThread, false);
     }
   }
+  public static IntPtr FocusedControlInDialog(IntPtr parent) {
+    if (parent == IntPtr.Zero) return IntPtr.Zero;
+    uint ignoredProcessId;
+    uint parentThread = GetWindowThreadProcessId(parent, out ignoredProcessId);
+    uint currentThread = GetCurrentThreadId();
+    bool attached = currentThread != parentThread &&
+      AttachThreadInput(currentThread, parentThread, true);
+    try {
+      return GetFocus();
+    } finally {
+      if (attached) AttachThreadInput(currentThread, parentThread, false);
+    }
+  }
+  public static bool IsControlOwnedBy(IntPtr parent, IntPtr control, int controlId) {
+    return parent != IntPtr.Zero && control != IntPtr.Zero &&
+      GetDlgCtrlID(control) == controlId && GetAncestor(control, 2) == parent;
+  }
+  public static int ControlIdOf(IntPtr control) {
+    return control == IntPtr.Zero ? 0 : GetDlgCtrlID(control);
+  }
+  public static bool HasVisibleBounds(IntPtr window) {
+    RECT rect;
+    return window != IntPtr.Zero && IsWindowVisible(window) &&
+      GetWindowRect(window, out rect) && rect.Right > rect.Left && rect.Bottom > rect.Top;
+  }
   public static string LastActivationDiagnostic = "not attempted";
   public static bool ActivateWindow(IntPtr window) {
     if (window == IntPtr.Zero) {
@@ -416,6 +445,20 @@ public static class GraphCodeUiaGateState {
   }
   public static bool WindowIsVisible(IntPtr window) {
     return window != IntPtr.Zero && IsWindowVisible(window);
+  }
+  public static IntPtr FindVisibleProcessWindow(uint processId, string title) {
+    IntPtr result = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+      uint owner;
+      GetWindowThreadProcessId(window, out owner);
+      if (owner == processId && IsWindowVisible(window) &&
+          String.Equals(WindowTitle(window), title, StringComparison.Ordinal)) {
+        result = window;
+        return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return result;
   }
   // Real client-coordinate mouse messages posted directly to the target window,
   // matching the same WM_MOUSEMOVE/WM_LBUTTONDOWN/WM_LBUTTONUP messages the OS
@@ -847,6 +890,32 @@ public static class GraphCodeUiaGateState {
     if (sent != inputs.Length)
       throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} key events (cbSize={2}): Win32Error={3}", sent, inputs.Length, Marshal.SizeOf(typeof(KeyInputRecord)), Marshal.GetLastWin32Error()));
     return count;
+  }
+  public static bool TypeEditTextById(IntPtr parent, int controlId, string text) {
+    LastEditClearExpected = LastEditClearSent = 0;
+    LastEditTextExpected = LastEditTextSent = 0;
+    IntPtr edit = GetDlgItem(parent, controlId);
+    if (edit == IntPtr.Zero || !FocusControl(parent, edit)) return false;
+    SendMessage(edit, 0x00B1, UIntPtr.Zero, new IntPtr(-1));
+    var clear = new KeyInputRecord[2];
+    clear[0] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E } };
+    clear[1] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E, Flags = 2 } };
+    LastEditClearExpected = (uint)clear.Length;
+    LastEditClearSent = SendKeyInputs(LastEditClearExpected, clear, Marshal.SizeOf(typeof(KeyInputRecord)));
+    if (LastEditClearSent != LastEditClearExpected) return false;
+    if (!String.IsNullOrEmpty(EditBufferText(edit))) return false;
+    var records = new KeyInputRecord[text.Length * 2];
+    int offset = 0;
+    foreach (char character in text) {
+      records[offset++] = new KeyInputRecord { Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 4 } };
+      records[offset++] = new KeyInputRecord { Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 6 } };
+    }
+    LastEditTextExpected = (uint)records.Length;
+    if (records.Length > 0) {
+      LastEditTextSent = SendKeyInputs(LastEditTextExpected, records, Marshal.SizeOf(typeof(KeyInputRecord)));
+      if (LastEditTextSent != LastEditTextExpected) return false;
+    }
+    return String.Equals(EditTextById(parent, controlId), text, StringComparison.Ordinal);
   }
   public static int[] VisibleChildIds(IntPtr parent, int first, int last) {
     var buffer = new int[Math.Max(0, last - first + 1)];
@@ -5990,6 +6059,445 @@ try {
       "$renamePropagationStubDiagnostic; stub stderr: " + (Read-UiaTextFile $renameStubErrorPath))
   }
 
+  # --- Connected native edge create/edit (ledger rows 93 and 95) ----------------
+  $edgeWorkflowSource = $renameNodeId
+  $edgeWorkflowTarget = "22222222-2222-4222-8222-222222222222"
+  $edgeWorkflowTitle = "Create or edit edge"
+  $edgeWorkflowWindow = [IntPtr]::Zero
+  function Read-EdgeStub {
+    $last = $null
+    for ($retry = 0; $retry -lt 40; $retry++) {
+      try {
+        $last = Get-Content -LiteralPath $renameStubResultPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        if ($null -ne $last) { return $last }
+      } catch { Start-Sleep -Milliseconds 50 }
+    }
+    throw "edge stub result unreadable: $(Read-UiaTextFile $renameStubResultPath); stderr: $(Read-UiaTextFile $renameStubErrorPath)"
+  }
+  function Edge-GraphCount($result) {
+    return @(@($result.commands) | Where-Object { $_ -eq "graphCommand" }).Count
+  }
+  function Edge-LogBytes {
+    if (-not (Test-Path -LiteralPath $renameCommandLogPath)) { return "" }
+    $stream = [IO.FileStream]::new(
+      $renameCommandLogPath, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+      [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+    )
+    try {
+      $bytes = [byte[]]::new([int]$stream.Length)
+      $stream.ReadExactly($bytes)
+      return [Convert]::ToBase64String($bytes)
+    } finally {
+      $stream.Dispose()
+    }
+  }
+  function Edge-CanvasPoint([switch] $line) {
+    $actual = Find-FragmentByIdWithRetry $renameRoot "actual-size" $rawWalker
+    Require ($null -ne $actual) "edge workflow omitted Actual Size"
+    $actual.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $graph = Find-FragmentByIdWithRetry $renameRoot "graph" $rawWalker
+    Require ($null -ne $graph) "edge workflow omitted live graph"
+    $bounds = $graph.Current.BoundingRectangle
+    $cards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-'
+    })
+    $source = @($cards | Where-Object { $_.Current.Name -eq $renameFinalTitle }) | Select-Object -First 1
+    if ($null -eq $source) {
+      $source = @($cards | Where-Object { $_.Current.Name -eq $renameInitialTitle }) | Select-Object -First 1
+    }
+    $target = @($cards | Where-Object { $_.Current.Name -eq "Stub node B" }) | Select-Object -First 1
+    Require ($null -ne $source -and $null -ne $target) `
+      "edge workflow missing daemon card A/B: $(@($cards | ForEach-Object { $_.Current.Name }) -join ','); $(Read-UiaTextFile $renameStubResultPath)"
+    $a = $source.Current.BoundingRectangle
+    $b = $target.Current.BoundingRectangle
+    if ($line) {
+      $point = @{ X = [int](($a.Right + $b.Left) / 2); Y = [int](($a.Top + $a.Bottom + $b.Top + $b.Bottom) / 4) }
+    } else {
+      $point = $null
+      foreach ($candidate in @(
+          @{ X = [int]$bounds.Right - 32; Y = [int]$bounds.Bottom - 32 },
+          @{ X = [int]$bounds.Left + 32; Y = [int]$bounds.Bottom - 32 },
+          @{ X = [int]$bounds.Right - 32; Y = [int]$bounds.Top + 48 })) {
+        $occupied = @($cards | Where-Object {
+          $rect = $_.Current.BoundingRectangle
+          $candidate.X -ge $rect.Left -and $candidate.X -lt $rect.Right -and
+          $candidate.Y -ge $rect.Top -and $candidate.Y -lt $rect.Bottom
+        }).Count -gt 0
+        if (-not $occupied) { $point = $candidate; break }
+      }
+    }
+    Require ($null -ne $point -and $point.X -gt $bounds.Left -and
+      $point.X -lt $bounds.Right -and $point.Y -gt $bounds.Top -and $point.Y -lt $bounds.Bottom) `
+      "edge workflow point absent/outside live graph; graph=$bounds source=$a target=$b"
+    return $point
+  }
+  function Open-EdgeMenu([bool] $line, [int] $command) {
+    $lastMenu = "none"
+    for ($probe = 0; $probe -lt $(if ($line) { 100 } else { 3 }); $probe++) {
+      $point = Edge-CanvasPoint -line:$line
+      $popup = [IntPtr]::Zero
+      for ($retry = 0; $retry -lt 3 -and $popup -eq [IntPtr]::Zero; $retry++) {
+        Require (Ensure-ShellForeground $renameShellWindow "edge workflow context menu") "edge workflow lost shell foreground"
+        $cx = 0; $cy = 0
+        Require ([GraphCodeUiaGateState]::ScreenToClientPoint($renameShellWindow, $point.X, $point.Y, [ref]$cx, [ref]$cy)) `
+          "edge workflow could not convert live canvas point"
+        Require ([GraphCodeUiaGateState]::PostRightClickAt($renameShellWindow, $cx, $cy)) `
+          "edge workflow context menu right-click rejected"
+        $popup = Wait-ForPopupMenu $renameProcess $renameShellWindow "edge workflow"
+      }
+      Require ($popup -ne [IntPtr]::Zero) "edge workflow native popup missing at $($point | ConvertTo-Json -Compress)"
+      $items = @(Get-PopupMenuItems $popup)
+      $item = @($items | Where-Object { $_.Id -eq $command -and $_.Enabled }) | Select-Object -First 1
+      if ($null -ne $item) { break }
+      $lastMenu = "point=$($point | ConvertTo-Json -Compress) items=$(Format-PopupMenuItems $items)"
+      Require (Close-PopupMenu $renameProcess $popup $renameShellWindow "edge workflow wrong target") `
+        "edge workflow could not dismiss wrong-target popup: $lastMenu"
+      Start-Sleep -Milliseconds 100
+    }
+    Require ($null -ne $item) "edge workflow menu lacks enabled $command after republish: $lastMenu; stub=$(Read-UiaTextFile $renameStubResultPath)"
+    $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($popup, $renameShellWindow, [int]$item.Position, $command)
+    Require ($null -ne $click -and $click.CursorAtX -ge $click.Left -and $click.CursorAtX -lt $click.Right -and
+      $click.CursorAtY -ge $click.Top -and $click.CursorAtY -lt $click.Bottom) `
+      "edge workflow native menu click missed target $command"
+    for ($retry = 0; $retry -lt 100; $retry++) {
+      if ([GraphCodeUiaGateState]::FindPopupMenuWindow([uint32]$renameProcess.Id) -eq [IntPtr]::Zero) { break }
+      Start-Sleep -Milliseconds 50
+    }
+    Require ([GraphCodeUiaGateState]::FindPopupMenuWindow([uint32]$renameProcess.Id) -eq [IntPtr]::Zero) `
+      "edge workflow popup remained open after $command; hilite=$($click.Hilite)"
+    return [ordered]@{ point = @($point.X, $point.Y); menuIds = @($items | ForEach-Object { $_.Id }); cursorAtItem = @($click.CursorAtX, $click.CursorAtY); hilite = $click.Hilite }
+  }
+  function Wait-EdgeWindow([string] $title) {
+    $condition = New-Object System.Windows.Automation.AndCondition(
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $renameProcess.Id)),
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, $title)))
+    $script:edgeWorkflowWindow = [IntPtr]::Zero
+    for ($retry = 0; $retry -lt 100 -and $script:edgeWorkflowWindow -eq [IntPtr]::Zero; $retry++) {
+      $script:edgeWorkflowWindow = [GraphCodeUiaGateState]::FindVisibleProcessWindow([uint32]$renameProcess.Id, $title)
+      if ($script:edgeWorkflowWindow -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+    }
+    $uiaFound = $false
+    for ($retry = 1; $retry -le 10; $retry++) {
+      $uiaFound = $null -ne $desktop.FindFirst([System.Windows.Automation.TreeScope]::Children, $condition)
+      if ($uiaFound) { break }
+      if ($retry -lt 10) { Start-Sleep -Milliseconds 100 }
+    }
+    Write-Host "UIA_EDGE_MODAL_CENSUS title='$title' native=$($script:edgeWorkflowWindow -ne [IntPtr]::Zero) desktopUia=$uiaFound"
+    Require ($edgeWorkflowWindow -ne [IntPtr]::Zero -and
+      [GraphCodeUiaGateState]::WindowIsVisible($edgeWorkflowWindow) -and
+      [GraphCodeUiaGateState]::WindowTextOf($edgeWorkflowWindow) -eq $title) `
+      "edge workflow modal not natively visible as '$title'; windows=$([GraphCodeUiaGateState]::DescribeTopLevelWindows([uint32]$renameProcess.Id) -join ' | ')"
+  }
+  function Edge-Combo([int] $id, [int] $index, [string] $expected) {
+    $control = [GraphCodeUiaGateState]::ControlById($edgeWorkflowWindow, $id)
+    Require ($control -ne [IntPtr]::Zero) "edge workflow missing combo $id"
+    $before = [GraphCodeUiaGateState]::ComboSelection($edgeWorkflowWindow, $id)
+    $after = $before
+    for ($attempt = 1; $attempt -le 5 -and $after -ne "$index|$expected"; $attempt++) {
+      Require (Ensure-ShellForeground $edgeWorkflowWindow "edge combo $id attempt $attempt") `
+        "edge workflow combo $id lost foreground"
+      Require ([GraphCodeUiaGateState]::FocusControl($edgeWorkflowWindow, $control)) `
+        "edge workflow combo $id focus failed on attempt $attempt"
+      $delta = $index - [int]($after.Split("|")[0])
+      if ($delta -ne 0) {
+        $keys = [GraphCodeUiaGateState]::SendKeyInput(
+          [uint16]$(if ($delta -gt 0) { 0x28 } else { 0x26 }), [Math]::Abs($delta))
+        Require ($keys -eq [Math]::Abs($delta)) "edge workflow combo $id keyboard injection failed"
+      }
+      for ($retry = 0; $retry -lt 40; $retry++) {
+        $after = [GraphCodeUiaGateState]::ComboSelection($edgeWorkflowWindow, $id)
+        if ($after -eq "$index|$expected") { break }
+        Start-Sleep -Milliseconds 50
+      }
+      Write-Host "UIA_EDGE_COMBO id=$id attempt=$attempt before='$before' after='$after' expected='$index|$expected' keys=$delta"
+    }
+    Require ($after -eq "$index|$expected") "edge workflow combo $id expected '$index|$expected', observed '$after' from '$before'"
+    return $after
+  }
+  function Edge-TypeText([int] $id, [string] $text) {
+    $before = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
+    $after = $before
+    $stable = $false
+    for ($attempt = 1; $attempt -le 5 -and -not $stable; $attempt++) {
+      $control = [IntPtr]::Zero
+      $bounds = $null
+      for ($layoutRetry = 0; $layoutRetry -lt 20; $layoutRetry++) {
+        $control = [GraphCodeUiaGateState]::ControlById($edgeWorkflowWindow, $id)
+        if ($control -ne [IntPtr]::Zero) {
+          $bounds = @([GraphCodeUiaGateState]::WindowBounds($control))
+          if ([GraphCodeUiaGateState]::IsControlOwnedBy($edgeWorkflowWindow, $control, $id) -and
+              [GraphCodeUiaGateState]::HasVisibleBounds($control)) { break }
+        }
+        if ($layoutRetry -lt 19) { Start-Sleep -Milliseconds 50 }
+      }
+      $modalValid = [GraphCodeUiaGateState]::WindowIsVisible($edgeWorkflowWindow) -and
+        [GraphCodeUiaGateState]::WindowTextOf($edgeWorkflowWindow) -eq $script:edgeWorkflowTitle -and
+        [GraphCodeUiaGateState]::WindowProcessId($edgeWorkflowWindow) -eq $renameProcess.Id
+      $controlValid = $control -ne [IntPtr]::Zero -and
+        [GraphCodeUiaGateState]::IsControlOwnedBy($edgeWorkflowWindow, $control, $id) -and
+        [GraphCodeUiaGateState]::HasVisibleBounds($control)
+      Require ($modalValid -and $controlValid) `
+        "edge edit $id unavailable after layout wait: modal=$modalValid id=$([GraphCodeUiaGateState]::ControlIdOf($control)) owner=$([GraphCodeUiaGateState]::IsControlOwnedBy($edgeWorkflowWindow, $control, $id)) visible=$([GraphCodeUiaGateState]::HasVisibleBounds($control)) bounds=$($bounds -join ',')"
+      $focusBefore = [GraphCodeUiaGateState]::FocusedControlInDialog($edgeWorkflowWindow)
+      $foreground = Ensure-ShellForeground $edgeWorkflowWindow "edge edit $id attempt $attempt"
+      $focusSet = $foreground -and [GraphCodeUiaGateState]::FocusControl($edgeWorkflowWindow, $control)
+      $focusAfter = [GraphCodeUiaGateState]::FocusedControlInDialog($edgeWorkflowWindow)
+      $inputAttempted = $focusSet -and $focusAfter -eq $control
+      $inputVerifiedImmediately = $false
+      $clearExpected = [uint32]0; $clearSent = [uint32]0
+      $textExpected = [uint32]0; $textSent = [uint32]0
+      if ($inputAttempted) {
+        $inputVerifiedImmediately = [GraphCodeUiaGateState]::TypeEditTextById($edgeWorkflowWindow, $id, $text)
+        $clearExpected = [GraphCodeUiaGateState]::LastEditClearExpected
+        $clearSent = [GraphCodeUiaGateState]::LastEditClearSent
+        $textExpected = [GraphCodeUiaGateState]::LastEditTextExpected
+        $textSent = [GraphCodeUiaGateState]::LastEditTextSent
+      }
+      $inputCountsFull = $inputAttempted -and $clearExpected -gt 0 -and
+        $clearSent -eq $clearExpected -and $textSent -eq $textExpected
+      if ($inputAttempted) {
+        Require ($inputCountsFull) `
+          "edge edit $id SendInput count mismatch: clear=$clearSent/$clearExpected text=$textSent/$textExpected"
+      }
+      $after = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
+      $idle = $renameProcess.WaitForInputIdle(1000)
+      Require $idle "edge edit $id attempt $attempt did not reach native input idle"
+      $stable = $false
+      for ($stableRetry = 0; $stableRetry -lt 10; $stableRetry++) {
+        Start-Sleep -Milliseconds 150
+        $observed = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
+        if ($observed -ceq $after) { $stable = $true; break }
+        $after = $observed
+      }
+      $focusFinal = [GraphCodeUiaGateState]::FocusedControlInDialog($edgeWorkflowWindow)
+      Write-Host "UIA_EDGE_TEXT_STABLE id=$id attempt=$attempt before='$before' after='$after' expected='$text' modal=$modalValid foreground=$foreground idle=$idle stable=$stable focusBefore=0x$('{0:x}' -f $focusBefore.ToInt64()) focusAfter=0x$('{0:x}' -f $focusAfter.ToInt64()) focusFinal=0x$('{0:x}' -f $focusFinal.ToInt64()) inputAttempted=$inputAttempted inputBufferMatchedImmediately=$inputVerifiedImmediately inputCountsFull=$inputCountsFull clearSent=$clearSent/$clearExpected textSent=$textSent/$textExpected control=0x$('{0:x}' -f $control.ToInt64()) bounds=$($bounds -join ',')"
+      Require $stable "edge edit $id did not reach stable WM_GETTEXT state after native input: '$after'"
+      if ($after -cne $text -and $attempt -lt 5) { $before = $after }
+    }
+    Require ($stable -and $after -ceq $text) `
+      "edge workflow native SendInput did not fill $id after five attempts: expected='$text' observed='$after' control=0x$('{0:x}' -f $control.ToInt64())"
+    return $after
+  }
+  function Read-EdgeStableText([int] $id, [string] $label) {
+    $control = [GraphCodeUiaGateState]::ControlById($edgeWorkflowWindow, $id)
+    $bounds = if ($control -eq [IntPtr]::Zero) { @() } else { @([GraphCodeUiaGateState]::WindowBounds($control)) }
+    Require ($control -ne [IntPtr]::Zero -and
+      [GraphCodeUiaGateState]::IsControlOwnedBy($edgeWorkflowWindow, $control, $id) -and
+      [GraphCodeUiaGateState]::HasVisibleBounds($control)) `
+      "edge submit field $label ($id) unavailable: bounds=$($bounds -join ',')"
+    $idle = $renameProcess.WaitForInputIdle(1000)
+    Require $idle "edge submit field $label did not reach native input idle"
+    $first = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
+    Start-Sleep -Milliseconds 150
+    $second = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
+    Write-Host "UIA_EDGE_SUBMIT_FIELD name=$label id=$id idle=$idle first='$first' second='$second'"
+    Require ($first -ceq $second) "edge submit field $label ($id) was not stable: '$first' -> '$second'"
+    return $second
+  }
+  $edgeFooterClicks = [Collections.Generic.List[object]]::new()
+  function Edge-Click([int] $id, [string] $title) {
+    $control = [GraphCodeUiaGateState]::ControlById($edgeWorkflowWindow, $id)
+    Require ($control -ne [IntPtr]::Zero -and
+      [GraphCodeUiaGateState]::WindowIsVisible($edgeWorkflowWindow)) "edge workflow $title absent before click"
+    Require (Ensure-ShellForeground $edgeWorkflowWindow "edge $title") "edge workflow $title lost foreground"
+    $hit = [GraphCodeUiaGateState]::ClickScreenPoint($control)
+    Require ($null -ne $hit -and -not $hit.VisibleEmpty) "edge workflow $title has no visible native rectangle"
+    $method = "mouse"
+    if (-not $hit.HitTarget) {
+      Require ($hit.ScannedPoints -gt 0 -and $hit.CoveredPoints -eq $hit.ScannedPoints -and
+        @($hit.CoveringWindows).Count -gt 0 -and $id -eq 1 -and
+        [GraphCodeUiaGateState]::WindowIsVisible($edgeWorkflowWindow) -and
+        [GraphCodeUiaGateState]::WindowTextOf($edgeWorkflowWindow) -eq $script:edgeWorkflowTitle) `
+        "edge workflow $title mouse point covered: rect=$($hit.Left),$($hit.Top),$($hit.Right),$($hit.Bottom); covering=$($hit.CoveringId) $($hit.CoveringClass) $($hit.CoveringText); sampled=$($hit.CoveredPoints)/$($hit.ScannedPoints)"
+      $edit = [GraphCodeUiaGateState]::ControlById($edgeWorkflowWindow, 9105)
+      Require ($edit -ne [IntPtr]::Zero -and
+        [GraphCodeUiaGateState]::FocusControl($edgeWorkflowWindow, $edit) -and
+        [GraphCodeUiaGateState]::SendKeyInput(0x0D, 1) -eq 1) `
+        "edge workflow $title measured-occluded keyboard submit failed"
+      $method = "keyboardEnter"
+    }
+    $evidence = [ordered]@{ controlId = $id; title = $title; method = $method; hitTarget = $hit.HitTarget; point = @($hit.ScreenX, $hit.ScreenY); covered = "$($hit.CoveredPoints)/$($hit.ScannedPoints)"; covering = "$($hit.CoveringId) $($hit.CoveringClass)" }
+    $edgeFooterClicks.Add($evidence)
+    Write-Host ("UIA_EDGE_FOOTER_CLICK=" + ($evidence | ConvertTo-Json -Compress))
+    return $evidence
+  }
+  function Wait-EdgeClosed([string] $title) {
+    for ($retry = 0; $retry -lt 100; $retry++) {
+      if (-not [GraphCodeUiaGateState]::WindowIsVisible($edgeWorkflowWindow) -or
+          [GraphCodeUiaGateState]::WindowTextOf($edgeWorkflowWindow) -ne $title) { return }
+      Start-Sleep -Milliseconds 50
+    }
+    throw "edge workflow '$title' stayed native-visible: $(@([GraphCodeUiaGateState]::VisibleStaticTexts($edgeWorkflowWindow)) -join ' | ')"
+  }
+  $edgeBefore = Read-EdgeStub
+  $edgeBaselineCount = Edge-GraphCount $edgeBefore
+  Require ($edgeBaselineCount -gt 0 -and @($edgeBefore.edges).Count -eq 0) `
+    "edge workflow stub baseline not ready: $(Read-UiaTextFile $renameStubResultPath)"
+  $edgeCreateMenu = Open-EdgeMenu $false 5120
+  Wait-EdgeWindow $edgeWorkflowTitle
+  Write-Host ("UIA_EDGE_ENTRY menuId=5120 point=$($edgeCreateMenu.point -join ',') " +
+    "nativeTitle='$([GraphCodeUiaGateState]::WindowTextOf($edgeWorkflowWindow))'")
+  $edgeSourceLive = [GraphCodeUiaGateState]::ComboSelection($edgeWorkflowWindow, 9100)
+  $edgeSourceMatched = $edgeSourceLive -match ('^\d+\|(.+) — ' + [regex]::Escape($edgeWorkflowSource) + '$')
+  Require $edgeSourceMatched `
+    "edge source picker did not expose the seeded daemon ID/title: '$edgeSourceLive'; stub=$(Read-UiaTextFile $renameStubResultPath)"
+  $edgeSourceTitle = $Matches[1]
+  $edgeSourceChoice = Edge-Combo 9100 0 "$edgeSourceTitle — $edgeWorkflowSource"
+  $edgeTargetChoice = Edge-Combo 9101 1 "Stub node B — $edgeWorkflowTarget"
+  $edgeKind = Edge-Combo 9102 0 "Hand-off — continue execution"
+  $edgeCondition = Edge-Combo 9103 2 "Only after failure"
+  $edgeTransform = Edge-Combo 9104 1 "Apply a text template"
+  $edgeInvalidLog = Edge-LogBytes
+  $edgeInvalidCount = Edge-GraphCount (Read-EdgeStub)
+  $edgeInvalidClick = Edge-Click 1 "invalid edge OK"
+  $edgeReason = "Enter the template or script that should carry context."
+  $edgeReasonShown = $false
+  for ($retry = 0; $retry -lt 40; $retry++) {
+    if (@([GraphCodeUiaGateState]::VisibleStaticTexts($edgeWorkflowWindow)) -contains $edgeReason) { $edgeReasonShown = $true; break }
+    Start-Sleep -Milliseconds 50
+  }
+  Start-Sleep -Milliseconds 300
+  $edgeInvalidAfter = Read-EdgeStub
+  $edgeInvalidBytesUnchanged = (Edge-LogBytes) -ceq $edgeInvalidLog
+  Require ($edgeReasonShown -and [GraphCodeUiaGateState]::WindowIsVisible($edgeWorkflowWindow) -and
+    [GraphCodeUiaGateState]::WindowTextOf($edgeWorkflowWindow) -eq $edgeWorkflowTitle -and
+    $edgeInvalidBytesUnchanged -and (Edge-GraphCount $edgeInvalidAfter) -eq $edgeInvalidCount -and
+    @($edgeInvalidAfter.appliedEdgeCreates).Count -eq 0 -and @($edgeInvalidAfter.edges).Count -eq 0) `
+    "edge invalid template did not remain open/reject mutation: reason=$edgeReasonShown native=$([GraphCodeUiaGateState]::WindowIsVisible($edgeWorkflowWindow)) logUnchanged=$edgeInvalidBytesUnchanged stub=$(Read-UiaTextFile $renameStubResultPath)"
+  foreach ($field in @(
+      @{ Id = 9105; Text = "UIA edge payload" },
+      @{ Id = 9106; Text = "test -f done" },
+      @{ Id = 9107; Text = "3" })) {
+    Edge-TypeText $field.Id $field.Text
+  }
+  $edgePayloadBeforeSubmit = Read-EdgeStableText 9105 "payload"
+  $edgeUntilBeforeSubmit = Read-EdgeStableText 9106 "cycle guard until"
+  $edgeMaxBeforeSubmit = Read-EdgeStableText 9107 "cycle guard max"
+  Require ($edgePayloadBeforeSubmit -ceq "UIA edge payload" -and
+    $edgeUntilBeforeSubmit -ceq "test -f done" -and $edgeMaxBeforeSubmit -ceq "3") `
+    "edge submit fields differed from stable native input: payload='$edgePayloadBeforeSubmit' until='$edgeUntilBeforeSubmit' max='$edgeMaxBeforeSubmit'"
+  $edgeCreateClick = Edge-Click 1 "valid edge OK"
+  Wait-EdgeClosed $edgeWorkflowTitle
+  $edgeCreated = $null
+  for ($retry = 0; $retry -lt 100; $retry++) {
+    $edgeCreated = Read-EdgeStub
+    if (@($edgeCreated.appliedEdgeCreates).Count -eq 1) { break }
+    Start-Sleep -Milliseconds 100
+  }
+  Require (@($edgeCreated.appliedEdgeCreates).Count -eq 1 -and @($edgeCreated.edges).Count -eq 1 -and
+    (Edge-GraphCount $edgeCreated) -eq $edgeInvalidCount + 1) `
+    "edge create never applied once: $(Read-UiaTextFile $renameStubResultPath); stderr=$(Read-UiaTextFile $renameStubErrorPath)"
+  $edgeId = [string]$edgeCreated.appliedEdgeCreates[0]
+  $edgeCreateRequest = [string]$edgeCreated.appliedEdgeCreateRequests[0]
+  Require ($edgeId -match '^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}$' -and
+    -not [string]::IsNullOrEmpty($edgeCreateRequest) -and
+    -not (@($edgeCreated.unansweredRequests) -contains $edgeCreateRequest)) `
+    "edge create missing stable id/correlated response: $(Read-UiaTextFile $renameStubResultPath)"
+  $edgeCreateWire = (Read-DaemonCommandLog $renameCommandLogPath | ConvertFrom-Json).graphCommand
+  $edgeSpec = $edgeCreateWire.command.createEdge.spec
+  Require ($edgeCreateWire.projectPath -eq "graphcode://stub/project" -and
+    $edgeCreateWire.command.createEdge.from -eq $edgeWorkflowSource -and
+    $edgeCreateWire.command.createEdge.to -eq $edgeWorkflowTarget -and
+    $edgeSpec.kind -eq "handoff" -and $edgeSpec.condition -eq "onFailure" -and
+    $edgeSpec.payloadTransform.template._0 -eq "UIA edge payload" -and
+    $edgeSpec.cycleGuard.maxIterations -eq 3 -and
+    $edgeSpec.cycleGuard.until -eq "test -f done" -and
+    $null -eq $edgeSpec.cycleGuard.stopAfterPassesWithoutImprovement -and
+    $null -eq $edgeSpec.spawnTargetProjectPath) `
+    "edge create wire differs from native choices: $(Read-DaemonCommandLog $renameCommandLogPath)"
+  $edgeRendered = $null
+  for ($retry = 0; $retry -lt 100; $retry++) {
+    $edgeRendered = Read-EdgeStub
+    if (@($edgeRendered.edges).Count -eq 1 -and $edgeRendered.edges[0].id -eq $edgeId) { break }
+    Start-Sleep -Milliseconds 100
+  }
+  $edgeEditMenu = Open-EdgeMenu $true 5110
+  Require (($edgeEditMenu.menuIds -join "|") -ceq "5110|5111") `
+    "republished edge was not hit-tested as a single editable connection"
+  $edgeWorkflowTitle = "Edit edge"
+  Wait-EdgeWindow $edgeWorkflowTitle
+  function Assert-EdgePrefill([string] $expectedCondition) {
+    $from = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, 9100)
+    $to = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, 9101)
+    $kind = [GraphCodeUiaGateState]::ComboSelection($edgeWorkflowWindow, 9102)
+    $condition = [GraphCodeUiaGateState]::ComboSelection($edgeWorkflowWindow, 9103)
+    $transform = [GraphCodeUiaGateState]::ComboSelection($edgeWorkflowWindow, 9104)
+    $payload = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, 9105)
+    $until = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, 9106)
+    $max = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, 9107)
+    Require ($from -eq $edgeWorkflowSource -and $to -eq $edgeWorkflowTarget -and
+      $kind -eq "0|Hand-off — continue execution" -and $condition -eq $expectedCondition -and
+      $transform -eq "1|Apply a text template" -and $payload -eq "UIA edge payload" -and
+      $until -eq "test -f done" -and $max -eq "3") `
+      "edge editor prefill differs: from=$from to=$to kind=$kind condition=$condition transform=$transform payload=$payload until=$until max=$max; stub=$(Read-UiaTextFile $renameStubResultPath)"
+    return [ordered]@{ from = $from; to = $to; kind = $kind; condition = $condition; transform = $transform; payload = $payload; until = $until; max = $max }
+  }
+  $edgePrefill = Assert-EdgePrefill "2|Only after failure"
+  $edgeEditedChoice = Edge-Combo 9103 1 "Only after success"
+  $edgeEditClick = Edge-Click 1 "update edge OK"
+  Wait-EdgeClosed $edgeWorkflowTitle
+  $edgeUpdated = $null
+  for ($retry = 0; $retry -lt 100; $retry++) {
+    $edgeUpdated = Read-EdgeStub
+    if (@($edgeUpdated.appliedEdgeUpdates).Count -eq 1) { break }
+    Start-Sleep -Milliseconds 100
+  }
+  Require (@($edgeUpdated.appliedEdgeUpdates).Count -eq 1 -and
+    @($edgeUpdated.edges).Count -eq 1 -and $edgeUpdated.edges[0].id -eq $edgeId -and
+    $edgeUpdated.edges[0].from -eq $edgeWorkflowSource -and
+    $edgeUpdated.edges[0].to -eq $edgeWorkflowTarget -and
+    $edgeUpdated.edges[0].condition -eq "onSuccess" -and
+    (Edge-GraphCount $edgeUpdated) -eq $edgeInvalidCount + 2 -and
+    [int]$edgeUpdated.graphSequence -gt [int]$edgeCreated.graphSequence) `
+    "edge update did not republish same single edge: $(Read-UiaTextFile $renameStubResultPath); stderr=$(Read-UiaTextFile $renameStubErrorPath)"
+  $edgeUpdateRequest = [string]$edgeUpdated.appliedEdgeUpdateRequests[0]
+  Require (-not [string]::IsNullOrEmpty($edgeUpdateRequest) -and
+    -not (@($edgeUpdated.unansweredRequests) -contains $edgeUpdateRequest)) `
+    "edge update response not correlated: $(Read-UiaTextFile $renameStubResultPath)"
+  $edgeUpdateWire = (Read-DaemonCommandLog $renameCommandLogPath | ConvertFrom-Json).graphCommand
+  $edgeChange = $edgeUpdateWire.command.updateEdge
+  $originalSpec = $edgeChange.expectedSpec | ConvertTo-Json -Depth 8 -Compress | ConvertFrom-Json
+  $originalSpec.condition = "onSuccess"
+  Require ($edgeUpdateWire.projectPath -eq "graphcode://stub/project" -and
+    $edgeChange.id -eq $edgeId -and $edgeChange.from -eq $edgeWorkflowSource -and
+    $edgeChange.to -eq $edgeWorkflowTarget -and
+    $edgeChange.expectedSpec.condition -eq "onFailure" -and $edgeChange.spec.condition -eq "onSuccess" -and
+    ($originalSpec | ConvertTo-Json -Depth 8 -Compress) -ceq ($edgeChange.spec | ConvertTo-Json -Depth 8 -Compress)) `
+    "edge update CAS wire changed more than condition: $(Read-DaemonCommandLog $renameCommandLogPath)"
+  $edgeUpdateMenu = Open-EdgeMenu $true 5110
+  Wait-EdgeWindow $edgeWorkflowTitle
+  $edgePostEdit = Assert-EdgePrefill "1|Only after success"
+  $edgeCancelledChoice = Edge-Combo 9103 2 "Only after failure"
+  $edgeCancelBefore = Read-EdgeStub
+  $edgeCancelBytesBefore = Edge-LogBytes
+  $edgeCancelClick = Edge-Click 2 "cancel changed edge"
+  Wait-EdgeClosed $edgeWorkflowTitle
+  Start-Sleep -Milliseconds 300
+  $edgeCancelAfter = Read-EdgeStub
+  $edgeCancelBytesUnchanged = (Edge-LogBytes) -ceq $edgeCancelBytesBefore
+  Require ($edgeCancelBytesUnchanged -and
+    (Edge-GraphCount $edgeCancelAfter) -eq (Edge-GraphCount $edgeCancelBefore) -and
+    @($edgeCancelAfter.appliedEdgeUpdates).Count -eq @($edgeCancelBefore.appliedEdgeUpdates).Count -and
+    @($edgeCancelAfter.edges).Count -eq 1 -and $edgeCancelAfter.edges[0].condition -eq "onSuccess") `
+    "changed edge Cancel mutated daemon/command log: $(Read-UiaTextFile $renameStubResultPath)"
+  $edgeFinalMenu = Open-EdgeMenu $true 5110
+  Wait-EdgeWindow $edgeWorkflowTitle
+  $edgeCancelReopened = Assert-EdgePrefill "1|Only after success"
+  $edgeFinalClick = Edge-Click 2 "close verified edge"
+  Wait-EdgeClosed $edgeWorkflowTitle
+  $edgeWorkflowEvidence = [ordered]@{
+    entryPoint = $edgeCreateMenu
+    invalid = [ordered]@{ reason = $edgeReason; reasonShown = $edgeReasonShown; nativeVisible = $true; nativeTitle = "Create or edit edge"; commandLogBytesUnchanged = $edgeInvalidBytesUnchanged; graphCommandsBefore = $edgeInvalidCount; graphCommandsAfter = (Edge-GraphCount $edgeInvalidAfter); appliedBefore = 0; appliedAfter = @($edgeInvalidAfter.appliedEdgeCreates).Count; click = $edgeInvalidClick }
+    created = [ordered]@{ sourceChoice = $edgeSourceChoice; targetChoice = $edgeTargetChoice; kind = $edgeKind; condition = $edgeCondition; transform = $edgeTransform; wire = $edgeCreateWire; requestId = $edgeCreateRequest; answered = $true; appliedCount = @($edgeCreated.appliedEdgeCreates).Count; graphSequence = $edgeCreated.graphSequence; click = $edgeCreateClick }
+    rendered = [ordered]@{ edgeCount = @($edgeRendered.edges).Count; edgeId = $edgeId; source = $edgeWorkflowSource; target = $edgeWorkflowTarget; menu = $edgeEditMenu }
+    edited = [ordered]@{ prefill = $edgePrefill; changedField = $edgeEditedChoice; wire = $edgeUpdateWire; requestId = $edgeUpdateRequest; answered = $true; appliedCount = @($edgeUpdated.appliedEdgeUpdates).Count; graphSequence = $edgeUpdated.graphSequence; renderedEdgeId = [string]$edgeUpdated.edges[0].id; renderedCount = @($edgeUpdated.edges).Count; postEditPrefill = $edgePostEdit; menu = $edgeUpdateMenu; click = $edgeEditClick }
+    cancel = [ordered]@{ changedField = $edgeCancelledChoice; commandLogBytesUnchanged = $edgeCancelBytesUnchanged; graphCommandsBefore = (Edge-GraphCount $edgeCancelBefore); graphCommandsAfter = (Edge-GraphCount $edgeCancelAfter); appliedBefore = @($edgeCancelBefore.appliedEdgeUpdates).Count; appliedAfter = @($edgeCancelAfter.appliedEdgeUpdates).Count; reopenedValue = $edgeCancelReopened.condition; menu = $edgeFinalMenu; click = $edgeCancelClick; closeClick = $edgeFinalClick }
+    occlusion = @($edgeFooterClicks)
+  }
+  Write-Host ("UIA_EDGE_WORKFLOW_EVIDENCE=" + ($edgeWorkflowEvidence | ConvertTo-Json -Depth 8 -Compress))
+
   # --- Node creation sheet (ledger row 96) -------------------------------------
   # Same connected shell, same stub daemon. Every loop-type change and button
   # press below is a real cursor move plus SendInput at the control's live window
@@ -6636,6 +7144,7 @@ try {
     providerTeardownSafe = $retainedProviderSafe
     connectionFailureBanner = $connectionFailureBannerEvidence
     canvasContextMenu = $canvasContextMenuEvidence
+    edgeWorkflow = $edgeWorkflowEvidence
     nodeCreationSheet = $nodeCreationSheetEvidence
     contextMenuItemCount = $projectMenuItems.Count
     contextMenuMoveProjectText = $moveProjectItem.Text
