@@ -11,9 +11,9 @@ param(
   [string] $NodeBId = "",
   [string] $NodeATitle = "Stub node A",
   [string] $NodeBTitle = "Stub node B",
-  # Apply renameNode graph commands to the stub's own graph and publish the
-  # result as a new graphChanged event, so a caller can observe what a daemon
-  # that accepted the command would send back.
+  # Apply renameNode and createNode graph commands to the stub's own graph and
+  # publish the result as a new graphChanged event, so a caller can observe what
+  # a daemon that accepted the command would send back.
   [switch] $ApplyGraphCommands
 )
 
@@ -35,6 +35,12 @@ $nodeTitles = [ordered]@{ $nodeA = $NodeATitle; $nodeB = $NodeBTitle }
 $nodeStates = @{ $nodeA = @("running", "busy"); $nodeB = @("idle", "idle") }
 $graphSequence = 1
 $appliedRenames = [Collections.Generic.List[string]]::new()
+# Only nodes created through an applied createNode carry entries here; seeded
+# nodes keep their historical turnBased shape with no backend/model fields.
+$nodeLoopTypes = @{}
+$nodeExtraFields = @{}
+$appliedCreates = [Collections.Generic.List[string]]::new()
+$appliedCreateRequests = [Collections.Generic.List[string]]::new()
 
 function ConvertTo-StubJsonText([string] $value) {
   return $value.Replace('\', '\\').Replace('"', '\"')
@@ -43,8 +49,10 @@ function ConvertTo-StubJsonText([string] $value) {
 function New-StubGraphEvent {
   $nodes = foreach ($id in @($nodeTitles.Keys)) {
     $state = $nodeStates[$id]
+    $loopType = if ($nodeLoopTypes.ContainsKey($id)) { [string]$nodeLoopTypes[$id] } else { "turnBased" }
+    $extra = if ($nodeExtraFields.ContainsKey($id)) { [string]$nodeExtraFields[$id] } else { "" }
     '{"id":"' + $id + '","title":"' + (ConvertTo-StubJsonText ([string]$nodeTitles[$id])) +
-      '","loopType":"turnBased","state":"' + $state[0] +
+      '","loopType":"' + (ConvertTo-StubJsonText $loopType) + '"' + $extra + ',"state":"' + $state[0] +
       '","activity":"stub","presence":{"presence":"' + $state[1] + '","confidence":"reported"}}'
   }
   return '{"version":2,"kind":"event","sequence":' + $graphSequence +
@@ -125,6 +133,8 @@ function Write-Result {
     graphSent = $graphSent
     busyObserved = $busyObserved
     appliedRenames = @($appliedRenames)
+    appliedCreates = @($appliedCreates)
+    appliedCreateRequests = @($appliedCreateRequests)
   }
   $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $ResultPath -NoNewline
 }
@@ -176,6 +186,7 @@ try {
         $requestCommands[[string]$frame.requestID] = [string]$commandName
         if ($commandName) { $seenCommands.Add([string]$commandName) }
         $renameApplied = $false
+        $createApplied = $false
         if ($ApplyGraphCommands -and $commandName -eq "graphCommand") {
           $rename = $frame.command.graphCommand.command.renameNode
           if ($null -ne $rename) {
@@ -184,6 +195,30 @@ try {
               $nodeTitles[$renameTarget] = [string]$rename.title
               $appliedRenames.Add($renameTarget + "=" + [string]$rename.title)
               $renameApplied = $true
+            }
+          }
+          # Apply exactly the createNode the shell sent: its own id, title, loop
+          # type, backend and model tier. Nothing is defaulted or invented; a
+          # create without an id or with a duplicate id is not applied.
+          $create = $frame.command.graphCommand.command.createNode._0
+          if ($null -ne $create) {
+            $createId = [string]$create.id
+            if (-not [string]::IsNullOrEmpty($createId) -and -not $nodeTitles.Contains($createId)) {
+              $nodeTitles[$createId] = [string]$create.title
+              $nodeStates[$createId] = @("idle", "idle")
+              $nodeLoopTypes[$createId] = [string]$create.loopType
+              $extraFields = ""
+              foreach ($field in @("backend", "modelTier", "triggerPrompt")) {
+                $fieldValue = $create.$field
+                if ($null -ne $fieldValue) {
+                  $extraFields += ',"' + $field + '":"' + (ConvertTo-StubJsonText ([string]$fieldValue)) + '"'
+                }
+              }
+              $nodeExtraFields[$createId] = $extraFields
+              $appliedCreates.Add(($createId, [string]$create.title, [string]$create.loopType,
+                [string]$create.backend, [string]$create.modelTier, [string]$create.triggerPrompt) -join "|")
+              $appliedCreateRequests.Add([string]$frame.requestID)
+              $createApplied = $true
             }
           }
         }
@@ -204,7 +239,7 @@ try {
           $graphSent = $true
           $graphSentOnConnection = $true
         }
-        if ($renameApplied) {
+        if ($renameApplied -or $createApplied) {
           $graphSequence++
           if (-not (Send-Frame $server (New-StubGraphEvent))) { break }
           $graphSent = $true

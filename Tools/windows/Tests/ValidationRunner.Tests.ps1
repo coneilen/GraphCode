@@ -1369,6 +1369,35 @@ Start-Sleep -Seconds 60
   if ($uiaLiveGateSource -notmatch '(?s)canvasContextMenu = \$canvasContextMenuEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
     throw "RED: UIA final summary loses nested canvas menu items and edge action measurements"
   }
+  if ($stubDaemonSource -notmatch '\$frame\.command\.graphCommand\.command\.createNode\._0' -or
+      $stubDaemonSource -notmatch 'appliedCreates' -or
+      $stubDaemonSource -notmatch '\$nodeLoopTypes\[\$id\]' -or
+      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied\)') {
+    throw "RED: stub daemon cannot apply exactly the createNode it received and republish the created loop type"
+  }
+  if ($uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_SHEET_EVIDENCE' -or
+      $uiaLiveGateSource -notmatch '\$nodeCreationSheetEvidence = \[ordered\]@\{' -or
+      $uiaLiveGateSource -notmatch 'ClickScreenPoint' -or
+      $uiaLiveGateSource -notmatch 'VisibleChildIds\(' -or
+      $uiaLiveGateSource -notmatch '9600 \+ \$tileIndex' -or
+      $uiaLiveGateSource -notmatch 'Say what done looks like and use positive timing values\.' -or
+      $uiaLiveGateSource -notmatch 'Say what to do each time to continue\.' -or
+      $uiaLiveGateSource -notmatch 'commandLogUnchanged = ' -or
+      $uiaLiveGateSource -notmatch 'reasonClearedOnTypeChange = ' -or
+      $uiaLiveGateSource -notmatch 'SendKeyInput\(' -or
+      $uiaLiveGateSource -notmatch 'ComboSelection\(' -or
+      $uiaLiveGateSource -notmatch 'graphCommand\.command\.createNode\._0' -or
+      $uiaLiveGateSource -notmatch 'node creation dispatched modelTier' -or
+      $uiaLiveGateSource -notmatch 'appliedCreates' -or
+      $uiaLiveGateSource -notmatch 'afterTileClick = ' -or
+      $uiaLiveGateSource -notmatch 'afterEdit = ' -or
+      $uiaLiveGateSource -notmatch 'renderedSidebarCount -gt 0' -or
+      $uiaLiveGateSource -notmatch 'renderedCardCount -gt 0') {
+    throw "RED: UIA live gate does not drive the node creation sheet through conditional fields, rejected input, and a daemon-rendered create"
+  }
+  if ($uiaLiveGateSource -notmatch '(?s)nodeCreationSheet = \$nodeCreationSheetEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
+    throw "RED: UIA final summary omits the parsable node creation sheet evidence"
+  }
   if ($shellTests -notmatch '(?s)Windows update feed executable tests.*?zig test src\\WindowsUpdates\.zig.*?-lwinhttp') {
     throw "RED: Windows shell validation does not run the native updater tests"
   }
