@@ -3539,7 +3539,7 @@ try {
     Add-Type -AssemblyName UIAutomationTypes
     $element = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$window)
     $reads = 0
-    for ($index = 0; $index -lt ($requestedReads - 1); $index++) {
+    for ($index = 0; $index -lt $requestedReads; $index++) {
       $null = $element.Current.Name
       $reads++
       Start-Sleep -Milliseconds 5
@@ -3847,7 +3847,7 @@ try {
   Start-Sleep -Milliseconds 100
   $filteredJumpNames = @([GraphCodeUiaGateState]::GetListItems($jumpListHandle))
   Require (($filteredJumpNames.Count -eq 1) -and
-           ($filteredJumpNames[0] -match 'UIA loop B.*UIA project.*Proactive.*running')) `
+           ($filteredJumpNames[0] -match 'UIA loop B.*UIA project.*Proactive.*paused')) `
     "jump palette did not live-filter to the ranked keyboard destination ($($filteredJumpNames -join '|'))"
   Require ([GraphCodeUiaGateState]::PostKeyboard($jumpWindow, 0x0D)) `
     "jump palette rejected Return activation"
