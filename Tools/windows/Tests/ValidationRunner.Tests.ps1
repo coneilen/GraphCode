@@ -1387,6 +1387,8 @@ Start-Sleep -Seconds 60
   if ($stubDaemonSource -notmatch '\$frame\.command\.graphCommand\.command\.createNode\._0' -or
       $stubDaemonSource -notmatch 'appliedCreates' -or
       $stubDaemonSource -notmatch '\$nodeLoopTypes\[\$id\]' -or
+      $stubDaemonSource -notmatch '(?s)function Write-StubResultFile.*?for \(\$attempt = 0; \$attempt -lt 40; \$attempt\+\+\).*?Set-Content -LiteralPath \$path -Value \$json -NoNewline -ErrorAction Stop.*?catch \[IO\.IOException\].*?Start-Sleep -Milliseconds 25' -or
+      $stubDaemonSource -notmatch '\$null = Write-StubResultFile \$ResultPath \$json' -or
       $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied(?: -or \$promotionApplied)?\)') {
     throw "RED: stub daemon cannot apply exactly the createNode it received and republish the created loop type"
   }

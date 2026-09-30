@@ -129,6 +129,18 @@ function Send-Frame([IO.Stream] $stream, [string] $json, [switch] $Fragment) {
   }
 }
 
+function Write-StubResultFile([string] $path, [string] $json) {
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    try {
+      Set-Content -LiteralPath $path -Value $json -NoNewline -ErrorAction Stop
+      return ($attempt + 1)
+    } catch [IO.IOException] {
+      if ($attempt -eq 39) { throw }
+      Start-Sleep -Milliseconds 25
+    }
+  }
+}
+
 function Write-Result {
   $graphNodes = @(
     foreach ($id in $nodeTitles.Keys) {
@@ -174,7 +186,8 @@ function Write-Result {
     edges = @($edges)
     graphSequence = $graphSequence
   }
-  $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $ResultPath -NoNewline
+  $json = $result | ConvertTo-Json -Compress
+  $null = Write-StubResultFile $ResultPath $json
 }
 
 try {
