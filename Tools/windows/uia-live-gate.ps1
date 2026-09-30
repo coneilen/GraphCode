@@ -6899,6 +6899,8 @@ try {
     }
   }
   Write-Host ("UIA_NODE_CREATION_SHEET_EVIDENCE=" + ($nodeCreationSheetEvidence | ConvertTo-Json -Compress -Depth 8))
+  Require ($edgeChange.spec.condition -eq "onFailure") `
+    "RED: edited edge condition '$($edgeChange.spec.condition)' unexpectedly differs from old 'onFailure'"
 
   Require ([GraphCodeUiaGateState]::PostCommand($renameShellWindow, 0x5002)) `
     "connected-daemon shell rejected the tray Exit command"
