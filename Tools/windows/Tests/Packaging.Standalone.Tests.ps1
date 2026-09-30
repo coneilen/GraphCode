@@ -1,10 +1,14 @@
 [CmdletBinding()]
-param()
+param(
+  [switch] $SelfTest,
+  [switch] $HelpersOnly
+)
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $shellRoot = Join-Path $repoRoot "graphcode-windows"
 $fixture = Join-Path ([IO.Path]::GetTempPath()) "graphcode-standalone-$([guid]::NewGuid())"
+$setupCases = @{ Completed = 0 }
 $definitions = @{}
 foreach ($file in @("package.ps1", "PackageRuntime.ps1")) {
   $path = Join-Path $repoRoot "Tools\windows\$file"
@@ -27,7 +31,8 @@ foreach ($name in @("Fail", "Require", "Get-Manifest", "Write-Metadata", "Write-
 
 function Invoke-Setup(
   [string] $hostPath, [string[]] $arguments, [string] $expectedError,
-  [string] $entryPoint = $setup, [string] $successMarker = "Package verification: PASS"
+  [string] $entryPoint = $setup, [string] $successMarker = "Package verification: PASS",
+  [ValidateRange(1, 60000)][int] $timeoutMilliseconds = 60000
 ) {
   $start = [Diagnostics.ProcessStartInfo]::new()
   $start.FileName = $hostPath
@@ -42,31 +47,387 @@ function Invoke-Setup(
   foreach ($variable in @($start.Environment.Keys | Where-Object { $_ -like "GRAPHCODE_*" -or $_ -like "SWIFT*" -or $_ -like "ZIG*" })) {
     [void] $start.Environment.Remove($variable)
   }
-  foreach ($argument in @("-NoProfile", "-NonInteractive", "-File", $entryPoint) + $arguments) {
+  $gate = Join-Path $fixture "setup-start-$([guid]::NewGuid())"
+  $launch = @{ gate = $gate; entryPoint = $entryPoint; arguments = @($arguments) } | ConvertTo-Json -Compress
+  $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($launch))
+  # Assignment precedes the gate, so even an immediately spawning script belongs to our job.
+  $command = @'
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+$global:LASTEXITCODE = 0
+$launch = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("LAUNCH_PAYLOAD")) | ConvertFrom-Json
+while (-not [IO.File]::Exists($launch.gate)) { [Threading.Thread]::Sleep(10) }
+$tokens = foreach ($argument in $launch.arguments) {
+  if ($argument -match '^-[A-Za-z][A-Za-z0-9]*$') { $argument }
+  else { "'" + $argument.Replace("'", "''") + "'" }
+}
+# Array splatting makes -Command positional; parse only parameter tokens and quoted literal values.
+& ([scriptblock]::Create('& $launch.entryPoint ' + ($tokens -join ' ')))
+exit $LASTEXITCODE
+'@
+  $command = $command.Replace("LAUNCH_PAYLOAD", $payload)
+  foreach ($argument in @("-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand",
+      [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)))) {
     [void] $start.ArgumentList.Add($argument)
   }
   $process = [Diagnostics.Process]::new()
   $process.StartInfo = $start
+  $job = [IntPtr]::Zero
+  $started = $false
+  $assigned = $false
+  $stdout = $null
+  $stderr = $null
+  $primaryError = $null
+  $clock = [Diagnostics.Stopwatch]::StartNew()
   try {
-    if (-not $process.Start()) { throw "Could not start standalone setup host" }
+    $job = [StandaloneProcessJob]::Create()
+    $started = $process.Start()
+    if (-not $started) { throw "Could not start standalone setup host" }
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit(60000)) {
-      $process.Kill($true)
+    [StandaloneProcessJob]::Assign($job, $process.Handle)
+    $assigned = $true
+    [IO.File]::WriteAllText($gate, "assigned")
+    $remaining = [Math]::Max(0, $timeoutMilliseconds - [int] $clock.ElapsedMilliseconds)
+    if (-not $process.WaitForExit($remaining)) {
       throw "Standalone setup timed out"
+    }
+    $remaining = [Math]::Max(0, $timeoutMilliseconds - [int] $clock.ElapsedMilliseconds)
+    if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]] @($stdout, $stderr), $remaining)) {
+      throw "Standalone setup output capture timed out"
     }
     $output = $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()
     if ($expectedError) {
       if ($process.ExitCode -eq 0 -or $output -notmatch [regex]::Escape($expectedError)) {
         throw "Standalone rejection was not specific ($expectedError): $output"
       }
-    } elseif ($process.ExitCode -ne 0 -or $output -notmatch [regex]::Escape($successMarker)) {
+    } elseif ($process.ExitCode -ne 0 -or $output -notmatch ("(?m)^" + [regex]::Escape($successMarker) + "\r?$")) {
       throw "Standalone verification failed with $hostPath`: $output"
     }
-  } finally { $process.Dispose() }
+    $setupCases.Completed++
+  } catch {
+    $primaryError = $_
+    throw
+  } finally {
+    $cleanupErrors = [Collections.Generic.List[string]]::new()
+    try {
+      if ($assigned) {
+        [StandaloneProcessJob]::Terminate($job)
+        [StandaloneProcessJob]::WaitForEmpty($job, 5000)
+      } elseif ($started -and -not $process.HasExited) {
+        $process.Kill($true)
+      }
+      if ($started -and -not $process.WaitForExit(5000)) { throw "Standalone host survived termination" }
+    } catch { $cleanupErrors.Add("owned process termination: $($_.Exception.Message)") }
+    try {
+      if ($job -ne [IntPtr]::Zero) { [StandaloneProcessJob]::Close($job) }
+    } catch { $cleanupErrors.Add("closing owned job: $($_.Exception.Message)") }
+    try {
+      if ($stdout -and $stderr) {
+        if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]] @($stdout, $stderr), 5000)) {
+          throw "Standalone output readers did not complete after owned teardown"
+        }
+        if ($primaryError) {
+          $primaryError.Exception.Data["StandaloneOutput"] = $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()
+          if ($primaryError.Exception.Message -in @("Standalone setup timed out", "Standalone setup output capture timed out") -and
+              $primaryError.Exception.Data["StandaloneOutput"].Trim()) {
+            Write-Warning "Standalone setup captured output after owned teardown: $($primaryError.Exception.Data['StandaloneOutput'])" -WarningAction Continue
+          }
+        }
+      }
+    } catch { $cleanupErrors.Add("draining redirected output: $($_.Exception.Message)") }
+    try { $process.Dispose() } catch { $cleanupErrors.Add("disposing host: $($_.Exception.Message)") }
+    if ($cleanupErrors.Count) {
+      $diagnostic = "Standalone setup teardown failed: $($cleanupErrors -join '; ')"
+      if ($primaryError) {
+        $primaryError.Exception.Data["StandaloneTeardownFailure"] = $diagnostic
+        Write-Warning $diagnostic -WarningAction Continue
+      } else { throw $diagnostic }
+    }
+  }
 }
 
-try {
+function Invoke-StandaloneFixture {
+  [CmdletBinding()]
+  param([scriptblock] $action)
+  $primaryError = $null
+  try {
+    & $action
+  } catch {
+    $primaryError = $_
+    throw
+  } finally {
+    try {
+      if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force }
+    } catch {
+      if (-not $primaryError) { throw }
+      $diagnostic = "Standalone fixture cleanup failed: $($_.Exception.Message)"
+      $primaryError.Exception.Data["StandaloneCleanupFailure"] = $diagnostic
+      Write-Warning $diagnostic -WarningAction Continue
+    }
+  }
+}
+
+if (-not ("StandaloneProcessJob" -as [type])) {
+  Add-Type @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+public static class StandaloneProcessJob {
+    [StructLayout(LayoutKind.Sequential)]
+    struct BasicLimits { public long ProcessTime, JobTime; public uint Flags; public UIntPtr Min, Max; public uint Active; public UIntPtr Affinity; public uint Priority, Scheduling; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct IoCounters { public ulong ReadOps, WriteOps, OtherOps, ReadBytes, WriteBytes, OtherBytes; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct Limits { public BasicLimits Basic; public IoCounters Io; public UIntPtr ProcessMemory, JobMemory, PeakProcessMemory, PeakJobMemory; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct Accounting { public long User, Kernel, PeriodUser, PeriodKernel; public uint Faults, Total, Active, Terminated; }
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr CreateJobObjectW(IntPtr attributes, IntPtr name);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job, int info, ref Limits limits, uint size);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int info, out Accounting accounting, uint size, IntPtr length);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateJobObject(IntPtr job, uint code);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
+    public static IntPtr Create() {
+        var job = CreateJobObjectW(IntPtr.Zero, IntPtr.Zero);
+        if (job == IntPtr.Zero) throw new Win32Exception();
+        var limits = new Limits(); limits.Basic.Flags = 0x2000; // KILL_ON_JOB_CLOSE
+        if (!SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf<Limits>())) {
+            var error = new Win32Exception(); CloseHandle(job); throw error;
+        }
+        return job;
+    }
+    public static void Assign(IntPtr job, IntPtr process) { if (!AssignProcessToJobObject(job, process)) throw new Win32Exception(); }
+    public static uint Active(IntPtr job) {
+        Accounting value;
+        if (!QueryInformationJobObject(job, 1, out value, (uint)Marshal.SizeOf<Accounting>(), IntPtr.Zero)) throw new Win32Exception();
+        return value.Active;
+    }
+    public static void Terminate(IntPtr job) { if (!TerminateJobObject(job, 124)) throw new Win32Exception(); }
+    public static void WaitForEmpty(IntPtr job, int milliseconds) {
+        var clock = Stopwatch.StartNew();
+        while (Active(job) != 0) {
+            if (clock.ElapsedMilliseconds >= milliseconds) throw new TimeoutException("Owned standalone job still has active processes");
+            System.Threading.Thread.Sleep(10);
+        }
+    }
+    public static void Close(IntPtr job) { if (!CloseHandle(job)) throw new Win32Exception(); }
+}
+'@
+}
+
+function Test-StandaloneHarness {
+  $hostPath = (Get-Command pwsh).Source
+  $failures = 0
+  $passed = 0
+  $descendantSource = @'
+param([string] $hostPath, [string] $mode)
+$self = [Diagnostics.Process]::GetCurrentProcess()
+$self.StartTime.ToUniversalTime().Ticks.ToString() + ":" + $self.Id |
+  Set-Content (Join-Path $PSScriptRoot "root-identity")
+$self.Dispose()
+$start = [Diagnostics.ProcessStartInfo]::new($hostPath)
+$start.UseShellExecute = $false
+$start.CreateNoWindow = $true
+$start.WorkingDirectory = $PSScriptRoot
+$payload = "[IO.File]::WriteAllText('" + (Join-Path $PSScriptRoot "descendant-ready").Replace("'", "''") +
+  "', 'ready'); [Threading.Thread]::Sleep(30000)"
+foreach ($arg in @("-NoProfile", "-NonInteractive", "-EncodedCommand",
+    [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload)))) {
+  [void] $start.ArgumentList.Add($arg)
+}
+$descendant = [Diagnostics.Process]::Start($start)
+$descendant.StartTime.ToUniversalTime().Ticks.ToString() + ":" + $descendant.Id |
+  Set-Content (Join-Path $PSScriptRoot "descendant-identity")
+$deadline = [DateTime]::UtcNow.AddSeconds(5)
+while (-not (Test-Path (Join-Path $PSScriptRoot "descendant-ready"))) {
+  if ([DateTime]::UtcNow -ge $deadline) { throw "Descendant did not become ready" }
+  Start-Sleep -Milliseconds 10
+}
+Write-Output "Package verification: PASS"
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot "marker-written"), "ready")
+if ($mode -like "timeout*") { [Threading.Thread]::Sleep(30000) }
+'@
+  foreach ($case in @("success", "exit-stderr", "malformed-marker", "missing-marker", "timeout",
+      "inherited-pipes", "cleanup-failure", "primary-and-cleanup", "timeout-and-cleanup",
+      "exit-and-cleanup", "marker-and-cleanup")) {
+    $caseRoot = Join-Path $fixture $case
+    New-Item -ItemType Directory -Path $caseRoot -Force | Out-Null
+    $worker = Join-Path $fixture "$case-worker.ps1"
+    $source = @'
+param([string] $sourcePath, [string] $caseRoot, [string] $case, [string] $hostPath)
+$ErrorActionPreference = "Stop"
+. $sourcePath -HelpersOnly
+$fixture = $caseRoot
+Write-Output "CASE START: $case"
+$entry = Join-Path $fixture "child.ps1"
+switch ($case) {
+  "success" { $child = 'Write-Output "Package verification: PASS"' }
+  { $_ -in @("exit-stderr", "exit-and-cleanup") } {
+    $child = 'Write-Output "Package verification: PASS"; [Console]::Error.WriteLine("intentional stderr"); exit 7'
+  }
+  { $_ -in @("malformed-marker", "marker-and-cleanup") } { $child = 'Write-Output "Package verification: PASS-extra"' }
+  "missing-marker" { $child = 'Write-Output "verification completed without marker"' }
+  { $_ -in @("timeout", "inherited-pipes", "timeout-and-cleanup") } {
+    $child = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("CHILD_SOURCE_BASE64"))
+  }
+}
+if ($child) { [IO.File]::WriteAllText($entry, $child) }
+if ($case -eq "cleanup-failure" -or $case -like "*-and-cleanup") {
+  $locked = Join-Path $fixture "locked.txt"
+  [IO.File]::WriteAllText($locked, "owned lock")
+  $handle = [IO.File]::Open($locked, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+  $actual = $null
+  $warnings = @()
+  try {
+    try {
+      Invoke-StandaloneFixture {
+        if ($case -eq "primary-and-cleanup") { throw "exact primary failure" }
+        if ($case -ne "cleanup-failure") {
+          Invoke-Setup $hostPath @($hostPath, $case) "" $entry "Package verification: PASS" 2000
+        }
+      } -WarningVariable warnings
+    } catch { $actual = $_ }
+    if (-not $actual) { throw "Cleanup failure was swallowed" }
+    if ($case -ne "cleanup-failure") {
+      $expected = switch ($case) {
+        "primary-and-cleanup" { "exact primary failure" }
+        "timeout-and-cleanup" { "Standalone setup timed out" }
+        default { "Standalone verification failed with $hostPath`: " }
+      }
+      if (-not $actual.Exception.Message.StartsWith($expected) -or
+          ($case -in @("primary-and-cleanup", "timeout-and-cleanup") -and $actual.Exception.Message -ne $expected)) {
+        throw "Primary failure was masked: $($actual.Exception.Message)"
+      }
+      if (($warnings -join "`n") -notmatch "Standalone fixture cleanup failed:" -or
+          $actual.Exception.Data["StandaloneCleanupFailure"] -notmatch "locked.txt") {
+        throw "Secondary cleanup diagnostic was missing"
+      }
+      Write-Output "Primary retained: $($actual.Exception.Message)"
+    } elseif ($actual.Exception.Message -notmatch "locked.txt") {
+      throw "Cleanup-only failure lost its exact locked path: $actual"
+    }
+  } finally { $handle.Dispose() }
+} else {
+  $actual = $null
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  try {
+    Invoke-Setup $hostPath @($hostPath, $case) "" $entry "Package verification: PASS" 2000
+  } catch { $actual = $_ }
+  if ($case -eq "success") {
+    if ($actual) { throw $actual }
+  } elseif ($case -in @("timeout", "inherited-pipes")) {
+    $expected = if ($case -eq "timeout") { "Standalone setup timed out" } else { "Standalone setup output capture timed out" }
+    if (-not $actual -or $actual.Exception.Message -ne $expected) { throw "Exact primary message lost ($expected): $actual" }
+    if ($clock.ElapsedMilliseconds -gt 9000) { throw "Helper exceeded its bounded teardown/capture deadline" }
+    if (-not (Test-Path (Join-Path $fixture "descendant-ready"))) { throw "Owned descendant never reached test readiness" }
+    if ($actual.Exception.Data["StandaloneOutput"] -notmatch "(?m)^Package verification: PASS\r?$") {
+      throw "Redirected timeout diagnostics were not retained"
+    }
+    $identity = (Get-Content (Join-Path $fixture "descendant-identity") -Raw).Trim().Split(":")
+    $survivor = Get-Process -Id ([int] $identity[1]) -ErrorAction SilentlyContinue
+    if ($survivor -and $survivor.StartTime.ToUniversalTime().Ticks -eq [long] $identity[0]) {
+      throw "Owned descendant survived helper return"
+    }
+    Write-Output "Owned descendant exited; capture drained; elapsedMilliseconds=$($clock.ElapsedMilliseconds)"
+  } elseif (-not $actual -or $actual.Exception.Message -notlike "Standalone verification failed with*") {
+    throw "Invalid setup result was accepted: $case"
+  } elseif ($case -eq "exit-stderr" -and $actual.Exception.Message -notmatch "intentional stderr") {
+    throw "Intentional exit failure lost stderr"
+  }
+}
+Invoke-StandaloneFixture {}
+if (Test-Path -LiteralPath $fixture) { throw "Owned fixture survived cleanup" }
+Write-Output "CASE PASS: $case"
+'@
+    $source = $source.Replace("CHILD_SOURCE_BASE64", [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($descendantSource)))
+    [IO.File]::WriteAllText($worker, $source)
+    $gate = Join-Path $fixture "$case-start"
+    $workerArguments = @($worker, $PSCommandPath, $caseRoot, $case, $hostPath) |
+      ForEach-Object { "'" + $_.Replace("'", "''") + "'" }
+    $command = "while (-not [IO.File]::Exists('" + $gate.Replace("'", "''") +
+      "')) { [Threading.Thread]::Sleep(10) }; & " + ($workerArguments -join " ")
+    $start = [Diagnostics.ProcessStartInfo]::new($hostPath)
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.WorkingDirectory = $fixture
+    $start.Environment["PSModuleAnalysisCachePath"] = Join-Path $fixture "$case-worker-cache"
+    foreach ($argument in @("-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand",
+        [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)))) {
+      [void] $start.ArgumentList.Add($argument)
+    }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    $job = [StandaloneProcessJob]::Create()
+    $started = $false
+    $assigned = $false
+    try {
+      $started = $process.Start()
+      if (-not $started) { throw "Could not start harness self-test worker" }
+      $stdout = $process.StandardOutput.ReadToEndAsync()
+      $stderr = $process.StandardError.ReadToEndAsync()
+      [StandaloneProcessJob]::Assign($job, $process.Handle)
+      $assigned = $true
+      [IO.File]::WriteAllText($gate, "assigned")
+      $finished = $process.WaitForExit(12000)
+      $settle = [Diagnostics.Stopwatch]::StartNew()
+      while ($finished -and [StandaloneProcessJob]::Active($job) -ne 0 -and $settle.ElapsedMilliseconds -lt 250) {
+        Start-Sleep -Milliseconds 10
+      }
+      $activeBeforeTeardown = [StandaloneProcessJob]::Active($job)
+      if (-not $finished) {
+        foreach ($role in @("root", "descendant")) {
+          $identityPath = Join-Path $caseRoot "$role-identity"
+          if (Test-Path -LiteralPath $identityPath) {
+            $identity = (Get-Content -LiteralPath $identityPath -Raw).Trim().Split(":")
+            $owned = Get-Process -Id ([int] $identity[1]) -ErrorAction SilentlyContinue
+            $alive = $null -ne $owned -and $owned.StartTime.ToUniversalTime().Ticks -eq [long] $identity[0]
+            Write-Output "Watchdog identity: role=$role; pid=$($identity[1]); sameCreationAlive=$alive"
+          }
+        }
+        Write-Output "Watchdog readiness: descendantReady=$(Test-Path (Join-Path $caseRoot 'descendant-ready')); markerWritten=$(Test-Path (Join-Path $caseRoot 'marker-written'))"
+      }
+      [StandaloneProcessJob]::Terminate($job)
+      [StandaloneProcessJob]::WaitForEmpty($job, 5000)
+      if (-not $process.WaitForExit(5000)) { throw "Self-test worker survived owned job termination" }
+      if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]] @($stdout, $stderr), 5000)) {
+        throw "Self-test output capture exceeded its deadline"
+      }
+      $output = $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()
+      Write-Output $output
+      if (-not $finished -or $process.ExitCode -ne 0 -or $activeBeforeTeardown -ne 0 -or $output -notmatch "CASE PASS: $case") {
+        $failures++
+        Write-Output "CASE FAIL: $case; finished=$finished; exit=$($process.ExitCode); activeBeforeTeardown=$activeBeforeTeardown; activeAfterTeardown=$([StandaloneProcessJob]::Active($job))"
+      } else {
+        $passed++
+        Write-Output "Owned worker job: activeBeforeTeardown=$activeBeforeTeardown; activeAfterTeardown=$([StandaloneProcessJob]::Active($job))"
+      }
+    } finally {
+      try {
+        if ($assigned) {
+          [StandaloneProcessJob]::Terminate($job)
+          [StandaloneProcessJob]::WaitForEmpty($job, 5000)
+        } elseif ($started -and -not $process.HasExited) {
+          $process.Kill($true)
+          if (-not $process.WaitForExit(5000)) { throw "Unassigned self-test worker survived termination" }
+        }
+      } finally {
+        try { [StandaloneProcessJob]::Close($job) } finally { $process.Dispose() }
+      }
+    }
+  }
+  Write-Output "Standalone harness self-tests: executed=$($passed + $failures); passed=$passed; failed=$failures"
+  if ($failures) { throw "$failures standalone harness self-test(s) failed" }
+}
+
+if ($HelpersOnly) { return }
+
+Invoke-StandaloneFixture {
+  Test-StandaloneHarness
+  if ($SelfTest) { return }
   $root = Join-Path $fixture "extracted package\GraphCode"
   New-Item -ItemType Directory -Path (Join-Path $root "bin"), (Join-Path $root "licenses"), (Join-Path $root "assets") -Force | Out-Null
   foreach ($name in @("graphcode-windows.exe", "graphcoded.exe", "graphcode.exe", "zmx.exe", "swiftCore.dll")) {
@@ -159,7 +520,6 @@ Write-Output "Native command exit/stderr preservation: PASS"
   Invoke-Setup (Get-Command powershell.exe).Source @("-Command", "Verify", "-Package", $nextRoot) "zmx provenance pin mismatch"
   Add-Content (Join-Path $root "bin\swiftCore.dll") "tamper"
   Invoke-Setup (Get-Command powershell.exe).Source @("-Command", "Verify") "size mismatch"
-  Write-Output "Standalone setup without repository/toolchains on Windows PowerShell 5.1 and PowerShell 7: PASS"
-} finally {
-  if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force }
+  if ($setupCases.Completed -ne 18) { throw "Expected 18 standalone setup cases, completed $($setupCases.Completed)" }
+  Write-Output "Standalone setup without repository/toolchains on Windows PowerShell 5.1 and PowerShell 7: PASS; executed=$($setupCases.Completed)"
 }
