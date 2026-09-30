@@ -799,6 +799,14 @@ function Invoke-Task([string] $name) {
       Invoke-Native "Windows visual baseline contract" {
         & (Join-Path $repoRoot "Tools\windows\Tests\VisualBaseline.Tests.ps1")
       }
+      Write-Host "==> Windows/macOS palette parity contract"
+      $paletteResults = Invoke-Pester `
+        -Script (Join-Path $repoRoot "Tools\windows\Tests\PaletteParity.Tests.ps1") `
+        -PassThru
+      if ($paletteResults.TotalCount -le 0 -or $paletteResults.PassedCount -le 0 -or
+          $paletteResults.FailedCount -ne 0) {
+        throw "Palette parity Pester contract did not pass a nonzero test count"
+      }
     }
     "tdd-evidence" {
       & (Join-Path $repoRoot "Tools\tdd\Tests\TddEvidence.Tests.ps1")
