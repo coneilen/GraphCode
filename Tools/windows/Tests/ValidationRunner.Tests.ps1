@@ -1483,6 +1483,14 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'sub-3px verified uncovered strip') {
     throw "RED: UIA live gate omits modal liveness retry, native closure, or footer-click geometry"
   }
+  if ($uiaLiveGateSource -notmatch 'mouseSubmitUnavailable = ' -or
+      $uiaLiveGateSource -notmatch '\$allowOccludedEnter -and -not \$hit\.HitTarget -and \$hit\.ScannedPoints -gt 0' -or
+      $uiaLiveGateSource -notmatch 'IsForegroundWindow\(\$nodeSheetWindow\)' -or
+      $uiaLiveGateSource -notmatch 'FocusControl\(\$nodeSheetWindow, \$goalEdit\)' -or
+      $uiaLiveGateSource -notmatch 'SendKeyInput\(0x0D, 1\)' -or
+      $uiaLiveGateSource -notmatch 'Invoke-NodeSheetClick 1 "Create \(\$loopType, invalid\)" -allowOccludedEnter:\(\$loopType -eq "goalBased"\)') {
+    throw "RED: occluded Goal Create cannot submit with a measured, focused native Enter fallback"
+  }
   if ($uiaLiveGateSource -notmatch '(?s)Add-Type -TypeDefinition @"\r?\n(.*?)\r?\n"@ -ReferencedAssemblies @\(') {
     throw "RED: UIA live gate native input helper is missing"
   }

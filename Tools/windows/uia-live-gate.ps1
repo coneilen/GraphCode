@@ -6080,7 +6080,7 @@ try {
   $nodeSheetWindow = [IntPtr]$nodeSheet.Current.NativeWindowHandle
   Require ($nodeSheetWindow -ne [IntPtr]::Zero) "node creation sheet exposed no native window handle"
 
-  function Invoke-NodeSheetClick([int] $controlId, [string] $label) {
+  function Invoke-NodeSheetClick([int] $controlId, [string] $label, [switch] $allowOccludedEnter) {
     $control = [GraphCodeUiaGateState]::ControlById($nodeSheetWindow, $controlId)
     Require ($control -ne [IntPtr]::Zero) "node creation sheet omitted control $controlId ($label)"
     Require (Ensure-ShellForeground $nodeSheetWindow "node creation sheet $label") `
@@ -6094,9 +6094,6 @@ try {
     Require (-not $hit.VisibleEmpty) `
       ("node creation sheet $label control [$($controlBounds -join ',')] has no visible portion inside " +
        "work area [$($workArea -join ',')]; dialog [$($dialogBounds -join ',')]")
-    Require (-not $hit.NarrowUncovered -or $hit.HitTarget) `
-      ("node creation sheet $label has only a sub-3px verified uncovered strip: " +
-       "$(@($hit.UncoveredRectangles | ForEach-Object { '[' + ($_ -join ',') + ']' }) -join '; ')")
     $occlusion = $null
     if ($hit.OutsideWorkArea) {
       $occlusion = [ordered]@{
@@ -6116,7 +6113,7 @@ try {
         rectCenterHitsControl = $hit.CenterHitTarget
         rectCenterWindowClass = $hit.WindowAtCenterClass
         rectCenterRootClass = $hit.WindowAtCenterRootClass
-        clickedPoint = @($hit.ScreenX, $hit.ScreenY)
+        candidatePoint = @($hit.ScreenX, $hit.ScreenY)
       }
       $nodeSheetOcclusions.Add($occlusion)
       Write-Host ("UIA_NODE_CREATION_OCCLUSION " + ($occlusion | ConvertTo-Json -Depth 4 -Compress))
@@ -6149,19 +6146,44 @@ try {
       }
       $nodeSheetContentOcclusions.Add($contentOcclusion)
       Write-Host ("UIA_NODE_CREATION_CONTENT_OCCLUSION " + ($contentOcclusion | ConvertTo-Json -Depth 5 -Compress))
+    } elseif ($controlId -eq 1 -and $hit.HitTarget) {
+      $nodeSheetCreateCentreClicks.Add($label)
+    }
+    $mouseSubmitUnavailable = $false
+    $method = "mouse"
+    if ($allowOccludedEnter -and -not $hit.HitTarget -and $hit.ScannedPoints -gt 0 -and
+        $hit.CoveredPoints -eq $hit.ScannedPoints -and @($hit.CoveringWindows).Count -gt 0) {
+      Require ([GraphCodeUiaGateState]::WindowIsVisible($nodeSheetWindow) -and
+        [GraphCodeUiaGateState]::WindowTextOf($nodeSheetWindow) -eq $nodeSheetTitle) `
+        "node creation sheet $label disappeared before occluded keyboard submit"
+      Require ([GraphCodeUiaGateState]::IsForegroundWindow($nodeSheetWindow)) `
+        "node creation sheet $label did not hold foreground for occluded keyboard submit"
+      $goalEdit = [GraphCodeUiaGateState]::ControlById($nodeSheetWindow, 9106)
+      Require ($goalEdit -ne [IntPtr]::Zero -and
+        [GraphCodeUiaGateState]::FocusControl($nodeSheetWindow, $goalEdit)) `
+        "node creation sheet $label could not focus the Goal field before Enter"
+      Require ([GraphCodeUiaGateState]::SendKeyInput(0x0D, 1) -eq 1) `
+        "node creation sheet $label could not send a native Enter key"
+      $method = "keyboardEnter"
+      $mouseSubmitUnavailable = $true
+    } else {
+      Require (-not $hit.NarrowUncovered -or $hit.HitTarget) `
+        ("node creation sheet $label has only a sub-3px verified uncovered strip: " +
+         "$(@($hit.UncoveredRectangles | ForEach-Object { '[' + ($_ -join ',') + ']' }) -join '; ')")
       Require $hit.HitTarget `
         ("node creation sheet $label has no verified uncovered point in [$($controlBounds -join ',')]: " +
          "$($hit.CoveredPoints)/$($hit.ScannedPoints) sampled points covered by control $($hit.CoveringId) " +
          "class '$($hit.CoveringClass)' text '$($hit.CoveringText)' at " +
          "[$($hit.CoveringLeft),$($hit.CoveringTop),$($hit.CoveringRight),$($hit.CoveringBottom)]; " +
          "remaining $(@($hit.UncoveredRectangles | ForEach-Object { '[' + ($_ -join ',') + ']' }) -join '; ')")
-    } elseif ($controlId -eq 1 -and $hit.HitTarget) {
-      $nodeSheetCreateCentreClicks.Add($label)
     }
     if ($controlId -eq 1) {
       $footerClick = [ordered]@{
         label = $label
-        point = @($hit.ScreenX, $hit.ScreenY)
+        method = $method
+        mouseSubmitUnavailable = $mouseSubmitUnavailable
+        point = if ($method -eq "mouse") { @($hit.ScreenX, $hit.ScreenY) } else { $null }
+        unavailableMousePoint = if ($mouseSubmitUnavailable) { @($hit.ScreenX, $hit.ScreenY) } else { $null }
         contentOccluded = ($hit.ScannedPoints -gt 0)
         outsideWorkArea = $hit.OutsideWorkArea
         chosenUncoveredRectangle = if ($hit.ChosenUncoveredRectangle) { @($hit.ChosenUncoveredRectangle) } else { $null }
@@ -6170,7 +6192,7 @@ try {
       $nodeSheetFooterClicks.Add($footerClick)
       Write-Host ("UIA_NODE_CREATION_FOOTER_CLICK " + ($footerClick | ConvertTo-Json -Depth 3 -Compress))
     }
-    Require $hit.HitTarget `
+    Require ($hit.HitTarget -or $mouseSubmitUnavailable) `
       ("node creation sheet $label point ($($hit.ScreenX),$($hit.ScreenY)) inside " +
        "[$($controlBounds -join ',')] resolved to child $($hit.RealChildId) class '$($hit.RealChildClass)' " +
        "text '$($hit.RealChildText)' (sameTopLevel=$($hit.SameTopLevel)), not $controlId; WindowFromPoint " +
@@ -6183,9 +6205,11 @@ try {
       text = [GraphCodeUiaGateState]::WindowTextOf($control)
       bounds = $controlBounds
       uiaBounds = @([int]$uiaBounds.Left, [int]$uiaBounds.Top, [int]$uiaBounds.Right, [int]$uiaBounds.Bottom)
-      point = @($hit.ScreenX, $hit.ScreenY)
+      point = if ($method -eq "mouse") { @($hit.ScreenX, $hit.ScreenY) } else { $null }
       outsideWorkArea = $hit.OutsideWorkArea
       scanUsed = $hit.ScanUsed
+      method = $method
+      mouseSubmitUnavailable = $mouseSubmitUnavailable
       hitTest = [ordered]@{
         realChildId = $hit.RealChildId
         windowFromPointId = $hit.WindowAtPointId
@@ -6219,7 +6243,7 @@ try {
   }
   function Assert-NodeSheetRejected([string] $loopType, [string] $reason, [int] $graphCommandsBefore) {
     $logBefore = if (Test-Path -LiteralPath $renameCommandLogPath) { Read-DaemonCommandLog $renameCommandLogPath } else { "" }
-    $click = Invoke-NodeSheetClick 1 "Create ($loopType, invalid)"
+    $click = Invoke-NodeSheetClick 1 "Create ($loopType, invalid)" -allowOccludedEnter:($loopType -eq "goalBased")
     $reasonShown = Wait-NodeSheetStatic $reason
     Start-Sleep -Milliseconds 300
     $nativeVisible = [GraphCodeUiaGateState]::WindowIsVisible($nodeSheetWindow)
