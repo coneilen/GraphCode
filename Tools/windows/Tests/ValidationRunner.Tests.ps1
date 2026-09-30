@@ -1437,6 +1437,23 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -match '\$Matches\[1\] -in @\(') {
     throw "RED: UIA edge retry/modal/identity proof regressed"
   }
+  if ($uiaLiveGateSource -notmatch 'function Edge-TypeText\(' -or
+      $uiaLiveGateSource -notmatch 'Edge-TypeText \$field\.Id \$field\.Text' -or
+      $uiaLiveGateSource -notmatch 'UIA_EDGE_TEXT id=\$id attempt=\$attempt' -or
+      $uiaLiveGateSource -notmatch '\[GraphCodeUiaGateState\]::TypeEditTextById\(\$edgeWorkflowWindow, \$id, \$text\)' -or
+      $uiaLiveGateSource -notmatch 'Require \(\$after -ceq \$text\)' -or
+      $uiaLiveGateSource -notmatch 'IsControlOwnedBy\(\$edgeWorkflowWindow, \$control, \$id\)' -or
+      $uiaLiveGateSource -notmatch 'HasVisibleBounds\(\$control\)' -or
+      $uiaLiveGateSource -notmatch 'FocusedControlInDialog\(\$edgeWorkflowWindow\)' -or
+      $uiaLiveGateSource -notmatch 'ProcessIdOf\(\$edgeWorkflowWindow\) -eq \$renameProcess\.Id' -or
+      $uiaLiveGateSource -notmatch 'WindowTextOf\(\$edgeWorkflowWindow\) -eq \$script:edgeWorkflowTitle' -or
+      $uiaLiveGateSource -notmatch 'VirtualKey = 0x2E' -or
+      $uiaLiveGateSource -notmatch 'SendMessageText\(edit, 0x000D' -or
+      $uiaLiveGateSource -notmatch '(?s)var clear = new KeyInputRecord\[6\].*?EditBufferText\(edit\).*?var records = new KeyInputRecord\[text\.Length \* 2\]' -or
+      $uiaLiveGateSource -notmatch 'for \(\$attempt = 1; \$attempt -le 5' -or
+      $uiaLiveGateSource -notmatch 'for \(\$layoutRetry = 0; \$layoutRetry -lt 20') {
+    throw "RED: edge native text entry lacks native ownership, live layout, focus, clear/retype, or exact verification"
+  }
   if ($uiaLiveGateSource -notmatch 'Open-EdgeMenu \$false 5120' -or
       $uiaLiveGateSource -notmatch 'Open-EdgeMenu \$true 5110' -or
       $uiaLiveGateSource -notmatch 'Edge-Combo 9100 0' -or
@@ -1445,7 +1462,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'Edge-Combo 9103 2 "Only after failure"' -or
       $uiaLiveGateSource -notmatch 'Edge-Combo 9103 1 "Only after success"' -or
       $uiaLiveGateSource -notmatch 'Edge-Combo 9104 1 "Apply a text template"' -or
-      $uiaLiveGateSource -notmatch 'TypeEditTextById\(\$edgeWorkflowWindow, \$field\.Id, \$field\.Text\)' -or
+      $uiaLiveGateSource -notmatch 'Edge-TypeText \$field\.Id \$field\.Text' -or
       $uiaLiveGateSource -notmatch 'Edge-Click 1 "invalid edge OK"' -or
       $uiaLiveGateSource -notmatch 'Edge-Click 1 "valid edge OK"' -or
       $uiaLiveGateSource -notmatch 'Edge-Click 1 "update edge OK"' -or

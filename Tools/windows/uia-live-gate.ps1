@@ -301,6 +301,31 @@ public static class GraphCodeUiaGateState {
       if (attached) AttachThreadInput(currentThread, parentThread, false);
     }
   }
+  public static IntPtr FocusedControlInDialog(IntPtr parent) {
+    if (parent == IntPtr.Zero) return IntPtr.Zero;
+    uint ignoredProcessId;
+    uint parentThread = GetWindowThreadProcessId(parent, out ignoredProcessId);
+    uint currentThread = GetCurrentThreadId();
+    bool attached = currentThread != parentThread &&
+      AttachThreadInput(currentThread, parentThread, true);
+    try {
+      return GetFocus();
+    } finally {
+      if (attached) AttachThreadInput(currentThread, parentThread, false);
+    }
+  }
+  public static bool IsControlOwnedBy(IntPtr parent, IntPtr control, int controlId) {
+    return parent != IntPtr.Zero && control != IntPtr.Zero &&
+      GetDlgCtrlID(control) == controlId && GetAncestor(control, 2) == parent;
+  }
+  public static int ControlIdOf(IntPtr control) {
+    return control == IntPtr.Zero ? 0 : GetDlgCtrlID(control);
+  }
+  public static bool HasVisibleBounds(IntPtr window) {
+    RECT rect;
+    return window != IntPtr.Zero && IsWindowVisible(window) &&
+      GetWindowRect(window, out rect) && rect.Right > rect.Left && rect.Bottom > rect.Top;
+  }
   public static string LastActivationDiagnostic = "not attempted";
   public static bool ActivateWindow(IntPtr window) {
     if (window == IntPtr.Zero) {
@@ -865,19 +890,28 @@ public static class GraphCodeUiaGateState {
   public static bool TypeEditTextById(IntPtr parent, int controlId, string text) {
     IntPtr edit = GetDlgItem(parent, controlId);
     if (edit == IntPtr.Zero || !FocusControl(parent, edit)) return false;
-    var records = new KeyInputRecord[4 + text.Length * 2];
-    records[0] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x11 } };
-    records[1] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x41 } };
-    records[2] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x41, Flags = 2 } };
-    records[3] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x11, Flags = 2 } };
-    int offset = 4;
+    var clear = new KeyInputRecord[6];
+    clear[0] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x11 } };
+    clear[1] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x41 } };
+    clear[2] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x41, Flags = 2 } };
+    clear[3] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x11, Flags = 2 } };
+    clear[4] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E } };
+    clear[5] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E, Flags = 2 } };
+    uint cleared = SendKeyInputs((uint)clear.Length, clear, Marshal.SizeOf(typeof(KeyInputRecord)));
+    if (cleared != clear.Length)
+      throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} edit-clear events: Win32Error={2}", cleared, clear.Length, Marshal.GetLastWin32Error()));
+    if (!String.IsNullOrEmpty(EditBufferText(edit))) return false;
+    var records = new KeyInputRecord[text.Length * 2];
+    int offset = 0;
     foreach (char character in text) {
       records[offset++] = new KeyInputRecord { Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 4 } };
       records[offset++] = new KeyInputRecord { Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 6 } };
     }
-    uint sent = SendKeyInputs((uint)records.Length, records, Marshal.SizeOf(typeof(KeyInputRecord)));
-    if (sent != records.Length)
-      throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} edit events: Win32Error={2}", sent, records.Length, Marshal.GetLastWin32Error()));
+    if (records.Length > 0) {
+      uint sent = SendKeyInputs((uint)records.Length, records, Marshal.SizeOf(typeof(KeyInputRecord)));
+      if (sent != records.Length)
+        throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} edit events: Win32Error={2}", sent, records.Length, Marshal.GetLastWin32Error()));
+    }
     return String.Equals(EditTextById(parent, controlId), text, StringComparison.Ordinal);
   }
   public static int[] VisibleChildIds(IntPtr parent, int first, int last) {
@@ -6179,6 +6213,44 @@ try {
     Require ($after -eq "$index|$expected") "edge workflow combo $id expected '$index|$expected', observed '$after' from '$before'"
     return $after
   }
+  function Edge-TypeText([int] $id, [string] $text) {
+    $before = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
+    $after = $before
+    for ($attempt = 1; $attempt -le 5 -and $after -cne $text; $attempt++) {
+      $control = [IntPtr]::Zero
+      $bounds = $null
+      for ($layoutRetry = 0; $layoutRetry -lt 20; $layoutRetry++) {
+        $control = [GraphCodeUiaGateState]::ControlById($edgeWorkflowWindow, $id)
+        if ($control -ne [IntPtr]::Zero) {
+          $bounds = @([GraphCodeUiaGateState]::WindowBounds($control))
+          if ([GraphCodeUiaGateState]::IsControlOwnedBy($edgeWorkflowWindow, $control, $id) -and
+              [GraphCodeUiaGateState]::HasVisibleBounds($control)) { break }
+        }
+        if ($layoutRetry -lt 19) { Start-Sleep -Milliseconds 50 }
+      }
+      $modalValid = [GraphCodeUiaGateState]::WindowIsVisible($edgeWorkflowWindow) -and
+        [GraphCodeUiaGateState]::WindowTextOf($edgeWorkflowWindow) -eq $script:edgeWorkflowTitle -and
+        [GraphCodeUiaGateState]::ProcessIdOf($edgeWorkflowWindow) -eq $renameProcess.Id
+      $controlValid = $control -ne [IntPtr]::Zero -and
+        [GraphCodeUiaGateState]::IsControlOwnedBy($edgeWorkflowWindow, $control, $id) -and
+        [GraphCodeUiaGateState]::HasVisibleBounds($control)
+      Require ($modalValid -and $controlValid) `
+        "edge edit $id unavailable after layout wait: modal=$modalValid id=$([GraphCodeUiaGateState]::ControlIdOf($control)) owner=$([GraphCodeUiaGateState]::IsControlOwnedBy($edgeWorkflowWindow, $control, $id)) visible=$([GraphCodeUiaGateState]::HasVisibleBounds($control)) bounds=$($bounds -join ',')"
+      $focusBefore = [GraphCodeUiaGateState]::FocusedControlInDialog($edgeWorkflowWindow)
+      $foreground = Ensure-ShellForeground $edgeWorkflowWindow "edge edit $id attempt $attempt"
+      $focusSet = $foreground -and [GraphCodeUiaGateState]::FocusControl($edgeWorkflowWindow, $control)
+      $focusAfter = [GraphCodeUiaGateState]::FocusedControlInDialog($edgeWorkflowWindow)
+      $sent = $focusSet -and $focusAfter -eq $control -and
+        [GraphCodeUiaGateState]::TypeEditTextById($edgeWorkflowWindow, $id, $text)
+      $after = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
+      $focusFinal = [GraphCodeUiaGateState]::FocusedControlInDialog($edgeWorkflowWindow)
+      Write-Host "UIA_EDGE_TEXT id=$id attempt=$attempt before='$before' after='$after' expected='$text' modal=$modalValid foreground=$foreground focusBefore=0x$('{0:x}' -f $focusBefore.ToInt64()) focusAfter=0x$('{0:x}' -f $focusAfter.ToInt64()) focusFinal=0x$('{0:x}' -f $focusFinal.ToInt64()) sent=$sent control=0x$('{0:x}' -f $control.ToInt64()) bounds=$($bounds -join ',')"
+      if ($after -cne $text -and $attempt -lt 5) { Start-Sleep -Milliseconds 100 }
+    }
+    Require ($after -ceq $text) `
+      "edge workflow native SendInput did not fill $id after five attempts: expected='$text' observed='$after' control=0x$('{0:x}' -f $control.ToInt64())"
+    return $after
+  }
   $edgeFooterClicks = [Collections.Generic.List[object]]::new()
   function Edge-Click([int] $id, [string] $title) {
     $control = [GraphCodeUiaGateState]::ControlById($edgeWorkflowWindow, $id)
@@ -6253,8 +6325,7 @@ try {
       @{ Id = 9105; Text = "UIA edge payload" },
       @{ Id = 9106; Text = "test -f done" },
       @{ Id = 9107; Text = "3" })) {
-    Require ([GraphCodeUiaGateState]::TypeEditTextById($edgeWorkflowWindow, $field.Id, $field.Text)) `
-      "edge workflow native SendInput did not fill $($field.Id) with '$($field.Text)'"
+    Edge-TypeText $field.Id $field.Text
   }
   $edgeCreateClick = Edge-Click 1 "valid edge OK"
   Wait-EdgeClosed $edgeWorkflowTitle
