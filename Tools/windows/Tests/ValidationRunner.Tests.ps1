@@ -158,6 +158,246 @@ function Test-CiAggregateGates([string] $repoRoot, [string] $pwsh) {
   }
 }
 
+function Get-WorkflowSteps([string] $jobText) {
+  $jobText = $jobText.Replace("`r`n", "`n")
+  $heads = @([regex]::Matches($jobText, '(?m)^      - '))
+  $steps = [Collections.Generic.List[string]]::new()
+  for ($index = 0; $index -lt $heads.Count; $index++) {
+    $end = if ($index + 1 -lt $heads.Count) { $heads[$index + 1].Index } else { $jobText.Length }
+    $steps.Add($jobText.Substring($heads[$index].Index, $end - $heads[$index].Index))
+  }
+  , $steps.ToArray()
+}
+
+# A cold provider cache miss must be able to seed its own immutable key even
+# when a later gate fails or is cancelled, but never from a partial tree: the
+# single save runs after a successful bootstrap, pin check, and build-only
+# provider compile, and before any gate. Implicit success() gating (an `if:`
+# without a status-check function) or an explicit success()/always() would
+# reinstate whole-job gating or publish a failed build.
+$script:ProviderCacheSaveCondition = "`${{ !cancelled() && steps.bootstrap.conclusion == 'success' && steps.verify-pins.conclusion == 'success' && steps.provider-build.conclusion == 'success' && steps.provider-cache.outputs.cache-hit != 'true' }}"
+function Assert-ProviderCacheSeeding([string] $jobText, [string] $label, [bool] $requireGate) {
+  $steps = Get-WorkflowSteps $jobText
+  function Find-Step([scriptblock] $predicate) {
+    for ($index = 0; $index -lt $steps.Count; $index++) {
+      if (& $predicate $steps[$index]) { return $index }
+    }
+    return -1
+  }
+  $restore = Find-Step { param($s) $s -match '(?m)^        id: provider-cache\s*$' -and $s -match 'actions/cache/restore@' }
+  $bootstrap = Find-Step { param($s) $s -match '(?m)^        id: bootstrap\s*$' -and $s -match '(?m)^        run: \./Tools/windows/bootstrap\.ps1 ' }
+  $verify = Find-Step { param($s) $s -match '(?m)^        id: verify-pins\s*$' -and $s -match '(?m)^        run: \./Tools/windows/Assert-ProviderCheckout\.ps1 -ProviderRoot \.ci-providers\s*$' }
+  $build = Find-Step { param($s) $s -match '(?m)^        id: provider-build\s*$' -and $s -match '(?m)^        run: \./Tools/windows/validate\.ps1 -Task provider-build\s*$' }
+  $saves = @(for ($index = 0; $index -lt $steps.Count; $index++) { if ($steps[$index] -match 'actions/cache/save@') { $index } })
+  $gate = Find-Step { param($s) $s -match '(?m)^        run: \./Tools/windows/validate\.ps1 -Task windows-shell\b' }
+  foreach ($required in @(
+      @{ Index = $restore; Name = "provider cache restore (id provider-cache)" },
+      @{ Index = $bootstrap; Name = "bootstrap (id bootstrap)" },
+      @{ Index = $verify; Name = "pin verification (id verify-pins)" },
+      @{ Index = $build; Name = "build-only provider compile (id provider-build, validate.ps1 -Task provider-build)" })) {
+    if ($required.Index -lt 0) { throw "RED: $label has no $($required.Name) before its provider cache save" }
+  }
+  if ($saves.Count -ne 1) { throw "RED: $label must have exactly one provider cache save, found $($saves.Count)" }
+  $save = $saves[0]
+  if ($requireGate -and $gate -lt 0) { throw "RED: $label has no downstream windows-shell gate" }
+  if (-not ($restore -lt $bootstrap -and $bootstrap -lt $verify -and $verify -lt $build -and $build -lt $save)) {
+    throw "RED: $label does not save only after restore, bootstrap, pin verification, and build-only compile"
+  }
+  if ($requireGate -and $save -gt $gate) {
+    throw "RED: $label saves the provider cache after the gate, so a failed or cancelled gate discards a cold build"
+  }
+  $saveText = $steps[$save]
+  $condition = [regex]::Match($saveText, '(?m)^        if:\s*(.+?)\s*$')
+  if (-not $condition.Success) { throw "RED: $label provider cache save has no explicit condition" }
+  $conditionText = $condition.Groups[1].Value
+  if ($conditionText -match '(?<![\w.])(success|always)\(\)') {
+    throw "RED: $label provider cache save uses whole-job success()/always() gating"
+  }
+  if ($conditionText -notmatch '!cancelled\(\)') {
+    throw "RED: $label provider cache save omits a status-check function, which implicitly reinstates whole-job success() gating"
+  }
+  if ($conditionText -cne $script:ProviderCacheSaveCondition) {
+    throw "RED: $label provider cache save is not gated on bootstrap, pin, and build-only success on a cache miss: $conditionText"
+  }
+  if ($saveText -notmatch '(?m)^            \.ci-providers\s*$' -or
+      $saveText -notmatch '(?m)^            \.ci-tools/zig-global\s*$' -or
+      $saveText -notmatch '(?m)^          key: \$\{\{ steps\.provider-cache\.outputs\.cache-primary-key \}\}\s*$') {
+    throw "RED: $label provider cache save does not publish the complete immutable provider tree under its restored key"
+  }
+  if ($jobText -match 'continue-on-error') {
+    throw "RED: $label lets a failed provider step continue into the cache save"
+  }
+}
+
+function Test-ProviderCacheSeeding([string] $shellWorkflow, [string] $warmerWorkflow) {
+  $shellJobs = Get-WorkflowJobs $shellWorkflow
+  $warmerJobs = Get-WorkflowJobs $warmerWorkflow
+  Assert-ProviderCacheSeeding $shellJobs["shell-integration"] "windows-shell integration" $true
+  Assert-ProviderCacheSeeding $warmerJobs["warm"] "Windows cache warmer" $false
+  if ([regex]::Matches($shellWorkflow, 'actions/cache/save@').Count -ne 1) {
+    throw "RED: windows-shell integration must stay the sole provider cache writer"
+  }
+  foreach ($job in $shellJobs.GetEnumerator()) {
+    if ($job.Key -eq "shell-integration") { continue }
+    foreach ($step in (Get-WorkflowSteps $job.Value)) {
+      if ($step -match '(?m)^\s+\.ci-providers\s*$' -and $step -notmatch 'actions/cache/restore@') {
+        throw "RED: $($job.Key) must restore the provider cache read-only"
+      }
+    }
+  }
+  $bootstrapCap = [regex]::Match($warmerJobs["warm"], '(?s)id: bootstrap.*?timeout-minutes: (\d+)')
+  $buildCap = [regex]::Match($warmerJobs["warm"], '(?s)id: provider-build.*?timeout-minutes: (\d+)')
+  $outerCap = [regex]::Match($warmerJobs["warm"], '(?m)^    timeout-minutes: (\d+)\s*$')
+  if (-not $bootstrapCap.Success -or -not $buildCap.Success -or -not $outerCap.Success) {
+    throw "RED: Windows cache warmer bootstrap, build-only, and job caps must all be explicit"
+  }
+  # Healthy cold bootstrap measured 26m34s (job 109675286607); the warmer's own
+  # 30m cap was exceeded on run 36645791783 attempt 1.
+  if ([int]$bootstrapCap.Groups[1].Value -lt 35) {
+    throw "RED: Windows cache warmer bootstrap cap leaves no headroom over a healthy 26m34s cold bootstrap"
+  }
+  if ([int]$outerCap.Groups[1].Value -le [int]$bootstrapCap.Groups[1].Value + [int]$buildCap.Groups[1].Value) {
+    throw "RED: Windows cache warmer job cap truncates a bootstrap and build-only phase that both stay within their step caps"
+  }
+}
+
+function Test-ProviderCacheSeedingMutations([string] $shellWorkflow, [string] $warmerWorkflow) {
+  $shell = $shellWorkflow.Replace("`r`n", "`n")
+  $warmer = $warmerWorkflow.Replace("`r`n", "`n")
+  $condition = $script:ProviderCacheSaveCondition
+  $integration = (Get-WorkflowJobs $shell)["shell-integration"]
+  $steps = Get-WorkflowSteps $integration
+  $saveStep = @($steps | Where-Object { $_ -match 'actions/cache/save@' })[0]
+  $gateStep = @($steps | Where-Object { $_ -match 'validate\.ps1 -Task windows-shell\b' })[0]
+  $buildStep = @($steps | Where-Object { $_ -match 'id: provider-build' })[0]
+  if (-not $saveStep -or -not $gateStep -or -not $buildStep) { throw "Cannot construct provider cache seeding mutations" }
+  $afterGate = $integration.Replace($saveStep, "").Replace($gateStep, $gateStep + $saveStep)
+  $mutations = [ordered]@{
+    "explicit whole-job success()" = $shell.Replace($condition, "`${{ success() && steps.provider-cache.outputs.cache-hit != 'true' }}")
+    "implicit success() (no status-check function)" = $shell.Replace($condition, $condition.Replace("!cancelled() && ", ""))
+    "always() saves a failed build" = $shell.Replace($condition, $condition.Replace("!cancelled()", "always()"))
+    "build outcome not required" = $shell.Replace($condition, $condition.Replace(" && steps.provider-build.conclusion == 'success'", ""))
+    "cache hit re-saved" = $shell.Replace($condition, $condition.Replace(" && steps.provider-cache.outputs.cache-hit != 'true'", ""))
+    "save after gate" = $shell.Replace($integration, $afterGate)
+    "clone-only tree (no build-only step)" = $shell.Replace($buildStep, "")
+    "build step replaced by bootstrap" = $shell.Replace("run: ./Tools/windows/validate.ps1 -Task provider-build", "run: ./Tools/windows/bootstrap.ps1 -ToolRoot .ci-tools -ProviderRoot .ci-providers")
+    "partial tree without zig-global" = $shell.Replace($saveStep, $saveStep.Replace("            .ci-tools/zig-global`n", ""))
+    "failed build continues" = $shell.Replace($buildStep, $buildStep.Replace("        shell: pwsh", "        continue-on-error: true`n        shell: pwsh"))
+    "second provider cache writer" = $shell.Replace("uses: actions/cache/restore@", "uses: actions/cache@")
+  }
+  foreach ($mutation in $mutations.GetEnumerator()) {
+    if ($mutation.Value -ceq $shell) { throw "Provider cache seeding mutation did not apply: $($mutation.Key)" }
+    $rejected = $false
+    try { Test-ProviderCacheSeeding $mutation.Value $warmer } catch { $rejected = $true }
+    if (-not $rejected) { throw "RED: provider cache seeding contract accepted mutation: $($mutation.Key)" }
+  }
+  $warmerMutations = [ordered]@{
+    "warmer runs terminal tests" = $warmer.Replace("run: ./Tools/windows/validate.ps1 -Task provider-build", "run: ./Tools/windows/validate.ps1 -Task terminal-gate")
+    "warmer whole-job success()" = $warmer.Replace($condition, "`${{ success() && steps.provider-cache.outputs.cache-hit != 'true' }}")
+    "warmer 30m bootstrap cap" = [regex]::Replace($warmer, '(?s)(id: bootstrap.*?timeout-minutes: )\d+', '${1}30')
+  }
+  foreach ($mutation in $warmerMutations.GetEnumerator()) {
+    if ($mutation.Value -ceq $warmer) { throw "Warmer mutation did not apply: $($mutation.Key)" }
+    $rejected = $false
+    try { Test-ProviderCacheSeeding $shell $mutation.Value } catch { $rejected = $true }
+    if (-not $rejected) { throw "RED: provider cache seeding contract accepted warmer mutation: $($mutation.Key)" }
+  }
+}
+
+# provider-build.ps1 must compile both pinned providers, report a positive
+# executed build count, run no terminal tests, and reject a partial build.
+function Test-ProviderBuildScript([string] $repoRoot, [string] $pwsh) {
+  $script = Join-Path $repoRoot "Tools\windows\provider-build.ps1"
+  if (-not (Test-Path -LiteralPath $script -PathType Leaf)) {
+    throw "RED: build-only provider script is missing: $script"
+  }
+  $scratch = Join-Path ([IO.Path]::GetTempPath()) "gc-provider-build-$([guid]::NewGuid().ToString('N'))"
+  New-Item -ItemType Directory -Force $scratch | Out-Null
+  try {
+    $fakeZig = Join-Path $scratch "fake-zig.cmd"
+    Set-Content -LiteralPath $fakeZig -Encoding ascii -Value @(
+      '@echo off',
+      'echo FAKE_ZIG %*>> "%FAKE_ZIG_LOG%"',
+      'if "%FAKE_ZIG_FAIL%"=="1" exit /b 7',
+      'if "%FAKE_ZIG_SKIP_ARTIFACT%"=="1" exit /b 0',
+      'echo %* | findstr /c:"-Demit-win32-host=true" >nul && (mkdir zig-out\lib 2>nul & type nul > zig-out\lib\winghostty-win32-host.lib)',
+      'echo %* | findstr /c:"-Dtarget=x86_64-windows-gnu" >nul && (mkdir zig-out\bin 2>nul & type nul > zig-out\bin\zmx.exe)',
+      'exit /b 0')
+    $pins = [ordered]@{ schemaVersion = 1 }
+    foreach ($name in @("winghostty", "zmx")) {
+      $root = Join-Path $scratch $name
+      New-Item -ItemType Directory -Force $root | Out-Null
+      git -C $root init -q 2>$null
+      "zig-out/`n" | Set-Content -LiteralPath (Join-Path $root ".gitignore") -NoNewline
+      git -C $root add .gitignore
+      git -C $root -c user.name=t -c user.email=t@example.invalid commit -q -m pin 2>$null
+      $pins[$name] = [ordered]@{ sha = (git -C $root rev-parse HEAD) }
+    }
+    $pinsPath = Join-Path $scratch "provider-pins.json"
+    $pins | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $pinsPath
+    function Invoke-ProviderBuildCase([hashtable] $environment) {
+      foreach ($name in @("winghostty", "zmx")) {
+        Remove-Item -LiteralPath (Join-Path $scratch "$name\zig-out") -Recurse -Force -ErrorAction SilentlyContinue
+      }
+      $log = Join-Path $scratch "zig-$([guid]::NewGuid().ToString('N')).log"
+      $saved = @{}
+      $all = @{ FAKE_ZIG_LOG = $log; FAKE_ZIG_FAIL = $null; FAKE_ZIG_SKIP_ARTIFACT = $null }
+      foreach ($entry in $environment.GetEnumerator()) { $all[$entry.Key] = $entry.Value }
+      foreach ($entry in $all.GetEnumerator()) {
+        $saved[$entry.Key] = [Environment]::GetEnvironmentVariable($entry.Key)
+        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value)
+      }
+      try {
+        $output = @(& $pwsh -NoProfile -File $script `
+            -WinghosttyRoot (Join-Path $scratch "winghostty") -ZmxRoot (Join-Path $scratch "zmx") `
+            -Zig0152 $fakeZig -Zig0160 $fakeZig -PinsPath $pinsPath -ZmxAttempts 1 2>&1 | ForEach-Object { "$_" })
+        $exit = $LASTEXITCODE
+      } finally {
+        foreach ($entry in $saved.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value) }
+      }
+      $invocations = if (Test-Path -LiteralPath $log) { @(Get-Content -LiteralPath $log) } else { @() }
+      [pscustomobject]@{ ExitCode = $exit; Output = $output; Invocations = $invocations }
+    }
+    $pass = Invoke-ProviderBuildCase @{}
+    $text = $pass.Output -join "`n"
+    $executed = [regex]::Match($text, '(?m)^PROVIDER_BUILD_EXECUTED=(\d+)\s*$')
+    $stepLines = @($pass.Output | Where-Object { $_ -match '^PROVIDER_BUILD_STEP=' })
+    if ($pass.ExitCode -ne 0 -or -not $executed.Success -or [int]$executed.Groups[1].Value -ne 2 -or
+        $stepLines.Count -ne 2 -or $pass.Invocations.Count -ne 2) {
+      throw "RED: provider-build.ps1 did not execute exactly two pinned provider builds (exit=$($pass.ExitCode)): $text"
+    }
+    if ($pass.Invocations[0] -notmatch '^FAKE_ZIG build -Demit-win32-host=true\s*$' -or
+        $pass.Invocations[1] -notmatch '^FAKE_ZIG build -Dtarget=x86_64-windows-gnu\s*$') {
+      throw "RED: provider-build.ps1 changed the canonical provider build flags: $($pass.Invocations -join '; ')"
+    }
+    if ($text -match '(?i)terminal gate|smoke|TerminalGate\.Tests|zmx send|uia') {
+      throw "RED: provider-build.ps1 ran terminal tests or smoke: $text"
+    }
+    foreach ($case in @(
+        @{ Name = "missing artifact"; Environment = @{ FAKE_ZIG_SKIP_ARTIFACT = "1" } },
+        @{ Name = "failed compiler"; Environment = @{ FAKE_ZIG_FAIL = "1" } })) {
+      $result = Invoke-ProviderBuildCase $case.Environment
+      if ($result.ExitCode -eq 0 -or ($result.Output -join "`n") -match '(?m)^PROVIDER_BUILD_EXECUTED=') {
+        throw "RED: provider-build.ps1 accepted a partial build ($($case.Name))"
+      }
+    }
+    "untracked" | Set-Content -LiteralPath (Join-Path $scratch "zmx\dirty.txt")
+    $dirty = Invoke-ProviderBuildCase @{}
+    Remove-Item -LiteralPath (Join-Path $scratch "zmx\dirty.txt") -Force
+    if ($dirty.ExitCode -eq 0 -or $dirty.Invocations.Count -ne 0) {
+      throw "RED: provider-build.ps1 built from a dirty provider worktree"
+    }
+    $wrongPins = [ordered]@{ schemaVersion = 1; winghostty = $pins.winghostty; zmx = [ordered]@{ sha = ("0" * 40) } }
+    $wrongPins | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $pinsPath
+    $wrong = Invoke-ProviderBuildCase @{}
+    if ($wrong.ExitCode -eq 0 -or $wrong.Invocations.Count -ne 0) {
+      throw "RED: provider-build.ps1 built an unpinned provider"
+    }
+  } finally {
+    Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
 # The Windows shell Zig sections are sharded across runners. A section passes
 # only with a positive test count per `zig test` (a filter that matches nothing
 # still exits 0), the shard plan is a complete disjoint partition, and the
@@ -505,6 +745,43 @@ if (($dryRun -join "`n") -notmatch "swift-paths") {
   throw "Dry run did not name the selected task"
 }
 
+# provider-build is the build-only entry point for provider cache seeding: it is
+# selectable on its own but never part of -Task all (terminal-gate reuses it).
+if ($tasks -notcontains "provider-build") {
+  throw "RED: validation runner has no build-only provider-build task"
+}
+$providerDryRun = @(& $runner -Task provider-build -DryRun)
+if ($LASTEXITCODE -ne 0 -or $providerDryRun.Count -ne 1 -or $providerDryRun[0] -cne "task=provider-build") {
+  throw "RED: -Task provider-build does not select exactly the build-only task: $($providerDryRun -join ', ')"
+}
+$allDryRun = @(& $runner -Task all -DryRun)
+if ($allDryRun.Count -lt 10 -or $allDryRun -contains "task=provider-build" -or $allDryRun -notcontains "task=terminal-gate") {
+  throw "RED: -Task all must keep terminal-gate and exclude the build-only provider-build task: $($allDryRun -join ', ')"
+}
+$providerRunnerSource = Get-Content $runner -Raw
+$providerClause = [regex]::Match($providerRunnerSource, '(?s)\n    "provider-build" \{(.*?)\n    \}')
+if (-not $providerClause.Success -or $providerClause.Groups[1].Value -notmatch 'Invoke-ProviderBuild' -or
+    $providerClause.Groups[1].Value -match '(?i)terminal-gate\.ps1|TerminalGate\.Tests|windows-shell\.ps1|uia|Stress') {
+  throw "RED: provider-build task does not run only the shared build-only provider compile"
+}
+$terminalClause = [regex]::Match($providerRunnerSource, '(?s)\n    "terminal-gate" \{(.*?)\n    \}')
+if (-not $terminalClause.Success -or
+    $terminalClause.Groups[1].Value -notmatch '(?s)Invoke-ProviderBuild.*?terminal-gate\.ps1.*?-SkipProviderBuild.*?-Stress') {
+  throw "RED: terminal-gate does not reuse the build-only provider compile before its full gate"
+}
+$providerScriptSource = Get-Content (Join-Path $PSScriptRoot "..\provider-build.ps1") -Raw -ErrorAction SilentlyContinue
+foreach ($consumer in @("terminal-gate.ps1", "windows-shell.ps1")) {
+  $consumerSource = Get-Content (Join-Path $PSScriptRoot "..\$consumer") -Raw
+  if ($consumerSource -notmatch 'provider-build\.ps1' -or
+      $consumerSource -match '-Demit-win32-host=true' -or
+      $consumerSource -match '-Dtarget=x86_64-windows-gnu') {
+    throw "RED: $consumer duplicates the pinned provider build instead of calling provider-build.ps1"
+  }
+}
+if ($providerScriptSource -notmatch '-Demit-win32-host=true' -or $providerScriptSource -notmatch '-Dtarget=x86_64-windows-gnu') {
+  throw "RED: provider-build.ps1 does not own the canonical provider build flags"
+}
+
 $pwsh = (Get-Process -Id $PID).Path
 & $pwsh -NoProfile -File $runner -Task not-a-task *> $null
 if ($LASTEXITCODE -eq 0) {
@@ -648,11 +925,15 @@ try {
   if ($windowsCacheWarmerWorkflow -notmatch '(?m)^  push:\s*$' -or
       $windowsCacheWarmerWorkflow -notmatch '(?m)^    branches: \[main\]\s*$' -or
       $windowsCacheWarmerWorkflow -notmatch '(?m)^  schedule:\s*$' -or
+      $windowsCacheWarmerWorkflow -notmatch '(?m)^    - cron: "23 4 \* \* 1"\s*$' -or
       $windowsCacheWarmerWorkflow -notmatch '(?m)^  workflow_dispatch:\s*$' -or
-      $windowsCacheWarmerWorkflow -notmatch '(?s)name: Bootstrap exact Windows dependencies.*?timeout-minutes: 30' -or
-      $windowsCacheWarmerWorkflow -notmatch '(?s)validate\.ps1 -Task terminal-gate.*?actions/cache/save@') {
-    throw "RED: Windows cache warmer does not cover main, weekly, manual, and canonical provider builds"
+      $windowsCacheWarmerWorkflow -notmatch '(?s)validate\.ps1 -Task provider-build.*?actions/cache/save@' -or
+      $windowsCacheWarmerWorkflow -match 'validate\.ps1 -Task terminal-gate') {
+    throw "RED: Windows cache warmer does not cover main, weekly, manual, and build-only canonical provider builds"
   }
+  Test-ProviderCacheSeeding $windowsShellWorkflow $windowsCacheWarmerWorkflow
+  Test-ProviderCacheSeedingMutations $windowsShellWorkflow $windowsCacheWarmerWorkflow
+  Test-ProviderBuildScript $repoRoot $pwsh
   foreach ($workflow in @($windowsShellWorkflow, $windowsPortWorkflow)) {
     if ($workflow -notmatch
         '(?s)if: failure\(\).*?actions/upload-artifact@.*?gu-\*.*?logs\\\*\.json') {

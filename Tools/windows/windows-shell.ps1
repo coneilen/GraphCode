@@ -197,13 +197,12 @@ Assert-PinnedCleanWorktree $ZmxRoot $pins.zmx.sha "zmx"
 
 try {
   if (-not $SkipBuild) {
-    Invoke-Native "Winghostty host artifact" {
-      Push-Location $WinghosttyRoot
-      try { & $Zig0152 build -Demit-win32-host=true } finally { Pop-Location }
-    }
-    Invoke-Native "zmx Windows provider artifact" {
-      Push-Location $ZmxRoot
-      try { & $Zig0160 build -Dtarget=x86_64-windows-gnu } finally { Pop-Location }
+    Invoke-Native "Pinned provider artifacts" {
+      & (Join-Path $PSScriptRoot "provider-build.ps1") `
+        -WinghosttyRoot $WinghosttyRoot `
+        -ZmxRoot $ZmxRoot `
+        -Zig0152 $Zig0152 `
+        -Zig0160 $Zig0160
     }
     Invoke-Native "GraphCode Windows shell" {
       Push-Location $shellRoot

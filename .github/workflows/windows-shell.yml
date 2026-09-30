@@ -130,27 +130,39 @@ jobs:
           key: windows-providers-v1-${{ hashFiles('graphcode-windows/provider-pins.json', 'Tools/windows/bootstrap.ps1') }}-emit-win32-host-x86_64-windows-gnu
 
       - name: Bootstrap exact Windows dependencies
+        id: bootstrap
         shell: pwsh
         run: ./Tools/windows/bootstrap.ps1 -ToolRoot .ci-tools -ProviderRoot .ci-providers
 
       - name: Verify provider pins after cache restore
+        id: verify-pins
         shell: pwsh
         run: ./Tools/windows/Assert-ProviderCheckout.ps1 -ProviderRoot .ci-providers
 
-      - name: Verify shell build, pinned-provider smoke, and live UI Automation
+      # Build-only: compiles both pinned providers with the canonical flags the
+      # cache key names, and runs no terminal tests.
+      - name: Build pinned provider artifacts
+        id: provider-build
         shell: pwsh
-        run: ./Tools/windows/validate.ps1 -Task windows-shell -SkipTrayLive -ShellPart integration
+        run: ./Tools/windows/validate.ps1 -Task provider-build
 
       # Only this job builds both providers with the canonical flags, so it is
-      # the single writer of the provider cache.
+      # the single writer of the provider cache. It saves before the gate so a
+      # cold miss still seeds its key when the gate later fails or is cancelled,
+      # and never after a failed or cancelled bootstrap, pin check, or build.
+      # `!cancelled()` replaces the implicit whole-job success() check.
       - name: Save pinned provider build caches
-        if: success() && steps.provider-cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && steps.bootstrap.conclusion == 'success' && steps.verify-pins.conclusion == 'success' && steps.provider-build.conclusion == 'success' && steps.provider-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             .ci-providers
             .ci-tools/zig-global
           key: ${{ steps.provider-cache.outputs.cache-primary-key }}
+
+      - name: Verify shell build, pinned-provider smoke, and live UI Automation
+        shell: pwsh
+        run: ./Tools/windows/validate.ps1 -Task windows-shell -SkipTrayLive -ShellPart integration
 
       - name: Retain UIA failure diagnostics
         if: failure()
