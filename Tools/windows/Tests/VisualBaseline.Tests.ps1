@@ -640,9 +640,11 @@ function Get-CaptureFunctionSource([string] $Name) {
   return $definition.Extent.Text
 }
 function Assert-CaptureContract([bool] $Condition, [string] $Message) {
+  $script:ReferenceCaptureContractCount++
   if (-not $Condition) { throw "ReferenceSet static contract failed: $Message" }
 }
 
+$script:ReferenceCaptureContractCount = 0
 $referenceParameter = $captureAst.ParamBlock.Parameters | Where-Object {
   $_.Name.VariablePath.UserPath -eq 'ReferenceSet'
 }
@@ -686,7 +688,7 @@ Assert-CaptureContract ($referenceFlow -match 'Invoke-VisualElement \x24window '
 Assert-CaptureContract ($captureSource -match '\$afterSnapshot = Get-CaptureBuildSnapshot' -and
   $captureSource -match 'Source/script/provider/binary hashes changed during capture') `
   'reference captures abort if source, provider, or executable provenance changes mid-run'
-Write-Host 'ReferenceSet capture contract: PASS (native menu/form/workspace actions and frozen provenance)'
+Write-Host "ReferenceSet capture contract: PASS ($script:ReferenceCaptureContractCount contracts; native menu/form/workspace actions and frozen provenance)"
 
 if ($SupervisorArtifactsDirectory) {
   $capture = $capturePath
