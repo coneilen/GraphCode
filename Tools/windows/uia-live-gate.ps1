@@ -2023,6 +2023,13 @@ try {
   Require (($connectionAlert.Current.BoundingRectangle.Width -gt 0) -and
            ($connectionAlert.Current.BoundingRectangle.Height -gt 0)) `
     "connection failure banner had empty bounds"
+  $connectionFailureBannerEvidence = [ordered]@{
+    name = [string]$connectionAlert.Current.Name
+    width = [double]$connectionAlert.Current.BoundingRectangle.Width
+    height = [double]$connectionAlert.Current.BoundingRectangle.Height
+  }
+  Write-Host ("UIA_CONNECTION_FAILURE_BANNER_EVIDENCE=" +
+    ($connectionFailureBannerEvidence | ConvertTo-Json -Compress))
 
   # Sidebar update banner: the existing update-offer assertion above opens the
   # dialog through GRAPHCODE_UIA_SHOW_UPDATE, which calls showCurrentUpdateOffer()
@@ -3892,6 +3899,13 @@ try {
   Require (($inlineError.Current.BoundingRectangle.Width -gt 0) -and
            ($inlineError.Current.BoundingRectangle.Height -gt 0)) `
     "inline ingress error had empty canvas bounds"
+  $inlineIngressErrorEvidence = [ordered]@{
+    name = [string]$inlineError.Current.Name
+    width = [double]$inlineError.Current.BoundingRectangle.Width
+    height = [double]$inlineError.Current.BoundingRectangle.Height
+  }
+  Write-Host ("UIA_INLINE_INGRESS_ERROR_EVIDENCE=" +
+    ($inlineIngressErrorEvidence | ConvertTo-Json -Compress))
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 9)) "empty overview fixture command was rejected"
   Start-Sleep -Milliseconds 200
@@ -3904,6 +3918,13 @@ try {
   Require ((-not $openFolderButton.Current.IsOffscreen) -and
            (-not $emptyOverviewLoopButton.Current.IsOffscreen)) `
     "empty global graph actions were not visible"
+  $emptyOverviewEvidence = [ordered]@{
+    openFolderAction = [string]$openFolderButton.Current.Name
+    openFolderOffscreen = [bool]$openFolderButton.Current.IsOffscreen
+    newLoopAction = [string]$emptyOverviewLoopButton.Current.Name
+    newLoopOffscreen = [bool]$emptyOverviewLoopButton.Current.IsOffscreen
+    nodeForm = $null
+  }
   Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, 4601)) `
     "empty global Open Folder command was rejected"
   $folderPicker = $null
@@ -3929,6 +3950,12 @@ try {
     -label "Open Folder picker" `
     -diagnosticWindow $shellWindow
   Require ($null -ne $folderPicker) "Open Folder did not launch the native folder picker"
+  $openFolderPickerEvidence = [ordered]@{
+    name = [string]$folderPicker.Current.Name
+    controlType = [string]$folderPicker.Current.ControlType.ProgrammaticName
+  }
+  Write-Host ("UIA_OPEN_FOLDER_PICKER_EVIDENCE=" +
+    ($openFolderPickerEvidence | ConvertTo-Json -Compress))
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$folderPicker.Current.NativeWindowHandle
   )) "native folder picker rejected cancellation"
@@ -3965,6 +3992,9 @@ try {
     -diagnosticWindow $shellWindow `
     -RecoverForeground
   Require ($null -ne $nodeForm) "empty global New Loop did not open the node form"
+  $emptyOverviewEvidence.nodeForm = [string]$nodeForm.Current.Name
+  Write-Host ("UIA_EMPTY_OVERVIEW_EVIDENCE=" +
+    ($emptyOverviewEvidence | ConvertTo-Json -Compress))
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$nodeForm.Current.NativeWindowHandle
   )) "empty global node form rejected cancellation"
@@ -3981,6 +4011,11 @@ try {
            ($emptyProjectLoopButton.Current.Name -eq "New Loop") -and
            (-not $emptyProjectLoopButton.Current.IsOffscreen)) `
     "empty project canvas omitted its visible New Loop action"
+  $emptyProjectEvidence = [ordered]@{
+    newLoopAction = [string]$emptyProjectLoopButton.Current.Name
+    newLoopOffscreen = [bool]$emptyProjectLoopButton.Current.IsOffscreen
+    nodeForm = $null
+  }
   Require (Ensure-ShellForeground $shellWindow "empty project New Loop") `
     "GraphCode shell did not reacquire foreground before empty project New Loop command"
   Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, 4602)) `
@@ -3993,6 +4028,9 @@ try {
     -diagnosticWindow $shellWindow `
     -RecoverForeground
   Require ($null -ne $projectNodeForm) "empty project New Loop did not open the node form"
+  $emptyProjectEvidence.nodeForm = [string]$projectNodeForm.Current.Name
+  Write-Host ("UIA_EMPTY_PROJECT_EVIDENCE=" +
+    ($emptyProjectEvidence | ConvertTo-Json -Compress))
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$projectNodeForm.Current.NativeWindowHandle
   )) "empty project node form rejected cancellation"
@@ -4036,6 +4074,14 @@ try {
     "Remote Connection sheet omitted the encoded project identity"
   Require ($remoteContent -match "removing and adding the remote project") `
     "Remote Connection sheet omitted its management guidance"
+  $remoteConnectionInfoEvidence = [ordered]@{
+    dialogName = [string]$remoteDialog.Current.Name
+    projectIdentity = [regex]::Match($remoteContent, "ssh://builder/GraphCode\S*").Value
+    guidance = @($remoteContent -split "`n" |
+      Where-Object { $_ -match "removing and adding the remote project" }) | Select-Object -First 1
+  }
+  Write-Host ("UIA_REMOTE_CONNECTION_INFO_EVIDENCE=" +
+    ($remoteConnectionInfoEvidence | ConvertTo-Json -Compress))
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$remoteDialog.Current.NativeWindowHandle
   )) "Remote Connection sheet rejected close"
@@ -4075,6 +4121,15 @@ try {
     "Delete All Loops confirmation omitted graph consequences"
   Require ($deleteLoopsContent -match "project files remain on disk") `
     "Delete All Loops confirmation omitted filesystem consequences"
+  $deleteProjectLoopsEvidence = [ordered]@{
+    dialogName = [string]$deleteLoopsDialog.Current.Name
+    graphConsequence = @($deleteLoopsContent -split "`n" |
+      Where-Object { $_ -match "every loop and graph connection" }) | Select-Object -First 1
+    filesystemConsequence = @($deleteLoopsContent -split "`n" |
+      Where-Object { $_ -match "project files remain on disk" }) | Select-Object -First 1
+  }
+  Write-Host ("UIA_DELETE_PROJECT_LOOPS_EVIDENCE=" +
+    ($deleteProjectLoopsEvidence | ConvertTo-Json -Compress))
   Require ([GraphCodeUiaGateState]::SendCommand(
     [IntPtr]$deleteLoopsDialog.Current.NativeWindowHandle, 7
   )) "Delete All Loops confirmation rejected its safe No action"
@@ -4116,6 +4171,17 @@ try {
     "Delete Edge confirmation omitted the connection kind and graph consequence"
   Require ($deleteEdgeContent -match "loops themselves remain") `
     "Delete Edge confirmation omitted the retained-loop consequence"
+  $deleteEdgeLines = @($deleteEdgeContent -split "`n")
+  $deleteEdgeEvidence = [ordered]@{
+    dialogName = [string]$deleteEdgeDialog.Current.Name
+    endpoints = @(@("Planner", "Builder") | Where-Object { $deleteEdgeContent -match $_ })
+    graphConsequence = @($deleteEdgeLines |
+      Where-Object { $_ -match "handoff graph connection" }) | Select-Object -First 1
+    retainedLoopConsequence = @($deleteEdgeLines |
+      Where-Object { $_ -match "loops themselves remain" }) | Select-Object -First 1
+  }
+  Write-Host ("UIA_DELETE_EDGE_EVIDENCE=" +
+    ($deleteEdgeEvidence | ConvertTo-Json -Compress))
   Require ([GraphCodeUiaGateState]::SendCommand(
     [IntPtr]$deleteEdgeDialog.Current.NativeWindowHandle, 7
   )) "Delete Edge confirmation rejected its safe No action"
@@ -4171,6 +4237,14 @@ try {
     ))
   )
   Require ($null -ne $aboutOk) "About dialog omitted its OK action"
+  $aboutDialogEvidence = [ordered]@{
+    dialogName = [string]$aboutDialog.Current.Name
+    productIdentity = [regex]::Match($aboutContent, "GraphCode\s+for Windows").Value
+    version = [regex]::Match($aboutContent, "Version\s+\S+").Value
+    okAction = [string]$aboutOk.Current.Name
+  }
+  Write-Host ("UIA_ABOUT_DIALOG_EVIDENCE=" +
+    ($aboutDialogEvidence | ConvertTo-Json -Compress))
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$aboutDialog.Current.NativeWindowHandle
   )) "About dialog rejected its close command"
@@ -4196,13 +4270,31 @@ try {
     "Check for Updates command was not found on the Help menu"
   Require (($checkUpdatesInitialState -band 0x1) -eq 0) `
     "Check for Updates was still disabled once the startup check settled"
+  $checkUpdatesReachableEvidence = [ordered]@{
+    commandId = $checkUpdatesCommandId
+    presentOnMenuBar = ($checkUpdatesInitialState -ne 0xFFFFFFFF)
+    enabledBeforeInvoke = (($checkUpdatesInitialState -band 0x1) -eq 0)
+    menuState = ("0x{0:x}" -f $checkUpdatesInitialState)
+  }
   Require ([GraphCodeUiaGateState]::SendCommand($shellWindow, $checkUpdatesCommandId)) `
     "Check for Updates command was rejected"
+  # Read the menu bit and the status text back to back, before the transient
+  # checking state can settle, so the summary reports what was actually observed.
   $checkUpdatesCheckingState = [GraphCodeUiaGateState]::MenuCommandState($menuBarHandle, $checkUpdatesCommandId)
+  $checkUpdatesCheckingStatus = [string]$status.Current.Name
+  $checkUpdatesDisabledWhileCheckingEvidence = [ordered]@{
+    disabledAfterInvoke = (($checkUpdatesCheckingState -band 0x1) -ne 0)
+    menuState = ("0x{0:x}" -f $checkUpdatesCheckingState)
+    statusAfterInvoke = $checkUpdatesCheckingStatus
+  }
+  Write-Host ("UIA_CHECK_UPDATES_EVIDENCE=" + ([ordered]@{
+    reachable = $checkUpdatesReachableEvidence
+    whileChecking = $checkUpdatesDisabledWhileCheckingEvidence
+  } | ConvertTo-Json -Compress))
   Require (($checkUpdatesCheckingState -band 0x1) -ne 0) `
     "Check for Updates stayed enabled immediately after being invoked, instead of disabling while checking"
-  Require ($status.Current.Name -eq "Checking for updates...") `
-    "Check for Updates did not report the checking status; saw '$($status.Current.Name)'"
+  Require ($checkUpdatesCheckingStatus -eq "Checking for updates...") `
+    "Check for Updates did not report the checking status; saw '$checkUpdatesCheckingStatus'"
   $checkUpdatesSettled = $false
   for ($index = 0; $index -lt 150 -and -not $checkUpdatesSettled; $index++) {
     Start-Sleep -Milliseconds 100
@@ -4849,13 +4941,21 @@ try {
     "Tell sessions they're part of a graph" = 0
     "Get beta releases" = 1
   }
+  $productSettingsToggleStates = @()
   foreach ($entry in $expectedToggles.GetEnumerator()) {
     $toggleElement = @($settingsElements | Where-Object { $_.Current.Name -eq $entry.Key }) |
       Select-Object -First 1
-    Require ([GraphCodeUiaGateState]::GetCheckState(
+    $toggleState = [GraphCodeUiaGateState]::GetCheckState(
       [IntPtr]$toggleElement.Current.NativeWindowHandle
-    ) -eq $entry.Value) `
+    )
+    $productSettingsToggleStates += "$([string]$toggleElement.Current.Name)=$toggleState"
+    Require ($toggleState -eq $entry.Value) `
       "Product Settings toggle '$($entry.Key)' did not load the isolated fixture"
+  }
+  $productSettingsEvidence = [ordered]@{
+    shownSettings = @($requiredSettingsNames | Where-Object { $settingsNames -contains $_ })
+    toggleStates = $productSettingsToggleStates
+    savedDefaultBackend = $null
   }
 
   $settingsWindow = $settingsHandle
@@ -4884,6 +4984,9 @@ try {
   Require (($savedSettings.defaultBackend -eq "copilotCLI") -and
            ($savedSettings.gateSentinel -eq "preserve")) `
     "Return did not save Product Settings or preserve unrelated settings"
+  $productSettingsEvidence.savedDefaultBackend = [string]$savedSettings.defaultBackend
+  Write-Host ("UIA_PRODUCT_SETTINGS_EVIDENCE=" +
+    ($productSettingsEvidence | ConvertTo-Json -Compress -Depth 4))
   $savedSettingsBytes = [IO.File]::ReadAllBytes($settingsPath)
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($settingsShellWindow, 15)) `
@@ -5234,25 +5337,24 @@ try {
     dynamicInvocations = $dynamicInvocationEvidence
     compositeNavigation = $compositeNavigationEvidence
     renameDialog = $renameDialogEvidence
-    connectedDaemonRenamePassed = $true
+    connectedDaemonRenamePropagationConfirmed = $renamePropagationConfirmed
     connectedDaemonGraphTitle = $renameLiveGraphTitle
     connectedDaemonSidebarTitle = $renameLiveSidebarTitle
     connectedDaemonRenameIdentity = $renameNodeId
     connectedDaemonAppliedRenames = @($renameStubEvidence.appliedRenames)
     jumpPalette = $jumpPaletteEvidence
-    inlineIngressErrorPassed = $true
-    openFolderPickerPassed = $true
-    emptyOverviewPassed = $true
-    emptyProjectPassed = $true
-    remoteConnectionInfoPassed = $true
-    deleteProjectLoopsPassed = $true
-    deleteEdgePassed = $true
-    productSettingsPassed = $true
+    inlineIngressError = $inlineIngressErrorEvidence
+    openFolderPicker = $openFolderPickerEvidence
+    emptyOverview = $emptyOverviewEvidence
+    emptyProject = $emptyProjectEvidence
+    remoteConnectionInfo = $remoteConnectionInfoEvidence
+    deleteProjectLoops = $deleteProjectLoopsEvidence
+    deleteEdge = $deleteEdgeEvidence
+    productSettings = $productSettingsEvidence
     productSettingsReturnSaved = ($savedSettings.defaultBackend -eq "copilotCLI")
-    productSettingsEscapeCancelled = $true
-    aboutDialogPassed = $true
-    checkUpdatesReachable = $true
-    checkUpdatesDisabledWhileChecking = $true
+    aboutDialog = $aboutDialogEvidence
+    checkUpdatesReachable = $checkUpdatesReachableEvidence
+    checkUpdatesDisabledWhileChecking = $checkUpdatesDisabledWhileCheckingEvidence
     checkUpdatesSettledAfterCheck = $checkUpdatesSettled
     checkUpdatesFinalStatus = $checkUpdatesFinalStatus
     statusText = $statusTextAfter
@@ -5271,7 +5373,7 @@ try {
     initialFocusEventSource = $initialFocusSource
     focusFallbackSource = [GraphCodeUiaGateState]::FocusSourceAutomationId
     providerTeardownSafe = $retainedProviderSafe
-    connectionFailureBannerPassed = $true
+    connectionFailureBanner = $connectionFailureBannerEvidence
     contextMenuItemCount = $projectMenuItems.Count
     contextMenuMoveProjectText = $moveProjectItem.Text
     contextMenuMoveProjectEnabled = $moveProjectItem.Enabled
