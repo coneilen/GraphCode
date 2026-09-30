@@ -5757,6 +5757,7 @@ try {
     focusFallbackSource = [GraphCodeUiaGateState]::FocusSourceAutomationId
     providerTeardownSafe = $retainedProviderSafe
     connectionFailureBanner = $connectionFailureBannerEvidence
+    canvasContextMenu = $canvasContextMenuEvidence
     contextMenuItemCount = $projectMenuItems.Count
     contextMenuMoveProjectText = $moveProjectItem.Text
     contextMenuMoveProjectEnabled = $moveProjectItem.Enabled

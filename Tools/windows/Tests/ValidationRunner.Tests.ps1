@@ -1334,6 +1334,7 @@ Start-Sleep -Seconds 60
   }
   if ($uiaLiveGateSource -notmatch 'UIA_CANVAS_CONTEXT_MENU_EVIDENCE' -or
       $uiaLiveGateSource -notmatch '\$canvasContextMenuEvidence' -or
+      $uiaLiveGateSource -notmatch 'canvasContextMenu = \$canvasContextMenuEvidence' -or
       $uiaLiveGateSource -notmatch '"canvas background"' -or
       $uiaLiveGateSource -notmatch '"canvas node"' -or
       $uiaLiveGateSource -notmatch '"canvas edge"' -or
