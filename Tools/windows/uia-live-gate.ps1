@@ -4931,7 +4931,7 @@ try {
   $addFolderDescription = Format-PopupMenuItems $addFolderItems
   $addFolderLabels = @($addFolderItems | Where-Object { -not $_.Separator } | ForEach-Object { $_.Text })
   foreach ($expectedLabel in @(
-    "Open Folder...`tCtrl+O", "Clone Repository...`tCtrl+Shift+C",
+    "Open Folder...`tCtrl+O", "Clone Repository...`tCtrl+Shift+C outside terminal",
     "Add Remote Repository...`tCtrl+Shift+R", "Add Codespace...`tCtrl+Shift+K",
     "Recent Folders"
   )) {
