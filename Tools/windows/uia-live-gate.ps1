@@ -7548,8 +7548,6 @@ try {
     renderedHitTests = 4
     limit = "Stub graphChanged and live node-card hit tests; not a production daemon session, active session preservation, glyph rendering, or macOS runtime parity."
   }
-  Write-Host ("UIA_SKETCH_CUSTODY_EVIDENCE=" + ($sketchCustodyEvidence | ConvertTo-Json -Depth 8 -Compress))
-
   Require ([GraphCodeUiaGateState]::PostCommand($renameShellWindow, 0x5002)) `
     "connected-daemon shell rejected the tray Exit command"
   Require $renameProcess.WaitForExit(5000) "connected-daemon shell did not exit"
@@ -7569,6 +7567,9 @@ try {
   Require ([bool]$renameStubEvidence.protocolConnected) "rename stub daemon saw no connection"
   Require (@($renameStubEvidence.appliedRenames) -contains "$renameNodeId=$renameFinalTitle") `
     "rename stub daemon never applied the dispatched rename"
+
+  Write-Host ("UIA_SKETCH_CUSTODY_EVIDENCE=" + ($sketchCustodyEvidence | ConvertTo-Json -Depth 8 -Compress))
+  Require $false "N3d deliberate hosted RED perturbation after completed sketch/custody evidence"
 
   [pscustomobject]@{
     name = $rootName
