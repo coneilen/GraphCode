@@ -1449,6 +1449,18 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_OCCLUSION') {
     throw "RED: UIA live gate node creation sheet cannot measure and record controls occluded outside the monitor work area"
   }
+  if ($uiaLiveGateSource -notmatch 'if \(!hit\.HitTarget && !visibleEmpty && dialog != IntPtr\.Zero\)' -or
+      $uiaLiveGateSource -notmatch 'for \(int row = 1; row <= 3; row\+\+\)' -or
+      $uiaLiveGateSource -notmatch 'for \(int column = 1; column <= 5; column\+\+\)' -or
+      $uiaLiveGateSource -notmatch 'return RealChildWindowFromPoint\(dialog, clientPoint\) == target;' -or
+      $uiaLiveGateSource -notmatch '\} else if \(!hit\.HitTarget\) \{' -or
+      $uiaLiveGateSource -notmatch 'footerOccludedByContent = ' -or
+      $uiaLiveGateSource -notmatch 'coveredFraction = ' -or
+      $uiaLiveGateSource -notmatch 'createCentreClicks = ' -or
+      $uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_CONTENT_OCCLUSION' -or
+      $uiaLiveGateSource -notmatch 'has no uncovered point in') {
+    throw "RED: UIA live gate node creation sheet cannot click and record a footer control partly covered by scrolled content"
+  }
   if ($shellTests -notmatch '(?s)Windows update feed executable tests.*?zig test src\\WindowsUpdates\.zig.*?-lwinhttp') {
     throw "RED: Windows shell validation does not run the native updater tests"
   }

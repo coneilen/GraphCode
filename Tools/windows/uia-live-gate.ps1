@@ -629,6 +629,23 @@ public static class GraphCodeUiaGateState {
     public int CenterX, CenterY;
     public bool CenterHitTarget;
     public string WindowAtCenterClass, WindowAtCenterRootClass;
+    public bool ScanUsed;
+    public int ScannedPoints, CoveredPoints;
+    public int CoveringId, CoveringLeft, CoveringTop, CoveringRight, CoveringBottom;
+    public string CoveringClass, CoveringText;
+    public string[] Samples;
+  }
+  private static IntPtr ResolveChild(IntPtr dialog, ScreenPoint point) {
+    var clientPoint = point;
+    if (!ScreenToClient(dialog, ref clientPoint)) return IntPtr.Zero;
+    return RealChildWindowFromPoint(dialog, clientPoint);
+  }
+  private static bool ResolvesToControl(IntPtr target, IntPtr dialog, ScreenPoint point) {
+    IntPtr atPoint = WindowFromPoint(point);
+    if (atPoint == IntPtr.Zero || GetAncestor(atPoint, 2) != GetAncestor(target, 2)) return false;
+    var clientPoint = point;
+    if (!ScreenToClient(dialog, ref clientPoint)) return false;
+    return RealChildWindowFromPoint(dialog, clientPoint) == target;
   }
   private static string ClassOf(IntPtr window) {
     if (window == IntPtr.Zero) return "";
@@ -697,6 +714,42 @@ public static class GraphCodeUiaGateState {
       WindowAtCenterClass = ClassOf(atRectCenter),
       WindowAtCenterRootClass = ClassOf(atRectCenter == IntPtr.Zero ? IntPtr.Zero : GetAncestor(atRectCenter, 2))
     };
+    // When sibling content covers the chosen point, look for an uncovered point
+    // on a fixed grid over the visible portion, as a user would click the part
+    // of the button they can see. Each candidate must still resolve to the
+    // control itself; the covering window and the covered count are recorded.
+    if (!hit.HitTarget && !visibleEmpty && dialog != IntPtr.Zero) {
+      IntPtr covering = realChild != IntPtr.Zero && realChild != target && realChild != dialog ? realChild : atPoint;
+      RECT coveringRect;
+      if (covering != IntPtr.Zero && GetWindowRect(covering, out coveringRect)) {
+        hit.CoveringLeft = coveringRect.Left; hit.CoveringTop = coveringRect.Top;
+        hit.CoveringRight = coveringRect.Right; hit.CoveringBottom = coveringRect.Bottom;
+      }
+      hit.CoveringId = covering == IntPtr.Zero ? 0 : GetDlgCtrlID(covering);
+      hit.CoveringClass = ClassOf(covering);
+      hit.CoveringText = covering == IntPtr.Zero ? "" : EditBufferText(covering);
+      int width = visibleRight - visibleLeft, height = visibleBottom - visibleTop;
+      var samples = new string[15];
+      for (int row = 1; row <= 3; row++) {
+        for (int column = 1; column <= 5; column++) {
+          var candidate = new ScreenPoint { X = visibleLeft + column * width / 6, Y = visibleTop + row * height / 4 };
+          IntPtr resolved = ResolveChild(dialog, candidate);
+          bool uncovered = ResolvesToControl(target, dialog, candidate);
+          samples[hit.ScannedPoints++] = String.Format("{0},{1}|{2}|{3}|{4}|{5}", candidate.X, candidate.Y,
+            resolved == IntPtr.Zero ? 0 : GetDlgCtrlID(resolved), ClassOf(resolved), uncovered ? "control" : "covered",
+            resolved == IntPtr.Zero ? "" : EditBufferText(resolved));
+          if (!uncovered) {
+            hit.CoveredPoints++;
+          } else if (!hit.HitTarget) {
+            center = candidate;
+            hit.ScreenX = candidate.X; hit.ScreenY = candidate.Y;
+            hit.HitTarget = true;
+            hit.ScanUsed = true;
+          }
+        }
+      }
+      hit.Samples = samples;
+    }
     if (!hit.HitTarget) return hit;
     ScreenPoint before, at;
     if (!GetCursorPos(out before))
@@ -5912,6 +5965,8 @@ try {
   # 9105 is a checkbox; NativeForms.zig gives checkbox fields an empty label.
   $nodeSheetCheckboxIds = @(9105)
   $nodeSheetOcclusions = [Collections.Generic.List[object]]::new()
+  $nodeSheetContentOcclusions = [Collections.Generic.List[object]]::new()
+  $nodeSheetCreateCentreClicks = [Collections.Generic.List[string]]::new()
   $nodeSheetAlwaysVisible = @(9100, 9112, 9113, 9114)
   $nodeSheetTypes = @(
     [pscustomobject]@{ Tile = 2; Label = "Goal-based"; Value = "goalBased"; Extra = @(9106, 9107, 9108, 9109, 9110, 9111) },
@@ -5996,6 +6051,39 @@ try {
       $nodeSheetOcclusions.Add($occlusion)
       Write-Host ("UIA_NODE_CREATION_OCCLUSION " + ($occlusion | ConvertTo-Json -Depth 4 -Compress))
     }
+    $contentOcclusion = $null
+    if ($hit.ScannedPoints -gt 0) {
+      $contentOcclusion = [ordered]@{
+        controlId = $controlId
+        label = $label
+        controlBounds = $controlBounds
+        dialogBounds = $dialogBounds
+        centreResolvedTo = [ordered]@{
+          id = $hit.RealChildId; class = $hit.RealChildClass; text = $hit.RealChildText
+        }
+        covering = [ordered]@{
+          id = $hit.CoveringId; class = $hit.CoveringClass; text = $hit.CoveringText
+          bounds = @($hit.CoveringLeft, $hit.CoveringTop, $hit.CoveringRight, $hit.CoveringBottom)
+        }
+        sampledPoints = $hit.ScannedPoints
+        coveredPoints = $hit.CoveredPoints
+        coveredFraction = [Math]::Round($hit.CoveredPoints / [double]$hit.ScannedPoints, 3)
+        samples = @($hit.Samples | ForEach-Object {
+          $parts = ([string]$_).Split([char[]]'|', 5)
+          [ordered]@{ point = $parts[0]; id = [int]$parts[1]; class = $parts[2]; result = $parts[3]; text = $parts[4] }
+        })
+        clickedPoint = if ($hit.HitTarget) { @($hit.ScreenX, $hit.ScreenY) } else { $null }
+      }
+      $nodeSheetContentOcclusions.Add($contentOcclusion)
+      Write-Host ("UIA_NODE_CREATION_CONTENT_OCCLUSION " + ($contentOcclusion | ConvertTo-Json -Depth 5 -Compress))
+      Require $hit.HitTarget `
+        ("node creation sheet $label has no uncovered point in [$($controlBounds -join ',')]: " +
+         "$($hit.CoveredPoints)/$($hit.ScannedPoints) sampled points covered by control $($hit.CoveringId) " +
+         "class '$($hit.CoveringClass)' text '$($hit.CoveringText)' at " +
+         "[$($hit.CoveringLeft),$($hit.CoveringTop),$($hit.CoveringRight),$($hit.CoveringBottom)]")
+    } elseif ($controlId -eq 1 -and $hit.HitTarget) {
+      $nodeSheetCreateCentreClicks.Add($label)
+    }
     Require $hit.HitTarget `
       ("node creation sheet $label point ($($hit.ScreenX),$($hit.ScreenY)) inside " +
        "[$($controlBounds -join ',')] resolved to child $($hit.RealChildId) class '$($hit.RealChildClass)' " +
@@ -6011,6 +6099,7 @@ try {
       uiaBounds = @([int]$uiaBounds.Left, [int]$uiaBounds.Top, [int]$uiaBounds.Right, [int]$uiaBounds.Bottom)
       point = @($hit.ScreenX, $hit.ScreenY)
       outsideWorkArea = $hit.OutsideWorkArea
+      scanUsed = $hit.ScanUsed
       hitTest = [ordered]@{
         realChildId = $hit.RealChildId
         windowFromPointId = $hit.WindowAtPointId
@@ -6314,6 +6403,11 @@ try {
     footerOccludedByTaskbar = [ordered]@{
       occluded = ($nodeSheetOcclusions.Count -gt 0)
       controls = @($nodeSheetOcclusions)
+    }
+    footerOccludedByContent = [ordered]@{
+      occluded = ($nodeSheetContentOcclusions.Count -gt 0)
+      controls = @($nodeSheetContentOcclusions)
+      createCentreClicks = @($nodeSheetCreateCentreClicks)
     }
   }
   Write-Host ("UIA_NODE_CREATION_SHEET_EVIDENCE=" + ($nodeCreationSheetEvidence | ConvertTo-Json -Compress -Depth 8))
