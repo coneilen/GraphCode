@@ -2536,6 +2536,8 @@ try {
     "Composite canvas did not expose its Back breadcrumb: $(@($compositeChildren | ForEach-Object { $_.Current.Name }) -join '|')"
   Require (($compositeBack[0].Current.BoundingRectangle.Width -gt 0) -and
            ($compositeBack[0].Current.BoundingRectangle.Height -gt 0)) "Composite Back breadcrumb has empty bounds"
+  $compositeNestedNames = @($nestedCards | ForEach-Object { [string]$_.Current.Name })
+  $compositeBackName = [string]$compositeBack[0].Current.Name
   $compositeBack[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   $restoredProbe = Wait-ForGraphChildren $root $rawWalker `
     { $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop ' } `
@@ -2545,6 +2547,12 @@ try {
   Require (($restoredProjectCards.Count -eq 2) -and
            ((@($restoredProjectCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) `
     "Composite Back did not restore the parent project canvas"
+  $compositeNavigationEvidence = [ordered]@{
+    nestedCards = $compositeNestedNames
+    backBreadcrumb = $compositeBackName
+    restoredCards = @($restoredProjectCards | ForEach-Object { [string]$_.Current.Name })
+  }
+  Write-Host ("UIA_COMPOSITE_NAVIGATION_EVIDENCE=" + ($compositeNavigationEvidence | ConvertTo-Json -Compress))
 
   # Connector handles: GraphCanvas.drawNode paints a highlighted (0x00FFCD7A COLORREF
   # -> RGB 0x7ACDFF, light blue) hover handle at the outgoing connector position
@@ -2874,6 +2882,8 @@ try {
   }) | Select-Object -First 1
   Require (($null -ne $activeProjectRow) -and ($null -ne $activeLoopRow)) `
     "sidebar rows were unavailable before dynamic invocation"
+  $dynamicInvokedProjectRow = [string]$activeProjectRow.Current.AutomationId
+  $dynamicInvokedLoopRow = [string]$activeLoopRow.Current.AutomationId
   $activeProjectRow.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   $activeLoopRow.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   Start-Sleep -Milliseconds 250
@@ -2915,6 +2925,13 @@ try {
            ((@($workspaceCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B") -and
            $workspaceCards[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected) `
     "loop invocation did not transition to the selected workspace loop"
+  $dynamicInvocationEvidence = [ordered]@{
+    invokedProjectRow = $dynamicInvokedProjectRow
+    invokedLoopRow = $dynamicInvokedLoopRow
+    workspaceCards = @($workspaceCards | ForEach-Object { [string]$_.Current.Name })
+    selectedWorkspaceCard = [string]$workspaceCards[0].Current.Name
+  }
+  Write-Host ("UIA_DYNAMIC_INVOCATION_EVIDENCE=" + ($dynamicInvocationEvidence | ConvertTo-Json -Compress))
   $workspaceToolbar = $null
   $workspaceLoopBar = $null
   $workspaceShowGraph = $null
@@ -3286,7 +3303,8 @@ try {
              ([GraphCodeUiaGateState]::SelectedEvents -eq 1)) "Select did not raise ElementSelected exactly once"
     $safeSelection.Select()
     Start-Sleep -Milliseconds 150
-    Require ([GraphCodeUiaGateState]::SelectedEvents -eq 1) "idempotent Select raised a duplicate event"
+    $selectedAfterRepeat = [GraphCodeUiaGateState]::SelectedEvents
+    Require ($selectedAfterRepeat -eq 1) "idempotent Select raised a duplicate event"
     $unsafeRejected = $false
     try { $unsafeSelection.Select() } catch { $unsafeRejected = $true }
     Require $unsafeRejected "unsafe SelectionItem.Select was accepted"
@@ -3294,11 +3312,13 @@ try {
     for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::RemovedEvents -lt 1; $index++) {
       Start-Sleep -Milliseconds 50
     }
-    Require (($selection.Current.GetSelection().Count -eq 0) -and
+    $selectionCountAfterRemove = $selection.Current.GetSelection().Count
+    Require (($selectionCountAfterRemove -eq 0) -and
              ([GraphCodeUiaGateState]::RemovedEvents -eq 1)) "RemoveFromSelection did not raise ElementRemovedFromSelection"
     $safeSelection.RemoveFromSelection()
     Start-Sleep -Milliseconds 150
-    Require ([GraphCodeUiaGateState]::RemovedEvents -eq 1) "idempotent RemoveFromSelection raised a duplicate event"
+    $removedAfterRepeat = [GraphCodeUiaGateState]::RemovedEvents
+    Require ($removedAfterRepeat -eq 1) "idempotent RemoveFromSelection raised a duplicate event"
     $safeSelection.AddToSelection()
     for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::AddedEvents -lt 1; $index++) {
       Start-Sleep -Milliseconds 50
@@ -3306,7 +3326,8 @@ try {
     Require ([GraphCodeUiaGateState]::AddedEvents -eq 1) "AddToSelection did not raise ElementAddedToSelection"
     $safeSelection.AddToSelection()
     Start-Sleep -Milliseconds 150
-    Require ([GraphCodeUiaGateState]::AddedEvents -eq 1) "idempotent AddToSelection raised a duplicate event"
+    $addedAfterRepeat = [GraphCodeUiaGateState]::AddedEvents
+    Require ($addedAfterRepeat -eq 1) "idempotent AddToSelection raised a duplicate event"
     $safeSelection.RemoveFromSelection()
     for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::RemovedEvents -lt 2; $index++) {
       Start-Sleep -Milliseconds 50
@@ -3334,6 +3355,16 @@ try {
     removed = [GraphCodeUiaGateState]::RemovedEvents
     source = [GraphCodeUiaGateState]::SelectionSourceAutomationId
   }
+  $repeatedSelectionEvidence = [ordered]@{
+    selectedAfterRepeatSelect = $selectedAfterRepeat
+    removedAfterRepeatRemove = $removedAfterRepeat
+    addedAfterRepeatAdd = $addedAfterRepeat
+  }
+  Write-Host ("UIA_WORKTREE_SELECTION_EVIDENCE=" + ([ordered]@{
+    fixtureRows = $initialRowIds.Count
+    selectionCountAfterRemove = $selectionCountAfterRemove
+    repeatedSelection = $repeatedSelectionEvidence
+  } | ConvertTo-Json -Compress))
 
   $actions = @{}
   foreach ($actionId in @("inspect-worktrees", "reclaim-worktrees", "reveal-worktree",
@@ -3500,16 +3531,20 @@ try {
   Require ([GraphCodeUiaGateState]::FocusSourceAutomationId -eq $safeRowId) "FocusChanged source identity changed"
   $initialFocusSource = [GraphCodeUiaGateState]::FocusSourceAutomationId
 
-  $stressJob = Start-Job -ArgumentList ([int64]$process.MainWindowHandle) -ScriptBlock {
-    param([int64] $window)
+  $stressRequestedReads = 100
+  $stressJob = Start-Job -ArgumentList ([int64]$process.MainWindowHandle), $stressRequestedReads -ScriptBlock {
+    param([int64] $window, [int] $requestedReads)
     $ErrorActionPreference = "Stop"
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
     $element = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$window)
-    for ($index = 0; $index -lt 100; $index++) {
+    $reads = 0
+    for ($index = 0; $index -lt $requestedReads; $index++) {
       $null = $element.Current.Name
+      $reads++
       Start-Sleep -Milliseconds 5
     }
+    $reads
   }
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($process.MainWindowHandle, 1)) "fixture reorder message was rejected"
   Start-Sleep -Milliseconds 150
@@ -3525,8 +3560,16 @@ try {
   Start-Sleep -Milliseconds 150
   $null = Wait-Job -Job $stressJob -Timeout 10
   $stressErrors = @()
-  Receive-Job -Job $stressJob -ErrorAction SilentlyContinue -ErrorVariable +stressErrors | Out-Null
+  $stressOutput = @(Receive-Job -Job $stressJob -ErrorAction SilentlyContinue -ErrorVariable +stressErrors)
+  $concurrencyStressEvidence = [ordered]@{
+    state = [string]$stressJob.State
+    completedReads = if ($stressOutput.Count -gt 0) { [int]$stressOutput[-1] } else { 0 }
+    requestedReads = $stressRequestedReads
+  }
+  Write-Host ("UIA_CONCURRENCY_STRESS_EVIDENCE=" + ($concurrencyStressEvidence | ConvertTo-Json -Compress))
   Require ($stressJob.State -eq "Completed") "UIA read stress did not finish: $($stressJob.State) $($stressErrors -join '; ')"
+  Require ($concurrencyStressEvidence.completedReads -eq $concurrencyStressEvidence.requestedReads) `
+    "UIA read stress completed $($concurrencyStressEvidence.completedReads) of $($concurrencyStressEvidence.requestedReads) reads during fixture reorder/removal"
   Remove-Job -Job $stressJob -Force
   $remainingRows = @(Get-DirectChildren $worktrees $rawWalker)
   $remainingRowIds = @($remainingRows | ForEach-Object { $_.Current.AutomationId })
@@ -3601,6 +3644,9 @@ try {
   Require ($renameContent -match "Choose the title shown") "Rename Loop dialog omitted its explanation"
   Require ($renameContent -match "(?m)^Title$") "Rename Loop dialog omitted its Title field label"
   Require ($renameContent -match "UIA loop A") "Rename Loop dialog did not populate the current title"
+  $renameDialogName = [string]$renameDialog.Current.Name
+  $renameShownTitle = @($renameElements | ForEach-Object { [string]$_.Current.Name } |
+    Where-Object { $_ -match "UIA loop A" }) | Select-Object -First 1
   Require ([GraphCodeUiaGateState]::SetEditTextById(
     [IntPtr]$renameDialog.Current.NativeWindowHandle, 9904, "UIA renamed loop"
   )) "Rename Loop dialog omitted its native Title edit control (id 9904)"
@@ -3729,6 +3775,14 @@ try {
   Write-Host "UIA_UPDATE_NODE_DISPATCH nodeId=$($updateCommand.graphCommand.command.updateNode._0) goalSummary=$($updateCommand.graphCommand.command.updateNode.update.goalSummary) connectionFailure=forced"
   Require ($renameDispatchMatches) `
     "Rename submission dispatched a title different from the requested replacement"
+  $renameDialogEvidence = [ordered]@{
+    dialogName = $renameDialogName
+    shownTitle = $renameShownTitle
+    inputAfterSet = $renameInputAfterSet
+    dispatchedNodeId = [string]$renameCommand.graphCommand.command.renameNode._0
+    dispatchedTitle = [string]$renameCommand.graphCommand.command.renameNode.title
+  }
+  Write-Host ("UIA_RENAME_DIALOG_EVIDENCE=" + ($renameDialogEvidence | ConvertTo-Json -Compress))
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 14)) `
     "jump palette fixture command was rejected"
@@ -3814,6 +3868,13 @@ try {
     [System.Windows.Automation.SelectionItemPattern]::Pattern
   ).Current.IsSelected
   Require $selectedAfterJump "jump palette activation did not navigate to UIA loop B"
+  $jumpPaletteEvidence = [ordered]@{
+    resultCount = $jumpNames.Count
+    results = @($jumpNames | ForEach-Object { [string]$_ })
+    filteredResults = @($filteredJumpNames | ForEach-Object { [string]$_ })
+    destination = [string]$loopBAfterJump.Current.Name
+  }
+  Write-Host ("UIA_JUMP_PALETTE_EVIDENCE=" + ($jumpPaletteEvidence | ConvertTo-Json -Compress))
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 8)) "inline ingress-error fixture command was rejected"
   $inlineError = $null
@@ -5154,11 +5215,11 @@ try {
     reorderedWorktreeRows = $reorderedRowIds
     remainingWorktreeRows = $remainingRowIds
     removedProviderUnavailable = $removedProviderUnavailable
-    concurrencyStressPassed = $true
-    selectionPattern = $true
-    fixtureRows = 2
+    concurrencyStress = $concurrencyStressEvidence
+    selectionCountAfterRemove = $selectionCountAfterRemove
+    fixtureRows = $initialRowIds.Count
     unsafeSelectionRejected = $unsafeRejected
-    repeatedSelectionObserved = $true
+    repeatedSelection = $repeatedSelectionEvidence
     selectionEvents = $selectionEventEvidence
     togglePropertyEvents = [GraphCodeUiaGateState]::TogglePropertyEvents
     togglePropertySource = [GraphCodeUiaGateState]::TogglePropertySourceAutomationId
@@ -5170,15 +5231,15 @@ try {
     dynamicLoopRows = $loopIds
     dynamicProjectCards = $projectCardIds
     dynamicQuickChatCards = $quickChatCardIds
-    dynamicInvocationsPassed = $true
-    compositeNavigationPassed = $true
-    renameDialogPassed = $true
+    dynamicInvocations = $dynamicInvocationEvidence
+    compositeNavigation = $compositeNavigationEvidence
+    renameDialog = $renameDialogEvidence
     connectedDaemonRenamePassed = $true
     connectedDaemonGraphTitle = $renameLiveGraphTitle
     connectedDaemonSidebarTitle = $renameLiveSidebarTitle
     connectedDaemonRenameIdentity = $renameNodeId
     connectedDaemonAppliedRenames = @($renameStubEvidence.appliedRenames)
-    jumpPalettePassed = $true
+    jumpPalette = $jumpPaletteEvidence
     inlineIngressErrorPassed = $true
     openFolderPickerPassed = $true
     emptyOverviewPassed = $true
