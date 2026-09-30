@@ -324,6 +324,7 @@ fn selectTile(state: *DialogState, tile_index: usize) void {
     state.values[field_index] = value;
     updateConditionalVisibility(state);
     setStaticText(state, state.validation, "");
+    refreshRecap(state);
     for (0..state.tile_count) |i| _ = c.InvalidateRect(state.tile_buttons[i], null, 1);
 }
 
@@ -3175,6 +3176,57 @@ test "form recap describes the pending node, edge, and update" {
     const update_recap = recapText(&update_state);
     defer std.testing.allocator.free(update_recap);
     try std.testing.expect(std.mem.indexOf(u8, update_recap, "changed fields") != null);
+}
+
+test "clicking a loop-type teaching tile refreshes the pre-submit recap" {
+    const Probe = struct {
+        fn text(hwnd: c.HWND, buffer: []u8) []const u8 {
+            var wide: [512]u16 = undefined;
+            const length = c.GetWindowTextW(hwnd, &wide, @intCast(wide.len));
+            if (length <= 0) return &.{};
+            const written = std.unicode.utf16LeToUtf8(buffer, wide[0..@intCast(length)]) catch return &.{};
+            return buffer[0..written];
+        }
+    };
+
+    const recap_window = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        c.WS_OVERLAPPED,
+        0,
+        0,
+        320,
+        48,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.RecapWindowCreationFailed;
+    defer _ = c.DestroyWindow(recap_window);
+
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    state.field_count = 15;
+    state.recap = recap_window;
+    state.tile_field_index = 1;
+    state.input_kinds[1] = .tiles;
+    state.choice_groups[1] = .loop_type;
+    state.values[0] = try std.testing.allocator.dupe(u8, "Ship the picker");
+    state.values[1] = try std.testing.allocator.dupe(u8, "turnBased");
+    defer std.testing.allocator.free(state.values[0]);
+    defer std.testing.allocator.free(state.values[1]);
+
+    refreshRecap(&state);
+    var seeded_buffer: [512]u8 = undefined;
+    const seeded = Probe.text(recap_window, &seeded_buffer);
+    try std.testing.expect(std.mem.indexOf(u8, seeded, "turnBased") != null);
+
+    selectTile(&state, choiceIndex(.loop_type, "goalBased"));
+    try std.testing.expectEqualStrings("goalBased", state.values[1]);
+
+    var rendered_buffer: [512]u8 = undefined;
+    const rendered = Probe.text(recap_window, &rendered_buffer);
+    try std.testing.expectEqualStrings("Recap: Ship the picker — goalBased", rendered);
 }
 
 test "node worktree picker has an honest empty state and binds only real choices" {
