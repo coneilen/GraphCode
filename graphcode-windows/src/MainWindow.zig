@@ -525,7 +525,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     const workspace = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
 
     append(add_folder, "Open Folder...\tCtrl+O", @intFromEnum(Command.open_folder));
-    append(add_folder, "Clone Repository...\tCtrl+Shift+C", @intFromEnum(Command.clone_repository));
+    append(add_folder, "Clone Repository...\tCtrl+Shift+C outside terminal", @intFromEnum(Command.clone_repository));
     append(add_folder, "Add Remote Repository...\tCtrl+Shift+R", @intFromEnum(Command.remote_repository));
     append(add_folder, "Add Codespace...\tCtrl+Shift+K", @intFromEnum(Command.codespace_repository));
     separator(add_folder);
@@ -590,6 +590,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     appendInfo(discovery, "Focus Terminal A\t1");
     appendInfo(discovery, "Focus Terminal B\t2");
     appendInfo(discovery, "Cancel clone\tCtrl+Shift+X");
+    appendInfo(discovery, "Copy terminal text\tCtrl+Shift+C");
     appendInfo(discovery, "Paste terminal text\tCtrl+Shift+V");
     appendInfo(discovery, "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits");
     appendInfo(discovery, "Jump palette: Up / Down navigate; Enter opens the selected loop");
@@ -938,6 +939,7 @@ test "main and help menus expose missing shortcuts without canvas gesture claims
         "Focus Terminal A\t1",
         "Focus Terminal B\t2",
         "Cancel clone\tCtrl+Shift+X",
+        "Copy terminal text\tCtrl+Shift+C",
         "Paste terminal text\tCtrl+Shift+V",
         "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits",
         "Jump palette: Up / Down navigate; Enter opens the selected loop",
@@ -959,6 +961,59 @@ test "main and help menus expose missing shortcuts without canvas gesture claims
         try std.testing.expectEqualStrings(expected_label, actual);
         try std.testing.expect(c.GetMenuState(guide, index, c.MF_BYPOSITION) & c.MF_GRAYED != 0);
     }
+}
+
+test "Ctrl+Shift+C discovery hints match terminal copy and outside-terminal clone routing" {
+    const InputRouter = @import("InputRouter.zig");
+    const accelerators = createAccelerators() orelse return error.AcceleratorCreationFailed;
+    defer _ = c.DestroyAcceleratorTable(accelerators);
+    var entries: [32]c.ACCEL = undefined;
+    const count = c.CopyAcceleratorTableW(accelerators, &entries, entries.len);
+    try std.testing.expect(count > 0);
+    var ctrl_shift_c: usize = 0;
+    for (entries[0..@intCast(count)]) |entry| {
+        if (entry.key == 'C' and entry.fVirt == c.FCONTROL | c.FSHIFT | c.FVIRTKEY) ctrl_shift_c += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), ctrl_shift_c);
+    try std.testing.expectEqual(InputRouter.Action.clone_repository, InputRouter.keyAction('C', true, true));
+
+    const hwnd = try hiddenWorkspaceTestWindow();
+    defer _ = c.DestroyWindow(hwnd);
+    try installMenu(hwnd);
+    const root = c.GetMenu(hwnd);
+    const add_folder = c.GetSubMenu(c.GetSubMenu(root, 0), 0);
+    try std.testing.expect(add_folder != null);
+    var clone_label: [128]u16 = undefined;
+    const clone_length = c.GetMenuStringW(add_folder, @intFromEnum(Command.clone_repository), &clone_label, clone_label.len, c.MF_BYCOMMAND);
+    try std.testing.expect(clone_length > 0 and clone_length < clone_label.len - 1);
+    const clone_actual = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, clone_label[0..@intCast(clone_length)]);
+    defer std.testing.allocator.free(clone_actual);
+    try std.testing.expectEqualStrings("Clone Repository...\tCtrl+Shift+C outside terminal", clone_actual);
+
+    const guide = c.GetSubMenu(c.GetSubMenu(root, 5), 4);
+    try std.testing.expect(guide != null);
+    const guide_count = c.GetMenuItemCount(guide);
+    try std.testing.expect(guide_count > 0);
+    var copy_index: ?c.UINT = null;
+    var paste_index: ?c.UINT = null;
+    var index: c.UINT = 0;
+    while (index < @as(c.UINT, @intCast(guide_count))) : (index += 1) {
+        var label: [128]u16 = undefined;
+        const length = c.GetMenuStringW(guide, index, &label, label.len, c.MF_BYPOSITION);
+        if (length <= 0) continue;
+        const actual = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, label[0..@intCast(length)]);
+        defer std.testing.allocator.free(actual);
+        if (std.mem.eql(u8, actual, "Copy terminal text\tCtrl+Shift+C")) {
+            try std.testing.expectEqual(@as(?c.UINT, null), copy_index);
+            copy_index = index;
+        }
+        if (std.mem.eql(u8, actual, "Paste terminal text\tCtrl+Shift+V")) paste_index = index;
+    }
+    const copy = copy_index orelse return error.TerminalCopyShortcutUndocumented;
+    const paste = paste_index orelse return error.TerminalPasteShortcutUndocumented;
+    try std.testing.expectEqual(copy + 1, paste);
+    try std.testing.expect(c.GetMenuState(guide, copy, c.MF_BYPOSITION) & c.MF_GRAYED != 0);
+    try std.testing.expectEqual(@as(c.UINT, 0), c.GetMenuItemID(guide, @intCast(copy)));
 }
 
 const NativeMenuDispatchTest = struct {
