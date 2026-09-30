@@ -279,6 +279,8 @@ fn finishInstall(comptime Api: type, hwnd: c.HWND, parent: c.HWND, thread: std.T
     while (!active_state.closed) {
         const code = c.GetMessageW(&message, null, 0, 0);
         if (code <= 0) {
+            active_state.cancel_requested = true;
+            shared_cancelled.store(true, .release);
             active_state.closed = true;
             if (code == 0) quit_code = message.wParam;
             break;
@@ -842,4 +844,56 @@ test "update install dialog preserves WM_QUIT exit code after teardown" {
     try std.testing.expect(active_hwnd == null);
     try std.testing.expectEqual(@as(c.BOOL, 1), c.PeekMessageW(&pending, null, c.WM_QUIT, c.WM_QUIT, c.PM_REMOVE));
     try std.testing.expectEqual(@as(c.WPARAM, 73), pending.wParam);
+}
+
+/// Whether `shared_cancelled` had already been signalled the moment the
+/// worker thread is joined. Captured inside `join` itself so the assertion
+/// reflects the state the worker actually observed, not a value read after
+/// the fact.
+var quit_join_observed_cancel: bool = false;
+
+const QuitCancelTestApi = struct {
+    pub fn join(thread: std.Thread) void {
+        _ = thread;
+        quit_join_observed_cancel = shared_cancelled.load(.acquire);
+        recordStartup(.join_worker);
+    }
+
+    pub fn enableWindow(window: c.HWND, enabled: c_int) void {
+        _ = window;
+        std.debug.assert(enabled != 0);
+        recordStartup(.enable_owner);
+    }
+
+    pub fn destroyWindow(window: c.HWND) void {
+        _ = window;
+        recordStartup(.destroy_dialog);
+    }
+
+    pub fn setActiveWindow(window: c.HWND) void {
+        _ = window;
+        recordStartup(.activate_owner);
+    }
+};
+
+test "update install dialog signals cancellation to the worker before joining on WM_QUIT" {
+    var pending: c.MSG = undefined;
+    defer _ = c.PeekMessageW(&pending, null, c.WM_QUIT, c.WM_QUIT, c.PM_REMOVE);
+    startup_calls_len = 0;
+    active_state = .{ .allocator = std.testing.allocator };
+    active_hwnd = fakeWindow(0x2000);
+    active = true;
+    shared_cancelled.store(false, .release);
+    defer shared_cancelled.store(false, .release);
+    quit_join_observed_cancel = false;
+    c.PostQuitMessage(0);
+
+    const outcome = finishInstall(QuitCancelTestApi, fakeWindow(0x2000), fakeWindow(0x1000), undefined);
+
+    // The worker polls `shared_cancelled`; if it is not set before `join` is
+    // called, the join blocks for however long the install still has left
+    // to run instead of returning as soon as the worker notices it should stop.
+    try std.testing.expect(quit_join_observed_cancel);
+    try std.testing.expect(active_state.cancel_requested);
+    try std.testing.expect(outcome == .failed);
 }
