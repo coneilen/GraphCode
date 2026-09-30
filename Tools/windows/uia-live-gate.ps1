@@ -7498,20 +7498,40 @@ try {
       $promotedGraphNode[0].title -ceq $title -and
       $promotedGraphNode[0].loopType -ceq $case.Type) `
       "republished graph state does not retain sketch identity and the selected target type"
-    $renderMenu = Open-SketchNodeMenu $title
-    $renderedPromotionMenu = @($renderMenu.items | ForEach-Object {
-        [ordered]@{ id = $_.Id; text = $_.Text; enabled = $_.Enabled }
-      })
-    $promotionChoices = @($renderMenu.items | Where-Object { $_.Text -eq "Promote to..." })
-    $newChildChoices = @($renderMenu.items | Where-Object { $_.Id -eq 5119 -and $_.Enabled })
-    $sameCardAutomationId = $renderMenu.cardId -ceq $menu.cardId
-    Write-Host ("UIA_SKETCH_PROMOTION_RENDERED=" + ([ordered]@{
-      target = $case.Target; nodeId = $id; title = $title; point = $renderMenu.point
-      cardIdBefore = $menu.cardId; cardIdAfter = $renderMenu.cardId
-      sameCardAutomationId = $sameCardAutomationId; menuItems = $renderedPromotionMenu
-    } | ConvertTo-Json -Compress -Depth 6))
-    Require ($promotionChoices.Count -eq 0 -and $newChildChoices.Count -eq 1) `
-      "republished $($case.Target) node menu mismatch: promoteCount=$($promotionChoices.Count) newChildCount=$($newChildChoices.Count) items=$($renderedPromotionMenu | ConvertTo-Json -Compress -Depth 4)"
+    $renderMenu = $null
+    $renderedPromotionMenu = @()
+    $promotionChoices = @()
+    $newChildChoices = @()
+    $sameCardAutomationId = $false
+    $renderedPromotedState = $false
+    for ($renderAttempt = 1; $renderAttempt -le 25 -and -not $renderedPromotedState; $renderAttempt++) {
+      $renderMenu = Open-SketchNodeMenu $title
+      $renderedPromotionMenu = @($renderMenu.items | ForEach-Object {
+          [ordered]@{ id = $_.Id; text = $_.Text; enabled = $_.Enabled }
+        })
+      $promotionChoices = @($renderMenu.items | Where-Object { $_.Text -eq "Promote to..." })
+      $newChildChoices = @($renderMenu.items | Where-Object { $_.Id -eq 5119 -and $_.Enabled })
+      $sameCardAutomationId = $renderMenu.cardId -ceq $menu.cardId
+      $renderedPromotedState = $sameCardAutomationId -and
+        $promotionChoices.Count -eq 0 -and $newChildChoices.Count -eq 1
+      Write-Host ("UIA_SKETCH_PROMOTION_RENDER_ATTEMPT=" + ([ordered]@{
+        attempt = $renderAttempt; target = $case.Target; expectedNodeId = $id
+        expectedType = $case.Type; graphSequence = [int]$after.graphSequence
+        title = $title; point = $renderMenu.point
+        cardIdBefore = $menu.cardId; cardIdAfter = $renderMenu.cardId
+        sameCardAutomationId = $sameCardAutomationId
+        promoteCount = $promotionChoices.Count; enabledNewChildCount = $newChildChoices.Count
+        menuItems = $renderedPromotionMenu
+      } | ConvertTo-Json -Compress -Depth 6))
+      if (-not $renderedPromotedState) {
+        Require (Close-PopupMenu $renameProcess $renderMenu.popup $renameShellWindow `
+          "promotion refresh attempt $renderAttempt for $title") `
+          "promotion refresh attempt $renderAttempt menu did not close"
+        if ($renderAttempt -lt 25) { Start-Sleep -Milliseconds 100 }
+      }
+    }
+    Require $renderedPromotedState `
+      "republished $($case.Target) node did not converge on the same promoted UIA identity within 25 reads: nodeId=$id type=$($case.Type) graphSequence=$($after.graphSequence) cardBefore=$($menu.cardId) cardAfter=$($renderMenu.cardId) promoteCount=$($promotionChoices.Count) newChildCount=$($newChildChoices.Count) items=$($renderedPromotionMenu | ConvertTo-Json -Compress -Depth 4)"
     Require (Close-PopupMenu $renameProcess $renderMenu.popup $renameShellWindow "promoted $title") `
       "promoted sketch popup did not close"
     $sketchResults.Add([ordered]@{

@@ -1424,8 +1424,9 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'commandLogBytesUnchanged' -or
       $uiaLiveGateSource -notmatch 'appliedPromotions' -or
       $uiaLiveGateSource -notmatch 'appliedPromotionRequests' -or
-      $uiaLiveGateSource -notmatch 'UIA_SKETCH_PROMOTION_RENDERED=' -or
-      $uiaLiveGateSource -notmatch '\$promotionChoices\.Count -eq 0 -and \$newChildChoices\.Count -eq 1' -or
+      $uiaLiveGateSource -notmatch 'UIA_SKETCH_PROMOTION_RENDER_ATTEMPT=' -or
+      $uiaLiveGateSource -notmatch '\$sameCardAutomationId = \$renderMenu\.cardId -ceq \$menu\.cardId' -or
+      $uiaLiveGateSource -notmatch '(?s)\$renderedPromotedState = \$sameCardAutomationId -and\s*\$promotionChoices\.Count -eq 0 -and \$newChildChoices\.Count -eq 1' -or
       $uiaLiveGateSource -notmatch 'ClickPopupMenuItem' -or
       $uiaLiveGateSource -notmatch 'IsControlOwnedBy' -or
       $uiaLiveGateSource -notmatch 'TypeEditTextById' -or
