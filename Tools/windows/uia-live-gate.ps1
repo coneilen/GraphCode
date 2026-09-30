@@ -140,6 +140,23 @@ public static class GraphCodeUiaGateState {
   private static extern uint GetMenuState(IntPtr menu, uint item, uint flags);
   [DllImport("user32.dll")]
   private static extern bool GetMenuItemRect(IntPtr window, IntPtr menu, uint position, out RECT rect);
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern bool GetCursorPos(out ScreenPoint point);
+  [StructLayout(LayoutKind.Sequential)]
+  private struct MouseInput {
+    public int X, Y;
+    public uint MouseData, Flags, Time;
+    public UIntPtr ExtraInfo;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct Input {
+    public uint Type;
+    public MouseInput Mouse;
+  }
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern uint SendInput(uint count, Input[] inputs, int size);
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMenuStringW")]
   private static extern int GetMenuString(IntPtr menu, uint item, StringBuilder text, int max, uint flags);
   // The File/Loop/Terminal/Workspace/View/Help bar is a real SetMenu menu bar,
@@ -434,7 +451,9 @@ public static class GraphCodeUiaGateState {
   }
   public sealed class PopupItemHit {
     public int Position, ItemId, Left, Top, Right, Bottom;
-    public int ScreenX, ScreenY, ClientX, ClientY;
+    public int ScreenX, ScreenY, ClientX, ClientY, CursorBeforeX, CursorBeforeY;
+    public int CursorAtX, CursorAtY;
+    public bool Hilite;
   }
   public static PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position, int commandId) {
     if (popup == IntPtr.Zero || position < 0) return null;
@@ -452,14 +471,29 @@ public static class GraphCodeUiaGateState {
       Y = screenY
     };
     if (!ScreenToClient(popup, ref point)) return null;
-    IntPtr coordinates = MouseLParam(point.X, point.Y);
-    if (!PostMessage(popup, 0x0200, UIntPtr.Zero, coordinates) ||
-        !PostMessage(popup, 0x0201, (UIntPtr)0x0001, coordinates) ||
-        !PostMessage(popup, 0x0202, UIntPtr.Zero, coordinates)) return null;
+    ScreenPoint before, at;
+    if (!GetCursorPos(out before))
+      throw new InvalidOperationException(String.Format("GetCursorPos before popup click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
+    if (!SetCursorPos(screenX, screenY))
+      throw new InvalidOperationException(String.Format("SetCursorPos for popup click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
+    if (!GetCursorPos(out at))
+      throw new InvalidOperationException(String.Format("GetCursorPos after popup move failed: Win32Error={0}", Marshal.GetLastWin32Error()));
+    if (at.X != screenX || at.Y != screenY)
+      throw new InvalidOperationException(String.Format("Popup cursor landed at ({0},{1}), expected ({2},{3})", at.X, at.Y, screenX, screenY));
+    bool hilite = (GetMenuState(menu, (uint)commandId, 0x0000) & 0x0080) != 0;
+    var inputs = new[] {
+      new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0002 } },
+      new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0004 } }
+    };
+    uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
+    if (sent != inputs.Length)
+      throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} popup mouse events: Win32Error={2}", sent, inputs.Length, Marshal.GetLastWin32Error()));
     return new PopupItemHit {
       Position = position, ItemId = commandId, Left = item.Left, Top = item.Top,
       Right = item.Right, Bottom = item.Bottom,
-      ScreenX = screenX, ScreenY = screenY, ClientX = point.X, ClientY = point.Y
+      ScreenX = screenX, ScreenY = screenY, ClientX = point.X, ClientY = point.Y,
+      CursorBeforeX = before.X, CursorBeforeY = before.Y,
+      CursorAtX = at.X, CursorAtY = at.Y, Hilite = hilite
     };
   }
   // Sidebar.updateBannerRect/updateBannerAt are pixel-only hit-test geometry with
@@ -4769,9 +4803,19 @@ try {
       $editEdgeClick.Right, $editEdgeClick.Bottom)
     screenPoint = @($editEdgeClick.ScreenX, $editEdgeClick.ScreenY)
     clientPoint = @($editEdgeClick.ClientX, $editEdgeClick.ClientY)
+    cursorBefore = @($editEdgeClick.CursorBeforeX, $editEdgeClick.CursorBeforeY)
+    cursorAtItem = @($editEdgeClick.CursorAtX, $editEdgeClick.CursorAtY)
+    hilite = $editEdgeClick.Hilite
   }
   Write-Host ("UIA_CANVAS_EDGE_ACTION_CLICK_EVIDENCE=" +
     ($editEdgeClickEvidence | ConvertTo-Json -Compress))
+  $edgePopupClosed = $false
+  for ($attempt = 0; $attempt -lt 100 -and -not $edgePopupClosed; $attempt++) {
+    $edgePopupClosed = [GraphCodeUiaGateState]::FindPopupMenuWindow([uint32]$process.Id) -eq [IntPtr]::Zero
+    if (-not $edgePopupClosed) { Start-Sleep -Milliseconds 50 }
+  }
+  Require $edgePopupClosed `
+    "canvas edge Edit Edge popup remained open after the measured click: $($editEdgeClickEvidence | ConvertTo-Json -Compress)"
   $edgeDialogCondition = New-Object System.Windows.Automation.AndCondition(
     (New-Object System.Windows.Automation.PropertyCondition(
       [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
@@ -4855,6 +4899,7 @@ try {
       items = @(ConvertTo-PopupMenuEvidence $edgeCanvasMenu.Items)
       dismissed = $edgeCanvasMenu.Dismissed
       actionClick = $editEdgeClickEvidence
+      actionPopupClosed = $edgePopupClosed
       editActionDialogOpened = $canvasEdgeEditDialogOpened
       editActionCancelled = $canvasEdgeEditCancelled
       daemonCommandUnchanged = $canvasEdgeDaemonCommandUnchanged

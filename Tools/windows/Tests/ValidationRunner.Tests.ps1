@@ -1350,6 +1350,12 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'Close-PopupMenu' -or
       $uiaLiveGateSource -notmatch 'GetMenuItemRect' -or
       $uiaLiveGateSource -notmatch 'ClickPopupMenuItem' -or
+      $uiaLiveGateSource -notmatch 'SetCursorPos' -or
+      $uiaLiveGateSource -notmatch 'GetCursorPos' -or
+      $uiaLiveGateSource -notmatch 'SendInput' -or
+      $uiaLiveGateSource -notmatch 'cursorBefore = @\(\$editEdgeClick\.CursorBeforeX' -or
+      $uiaLiveGateSource -notmatch 'hilite = \$editEdgeClick\.Hilite' -or
+      $uiaLiveGateSource -notmatch 'actionPopupClosed = \$edgePopupClosed' -or
       $uiaLiveGateSource -notmatch 'UIA_CANVAS_EDGE_ACTION_CLICK_EVIDENCE' -or
       $uiaLiveGateSource -notmatch 'actionClick = \$editEdgeClickEvidence' -or
       $uiaLiveGateSource -notmatch 'Create or edit edge' -or
