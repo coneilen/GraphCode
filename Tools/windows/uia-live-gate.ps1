@@ -25,6 +25,10 @@ public static class GraphCodeUiaGateState {
   public static int AddedEvents;
   public static int RemovedEvents;
   public static int TogglePropertyEvents;
+  public static uint LastEditClearExpected;
+  public static uint LastEditClearSent;
+  public static uint LastEditTextExpected;
+  public static uint LastEditTextSent;
   public static string LiveSourceAutomationId;
   public static string LiveSourceName;
   public static string LiveSourceRuntimeId;
@@ -888,15 +892,17 @@ public static class GraphCodeUiaGateState {
     return count;
   }
   public static bool TypeEditTextById(IntPtr parent, int controlId, string text) {
+    LastEditClearExpected = LastEditClearSent = 0;
+    LastEditTextExpected = LastEditTextSent = 0;
     IntPtr edit = GetDlgItem(parent, controlId);
     if (edit == IntPtr.Zero || !FocusControl(parent, edit)) return false;
     SendMessage(edit, 0x00B1, UIntPtr.Zero, new IntPtr(-1));
     var clear = new KeyInputRecord[2];
     clear[0] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E } };
     clear[1] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E, Flags = 2 } };
-    uint cleared = SendKeyInputs((uint)clear.Length, clear, Marshal.SizeOf(typeof(KeyInputRecord)));
-    if (cleared != clear.Length)
-      throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} edit-clear events: Win32Error={2}", cleared, clear.Length, Marshal.GetLastWin32Error()));
+    LastEditClearExpected = (uint)clear.Length;
+    LastEditClearSent = SendKeyInputs(LastEditClearExpected, clear, Marshal.SizeOf(typeof(KeyInputRecord)));
+    if (LastEditClearSent != LastEditClearExpected) return false;
     if (!String.IsNullOrEmpty(EditBufferText(edit))) return false;
     var records = new KeyInputRecord[text.Length * 2];
     int offset = 0;
@@ -904,10 +910,10 @@ public static class GraphCodeUiaGateState {
       records[offset++] = new KeyInputRecord { Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 4 } };
       records[offset++] = new KeyInputRecord { Type = 1, Key = new KeybdInput { ScanCode = character, Flags = 6 } };
     }
+    LastEditTextExpected = (uint)records.Length;
     if (records.Length > 0) {
-      uint sent = SendKeyInputs((uint)records.Length, records, Marshal.SizeOf(typeof(KeyInputRecord)));
-      if (sent != records.Length)
-        throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} edit events: Win32Error={2}", sent, records.Length, Marshal.GetLastWin32Error()));
+      LastEditTextSent = SendKeyInputs(LastEditTextExpected, records, Marshal.SizeOf(typeof(KeyInputRecord)));
+      if (LastEditTextSent != LastEditTextExpected) return false;
     }
     return String.Equals(EditTextById(parent, controlId), text, StringComparison.Ordinal);
   }
@@ -6238,8 +6244,23 @@ try {
       $foreground = Ensure-ShellForeground $edgeWorkflowWindow "edge edit $id attempt $attempt"
       $focusSet = $foreground -and [GraphCodeUiaGateState]::FocusControl($edgeWorkflowWindow, $control)
       $focusAfter = [GraphCodeUiaGateState]::FocusedControlInDialog($edgeWorkflowWindow)
-      $sent = $focusSet -and $focusAfter -eq $control -and
-        [GraphCodeUiaGateState]::TypeEditTextById($edgeWorkflowWindow, $id, $text)
+      $inputAttempted = $focusSet -and $focusAfter -eq $control
+      $inputVerifiedImmediately = $false
+      $clearExpected = [uint32]0; $clearSent = [uint32]0
+      $textExpected = [uint32]0; $textSent = [uint32]0
+      if ($inputAttempted) {
+        $inputVerifiedImmediately = [GraphCodeUiaGateState]::TypeEditTextById($edgeWorkflowWindow, $id, $text)
+        $clearExpected = [GraphCodeUiaGateState]::LastEditClearExpected
+        $clearSent = [GraphCodeUiaGateState]::LastEditClearSent
+        $textExpected = [GraphCodeUiaGateState]::LastEditTextExpected
+        $textSent = [GraphCodeUiaGateState]::LastEditTextSent
+      }
+      $inputCountsFull = $inputAttempted -and $clearExpected -gt 0 -and
+        $clearSent -eq $clearExpected -and $textSent -eq $textExpected
+      if ($inputAttempted) {
+        Require ($inputCountsFull) `
+          "edge edit $id SendInput count mismatch: clear=$clearSent/$clearExpected text=$textSent/$textExpected"
+      }
       $after = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
       $idle = $renameProcess.WaitForInputIdle(1000)
       Require $idle "edge edit $id attempt $attempt did not reach native input idle"
@@ -6251,7 +6272,7 @@ try {
         $after = $observed
       }
       $focusFinal = [GraphCodeUiaGateState]::FocusedControlInDialog($edgeWorkflowWindow)
-      Write-Host "UIA_EDGE_TEXT_STABLE id=$id attempt=$attempt before='$before' after='$after' expected='$text' modal=$modalValid foreground=$foreground idle=$idle stable=$stable focusBefore=0x$('{0:x}' -f $focusBefore.ToInt64()) focusAfter=0x$('{0:x}' -f $focusAfter.ToInt64()) focusFinal=0x$('{0:x}' -f $focusFinal.ToInt64()) sent=$sent control=0x$('{0:x}' -f $control.ToInt64()) bounds=$($bounds -join ',')"
+      Write-Host "UIA_EDGE_TEXT_STABLE id=$id attempt=$attempt before='$before' after='$after' expected='$text' modal=$modalValid foreground=$foreground idle=$idle stable=$stable focusBefore=0x$('{0:x}' -f $focusBefore.ToInt64()) focusAfter=0x$('{0:x}' -f $focusAfter.ToInt64()) focusFinal=0x$('{0:x}' -f $focusFinal.ToInt64()) inputAttempted=$inputAttempted inputBufferMatchedImmediately=$inputVerifiedImmediately inputCountsFull=$inputCountsFull clearSent=$clearSent/$clearExpected textSent=$textSent/$textExpected control=0x$('{0:x}' -f $control.ToInt64()) bounds=$($bounds -join ',')"
       Require $stable "edge edit $id did not reach stable WM_GETTEXT state after native input: '$after'"
       if ($after -cne $text -and $attempt -lt 5) { $before = $after }
     }
@@ -7034,8 +7055,6 @@ try {
     }
   }
   Write-Host ("UIA_NODE_CREATION_SHEET_EVIDENCE=" + ($nodeCreationSheetEvidence | ConvertTo-Json -Compress -Depth 8))
-  Require ($edgeChange.spec.condition -eq "onFailure") `
-    "RED: edited edge condition '$($edgeChange.spec.condition)' unexpectedly differs from old 'onFailure'"
 
   Require ([GraphCodeUiaGateState]::PostCommand($renameShellWindow, 0x5002)) `
     "connected-daemon shell rejected the tray Exit command"

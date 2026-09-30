@@ -1481,6 +1481,14 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'Read-EdgeStableText 9105 "payload"' -or
       $uiaLiveGateSource -notmatch 'Read-EdgeStableText 9106 "cycle guard until"' -or
       $uiaLiveGateSource -notmatch 'Read-EdgeStableText 9107 "cycle guard max"' -or
+      $uiaLiveGateSource -notmatch 'LastEditClearExpected' -or
+      $uiaLiveGateSource -notmatch 'LastEditClearSent' -or
+      $uiaLiveGateSource -notmatch 'LastEditTextExpected' -or
+      $uiaLiveGateSource -notmatch 'LastEditTextSent' -or
+      $uiaLiveGateSource -notmatch 'LastEditClearSent = SendKeyInputs\(LastEditClearExpected' -or
+      $uiaLiveGateSource -notmatch 'LastEditTextSent = SendKeyInputs\(LastEditTextExpected' -or
+      $uiaLiveGateSource -notmatch 'Require \(\$inputCountsFull\)' -or
+      $uiaLiveGateSource -notmatch 'clearSent=\$clearSent/\$clearExpected textSent=\$textSent/\$textExpected' -or
       $uiaLiveGateSource -notmatch 'for \(\$attempt = 1; \$attempt -le 5' -or
       $uiaLiveGateSource -notmatch 'for \(\$layoutRetry = 0; \$layoutRetry -lt 20') {
     throw "RED: edge native text entry lacks native ownership, live layout, focus, clear/retype, or exact verification"
