@@ -128,20 +128,20 @@ pub const GestureConfigResult = struct {
     last_error: c.DWORD,
 };
 
-/// Registers this window's opt-in to native pinch-zoom (`GID_ZOOM`)
-/// gestures only. Every other WM_GESTURE class is left at its existing
-/// default (neither explicitly enabled nor blocked here) -- App.zig's
-/// `WM_GESTURE` handler already forwards any non-`GID_ZOOM` message
-/// unhandled via `CanvasInput.classifyGesture`, so there is no unimplemented
-/// gesture class this app could silently start reacting to; configuring an
-/// explicit block for gestures this app has no opinion on would only widen
-/// the surface unnecessarily. `SetGestureConfig` documents that a single
-/// call cannot mix a `dwID = 0` "all gestures" entry with specific-`dwID`
-/// entries, so this uses one specific-`dwID` entry rather than `dwID = 0`.
-pub fn registerCanvasGestureConfig(hwnd: c.HWND) GestureConfigResult {
-    var configs = [_]c.GESTURECONFIG{
+/// Registers native pan (with OS inertia) and pinch-zoom gestures. Every
+/// other WM_GESTURE class remains at its existing default (neither explicitly
+/// enabled nor blocked). `SetGestureConfig` documents that a single call
+/// cannot mix a `dwID = 0` "all gestures" entry with specific-`dwID` entries,
+/// so this uses one specific-`dwID` entry per supported gesture.
+fn canvasGestureConfigs() [2]c.GESTURECONFIG {
+    return .{
+        .{ .dwID = c.GID_PAN, .dwWant = c.GC_PAN | c.GC_PAN_WITH_INERTIA, .dwBlock = 0 },
         .{ .dwID = c.GID_ZOOM, .dwWant = c.GC_ZOOM, .dwBlock = 0 },
     };
+}
+
+pub fn registerCanvasGestureConfig(hwnd: c.HWND) GestureConfigResult {
+    var configs = canvasGestureConfigs();
     if (c.SetGestureConfig(hwnd, 0, configs.len, &configs, @sizeOf(c.GESTURECONFIG)) != 0) {
         return .{ .ok = true, .last_error = 0 };
     }
@@ -2433,6 +2433,17 @@ test "registerCanvasGestureConfig succeeds with the real gesture array and captu
     const failed = c.SetGestureConfig(hwnd, 0, bad_config.len, &bad_config, 0);
     try std.testing.expectEqual(@as(c.BOOL, 0), failed);
     try std.testing.expect(c.GetLastError() != 0);
+}
+
+test "canvas gesture configuration opts into only pan and zoom" {
+    const configs = canvasGestureConfigs();
+    try std.testing.expectEqual(@as(usize, 2), configs.len);
+    try std.testing.expectEqual(@as(c.DWORD, @intCast(c.GID_PAN)), configs[0].dwID);
+    try std.testing.expectEqual(@as(c.DWORD, @intCast(c.GC_PAN | c.GC_PAN_WITH_INERTIA)), configs[0].dwWant);
+    try std.testing.expectEqual(@as(c.DWORD, 0), configs[0].dwBlock);
+    try std.testing.expectEqual(@as(c.DWORD, @intCast(c.GID_ZOOM)), configs[1].dwID);
+    try std.testing.expectEqual(@as(c.DWORD, @intCast(c.GC_ZOOM)), configs[1].dwWant);
+    try std.testing.expectEqual(@as(c.DWORD, 0), configs[1].dwBlock);
 }
 
 // The negative control above bypasses `registerCanvasGestureConfig` entirely

@@ -20,6 +20,12 @@ pub const CanvasState = struct {
     drag_y: i32 = 0,
     start_pan_x: f32 = 0,
     start_pan_y: f32 = 0,
+    touch_pan_active: bool = false,
+    touch_pan_start_x: i32 = 0,
+    touch_pan_start_y: i32 = 0,
+    touch_pan_start_pan_x: f32 = 0,
+    touch_pan_start_pan_y: f32 = 0,
+    touch_pan_context: u64 = 0,
     selected_edge: ?usize = null,
     selected_edge_id: []const u8 = "",
     edge_dragging: bool = false,
@@ -72,8 +78,40 @@ pub const CanvasState = struct {
         self.dragging = false;
     }
 
+    pub fn beginTouchPan(self: *CanvasState, x: i32, y: i32, context: u64) void {
+        self.endPinchZoom();
+        self.touch_pan_active = true;
+        self.touch_pan_start_x = x;
+        self.touch_pan_start_y = y;
+        self.touch_pan_start_pan_x = self.pan_x;
+        self.touch_pan_start_pan_y = self.pan_y;
+        self.touch_pan_context = context;
+    }
+
+    pub fn continueTouchPan(self: *CanvasState, x: i32, y: i32, context: u64) void {
+        if (!self.touch_pan_active) return;
+        if (context != self.touch_pan_context) {
+            self.endTouchPan();
+            return;
+        }
+        self.pan_x = self.touch_pan_start_pan_x +
+            (@as(f32, @floatFromInt(x)) - @as(f32, @floatFromInt(self.touch_pan_start_x)));
+        self.pan_y = self.touch_pan_start_pan_y +
+            (@as(f32, @floatFromInt(y)) - @as(f32, @floatFromInt(self.touch_pan_start_y)));
+    }
+
+    pub fn endTouchPan(self: *CanvasState) void {
+        self.touch_pan_active = false;
+        self.touch_pan_start_x = 0;
+        self.touch_pan_start_y = 0;
+        self.touch_pan_start_pan_x = 0;
+        self.touch_pan_start_pan_y = 0;
+        self.touch_pan_context = 0;
+    }
+
     pub fn cancelInteraction(self: *CanvasState) void {
         self.dragging = false;
+        self.endTouchPan();
         self.edge_dragging = false;
         self.edge_drag_source_id = "";
         if (self.node_dragging and self.node_drag_index < self.node_offsets.len)
@@ -256,6 +294,7 @@ pub const CanvasState = struct {
     /// it is always (re)recorded here so a later `continuePinchZoom` can
     /// detect the gesture has outlived the thing it started on.
     pub fn beginPinchZoom(self: *CanvasState, distance: u32, context: u64) void {
+        self.endTouchPan();
         self.pinch_context = context;
         if (distance == 0) {
             self.pinch_base_distance = null;
@@ -297,15 +336,12 @@ pub const CanvasState = struct {
         self.zoomBy(x, y, target_zoom / self.zoom);
     }
 
-    /// Ends the current pinch gesture (GID_ZOOM's own GF_END flag, the
-    /// generic GID_END bracket message, the gesture's point leaving the
-    /// canvas region mid-gesture, or the window deactivating). Clearing the
-    /// base here is what guarantees a later re-entry into the canvas (or a
-    /// later gesture entirely) cannot resume a stale baseline without a new
-    /// GF_BEGIN — the next `continuePinchZoom` call will simply no-op until
-    /// `beginPinchZoom` runs again.
+    /// Ends native gesture state on GF_END, a generic GID_END bracket, routing
+    /// failure, or window deactivation. The shared reset also prevents a pan
+    /// sequence from surviving any existing pinch-reset path.
     pub fn endPinchZoom(self: *CanvasState) void {
         self.pinch_base_distance = null;
+        self.endTouchPan();
     }
 
     pub fn actualSize(self: *CanvasState) void {
@@ -2212,6 +2248,49 @@ test "canvas wheel zoom scales high-resolution trackpad deltas" {
     var state = CanvasState{};
     state.zoomAt(200, 120, 240);
     try std.testing.expectApproxEqAbs(@as(f32, 1.21), state.zoom, 0.01);
+}
+
+test "touch pan applies screen deltas and continues through inertia updates" {
+    var state = CanvasState{ .pan_x = 8, .pan_y = -4 };
+    state.beginTouchPan(100, 200, 7);
+    state.continueTouchPan(125, 185, 7);
+    try std.testing.expectApproxEqAbs(@as(f32, 33), state.pan_x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -19), state.pan_y, 0.001);
+
+    state.continueTouchPan(140, 175, 7);
+    try std.testing.expectApproxEqAbs(@as(f32, 48), state.pan_x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -29), state.pan_y, 0.001);
+}
+
+test "touch pan ends, cancels, and rejects updates after destination changes" {
+    var state = CanvasState{ .pan_x = 8, .pan_y = -4 };
+    state.beginTouchPan(100, 200, 7);
+    state.endTouchPan();
+    state.continueTouchPan(150, 150, 7);
+    try std.testing.expectApproxEqAbs(@as(f32, 8), state.pan_x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -4), state.pan_y, 0.001);
+    try std.testing.expect(!state.touch_pan_active);
+    try std.testing.expectEqual(@as(u64, 0), state.touch_pan_context);
+
+    state.beginTouchPan(100, 200, 7);
+    state.continueTouchPan(150, 150, 8);
+    try std.testing.expectApproxEqAbs(@as(f32, 8), state.pan_x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -4), state.pan_y, 0.001);
+    state.continueTouchPan(160, 140, 8);
+    try std.testing.expectApproxEqAbs(@as(f32, 8), state.pan_x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -4), state.pan_y, 0.001);
+
+    state.beginTouchPan(100, 200, 7);
+    state.cancelInteraction();
+    state.continueTouchPan(150, 150, 7);
+    try std.testing.expectApproxEqAbs(@as(f32, 8), state.pan_x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -4), state.pan_y, 0.001);
+
+    state.beginTouchPan(100, 200, 7);
+    state.endPinchZoom();
+    state.continueTouchPan(150, 150, 7);
+    try std.testing.expectApproxEqAbs(@as(f32, 8), state.pan_x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -4), state.pan_y, 0.001);
 }
 
 test "pinch zoom scales relative to the gesture's captured base distance" {

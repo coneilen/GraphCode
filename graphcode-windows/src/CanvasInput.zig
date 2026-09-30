@@ -46,9 +46,11 @@ fn signedWord(value: usize) i32 {
 pub const GID_BEGIN: u32 = 1;
 pub const GID_END: u32 = 2;
 pub const GID_ZOOM: u32 = 3;
+pub const GID_PAN: u32 = 4;
 
-/// GESTUREINFO.dwFlags bits relevant to GID_ZOOM bracketing.
+/// GESTUREINFO.dwFlags bits relevant to native pan and zoom gesture sequences.
 pub const GF_BEGIN: u32 = 0x00000001;
+pub const GF_INERTIA: u32 = 0x00000002;
 pub const GF_END: u32 = 0x00000004;
 
 pub const GestureDecision = enum {
@@ -56,9 +58,9 @@ pub const GestureDecision = enum {
     /// class GESTURECONFIG blocks but the OS still forwards): must be
     /// forwarded so `DefWindowProc`/legacy handling still sees it.
     forward_unhandled,
-    /// A GID_ZOOM message whose location falls outside the canvas region:
-    /// forwarded rather than acted on, and any in-progress pinch state must
-    /// be reset since this gesture is no longer ours to continue.
+    /// A GID_PAN or GID_ZOOM message whose location falls outside the canvas:
+    /// forwarded rather than acted on, and any in-progress native gesture
+    /// state must be reset since the gesture is no longer ours to continue.
     forward_out_of_region,
     /// First GID_ZOOM message inside the canvas: captures the baseline only.
     begin_zoom,
@@ -76,6 +78,18 @@ pub const GestureDecision = enum {
     /// immediately clear it -- never apply a continuation against whatever
     /// baseline a *previous*, unrelated gesture happened to leave behind.
     begin_and_end_zoom,
+    /// First GID_PAN message inside the canvas: captures the screen-point and
+    /// canvas-pan baseline without moving the canvas.
+    begin_pan,
+    /// A later GID_PAN message inside the canvas, including GF_INERTIA:
+    /// applies the message's screen delta from the captured baseline.
+    continue_pan,
+    /// The GID_PAN message carrying GF_END: applies its final delta and ends
+    /// the gesture.
+    end_pan,
+    /// A GID_PAN message carrying both GF_BEGIN and GF_END establishes and
+    /// immediately clears a baseline without applying a stale delta.
+    begin_and_end_pan,
 };
 
 /// Pure classification of a single WM_GESTURE message. `dw_id` and `flags`
@@ -85,14 +99,16 @@ pub const GestureDecision = enum {
 /// Kept dependency-free so every branch is directly testable without a real
 /// HWND or gesture handle.
 pub fn classifyGesture(dw_id: u32, flags: u32, in_canvas: bool) GestureDecision {
-    if (dw_id != GID_ZOOM) return .forward_unhandled;
+    const is_zoom = dw_id == GID_ZOOM;
+    const is_pan = dw_id == GID_PAN;
+    if (!is_zoom and !is_pan) return .forward_unhandled;
     if (!in_canvas) return .forward_out_of_region;
     const is_begin = flags & GF_BEGIN != 0;
     const is_end = flags & GF_END != 0;
-    if (is_begin and is_end) return .begin_and_end_zoom;
-    if (is_end) return .end_zoom;
-    if (is_begin) return .begin_zoom;
-    return .continue_zoom;
+    if (is_begin and is_end) return if (is_pan) .begin_and_end_pan else .begin_and_end_zoom;
+    if (is_end) return if (is_pan) .end_pan else .end_zoom;
+    if (is_begin) return if (is_pan) .begin_pan else .begin_zoom;
+    return if (is_pan) .continue_pan else .continue_zoom;
 }
 
 test "wheel message decodes negative and positive signed deltas" {
@@ -121,14 +137,23 @@ fn fakeScreenToClient(hwnd: c.HWND, point: *c.POINT) c.BOOL {
     return 1;
 }
 
-test "classifyGesture forwards non-zoom gesture IDs unconditionally" {
+test "classifyGesture forwards generic and unsupported gesture IDs" {
     try std.testing.expectEqual(GestureDecision.forward_unhandled, classifyGesture(GID_BEGIN, GF_BEGIN, true));
     try std.testing.expectEqual(GestureDecision.forward_unhandled, classifyGesture(GID_END, GF_END, true));
-    // GID_PAN (4): this app's GESTURECONFIG only opts in to GID_ZOOM and
-    // leaves every other gesture class at its existing default (neither
-    // enabled nor blocked), so any GID_PAN message the OS still delivers
-    // must be forwarded, not silently swallowed.
-    try std.testing.expectEqual(GestureDecision.forward_unhandled, classifyGesture(4, GF_BEGIN, true));
+    try std.testing.expectEqual(GestureDecision.forward_unhandled, classifyGesture(9, GF_BEGIN, true));
+}
+
+test "classifyGesture routes pan begin, updates, and end to pan handling" {
+    try std.testing.expectEqual(GestureDecision.begin_pan, classifyGesture(GID_PAN, GF_BEGIN, true));
+    try std.testing.expectEqual(GestureDecision.continue_pan, classifyGesture(GID_PAN, 0, true));
+    try std.testing.expectEqual(GestureDecision.continue_pan, classifyGesture(GID_PAN, GF_INERTIA, true));
+    try std.testing.expectEqual(GestureDecision.end_pan, classifyGesture(GID_PAN, GF_END, true));
+    try std.testing.expectEqual(GestureDecision.begin_and_end_pan, classifyGesture(GID_PAN, GF_BEGIN | GF_END, true));
+    try std.testing.expectEqual(GestureDecision.forward_out_of_region, classifyGesture(GID_PAN, 0, false));
+}
+
+test "classifyGesture treats a generic gesture end as unhandled" {
+    try std.testing.expectEqual(GestureDecision.forward_unhandled, classifyGesture(GID_END, GF_END, true));
 }
 
 test "classifyGesture forwards zoom messages located outside the canvas" {
@@ -153,4 +178,3 @@ test "classifyGesture gives a combined begin+end single-message gesture its own 
     // real begin-then-end sequence.
     try std.testing.expectEqual(GestureDecision.begin_and_end_zoom, classifyGesture(GID_ZOOM, GF_BEGIN | GF_END, true));
 }
-
