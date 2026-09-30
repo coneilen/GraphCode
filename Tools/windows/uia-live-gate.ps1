@@ -4531,13 +4531,13 @@ try {
     $_.Current.AutomationId -match '^activity-header-'
   })
   $activityRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^activity-row-'
+    $_.Current.AutomationId -match '^activity-rowX-'
   })
   $activityControls = @(Get-DirectChildren $projects $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^activity-control-'
   })
   Require ($activityHeaders.Count -eq 1) "Activity strip omitted its stable header (count=$($activityHeaders.Count))"
-  Require ($activityHeaders[0].Current.Name -eq "ActivityX") `
+  Require ($activityHeaders[0].Current.Name -eq "Activity") `
     "Activity header name changed: '$($activityHeaders[0].Current.Name)'"
   Require ($activityRows.Count -ge 1) `
     "Activity exposed no sidebar rows after the activity fixture recorded state changes (count=$($activityRows.Count))"
