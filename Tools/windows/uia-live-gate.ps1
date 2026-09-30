@@ -4664,8 +4664,6 @@ try {
   Require (($backgroundMenuOrder -join "|") -ceq
            "Worktrees...|Project Settings...|Show in Explorer|<separator>|Create Edge") `
     "canvas background context menu had unexpected ordered items: $($backgroundCanvasMenu.Description)"
-  Require (@($backgroundCanvasMenu.Items | Where-Object { $_.Id -eq 5104 }).Count -gt 0) `
-    "canvas background context menu unexpectedly omitted node-only Open Terminal (command 5104)"
   Require (@($backgroundCanvasMenu.Items | Where-Object {
     -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
   }).Count -eq 0) `
