@@ -1233,8 +1233,10 @@ Start-Sleep -Seconds 60
     throw "RED: UIA gate throws on the known-intermittent graph card/sidebar propagation outcome instead of logging it"
   }
   if ($uiaLiveGateSource -notmatch '\$env:GRAPHCODE_UIA_CONNECTION_FAILURE = "1"' -or
-      $uiaLiveGateSource -notmatch 'connectionFailureBannerPassed = \$true') {
-    throw "RED: UIA gate no longer exercises the forced disconnected connection-failure path"
+      $uiaLiveGateSource -notmatch '(?s)\$connectionFailureBannerEvidence = \[ordered\]@\{\s*name = \[string\]\$connectionAlert\.Current\.Name' -or
+      $uiaLiveGateSource -notmatch 'Write-Host \("UIA_CONNECTION_FAILURE_BANNER_EVIDENCE="' -or
+      $uiaLiveGateSource -notmatch 'connectionFailureBanner = \$connectionFailureBannerEvidence') {
+    throw "RED: UIA gate no longer exercises the forced disconnected connection-failure path or reports the banner it observed"
   }
   $stubDaemonSource = Get-Content (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") -Raw
   if ($stubDaemonSource -notmatch '\$ApplyGraphCommands' -or

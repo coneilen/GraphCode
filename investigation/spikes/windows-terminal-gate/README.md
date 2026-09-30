@@ -10,12 +10,12 @@ session/ConPTY lifetime.
 
 `provider-pins.json` records the accepted provider commits:
 
-- Winghostty `f5abc059e4ca58b376eb209313aca7784659c679`
+- Winghostty `6286560d0aa3103e068b2b7afa81eac373d870c9`
 - zmx `785b3fd15dcafd1882b495c831a10f98c201b908`
 
-Both commits are published on dedicated branches in the public `coneilen`
-provider repositories. The bootstrap creates detached, exact-revision
-checkouts without copying provider source into GraphCode.
+Both commits are publicly reachable in the `coneilen` provider repositories.
+The bootstrap creates detached, exact-revision checkouts without copying
+provider source into GraphCode.
 
 The annotated `graphcode-windows-baseline-2026-09-17` tags preserve the original
 baseline sources, including zmx `029e11d2b19162fb3bdf90c8270237d303b8bfb4`,
