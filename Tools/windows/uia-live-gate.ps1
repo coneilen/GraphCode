@@ -6243,11 +6243,24 @@ try {
     Require ($after -eq "$index|$expected") "edge workflow combo $id expected '$index|$expected', observed '$after' from '$before'"
     return $after
   }
+  function Get-EdgeTextAttemptDecision(
+    [bool] $stable, [string] $actual, [string] $expected, [int] $attempt, [int] $maximum
+  ) {
+    if (-not $stable) {
+      throw "edge text did not settle after attempt=$attempt/$maximum observed='$actual'"
+    }
+    if ($actual -ceq $expected) { return "complete" }
+    if ($attempt -lt $maximum) { return "retry" }
+    throw "edge text mismatch attempts=$attempt/$maximum expected='$expected' observed='$actual'"
+  }
   function Edge-TypeText([int] $id, [string] $text) {
     $before = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
     $after = $before
     $stable = $false
-    for ($attempt = 1; $attempt -le 5 -and -not $stable; $attempt++) {
+    $attemptsExecuted = 0
+    $completed = $false
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+      $attemptsExecuted = $attempt
       $control = [IntPtr]::Zero
       $bounds = $null
       for ($layoutRetry = 0; $layoutRetry -lt 20; $layoutRetry++) {
@@ -6300,11 +6313,15 @@ try {
       }
       $focusFinal = [GraphCodeUiaGateState]::FocusedControlInDialog($edgeWorkflowWindow)
       Write-Host "UIA_EDGE_TEXT_STABLE id=$id attempt=$attempt before='$before' after='$after' expected='$text' modal=$modalValid foreground=$foreground idle=$idle stable=$stable focusBefore=0x$('{0:x}' -f $focusBefore.ToInt64()) focusAfter=0x$('{0:x}' -f $focusAfter.ToInt64()) focusFinal=0x$('{0:x}' -f $focusFinal.ToInt64()) inputAttempted=$inputAttempted inputBufferMatchedImmediately=$inputVerifiedImmediately inputCountsFull=$inputCountsFull clearSent=$clearSent/$clearExpected textSent=$textSent/$textExpected control=0x$('{0:x}' -f $control.ToInt64()) bounds=$($bounds -join ',')"
-      Require $stable "edge edit $id did not reach stable WM_GETTEXT state after native input: '$after'"
-      if ($after -cne $text -and $attempt -lt 5) { $before = $after }
+      $decision = Get-EdgeTextAttemptDecision $stable $after $text $attempt 5
+      if ($decision -eq "complete") {
+        $completed = $true
+        break
+      }
+      $before = $after
     }
-    Require ($stable -and $after -ceq $text) `
-      "edge workflow native SendInput did not fill $id after five attempts: expected='$text' observed='$after' control=0x$('{0:x}' -f $control.ToInt64())"
+    Require $completed `
+      "edge workflow native SendInput did not fill ${id}: attempts=$attemptsExecuted/5 expected='$text' observed='$after' control=0x$('{0:x}' -f $control.ToInt64())"
     return $after
   }
   function Read-EdgeStableText([int] $id, [string] $label) {
@@ -7269,16 +7286,81 @@ try {
     Write-Host ("UIA_SKETCH_CUSTODY_NO_MUTATION=" + ($evidence | ConvertTo-Json -Compress))
     return $evidence
   }
-  function Open-SketchNodeMenu([string] $title) {
+  function Normalize-SketchCanvas {
     $actual = Find-FragmentByIdWithRetry $renameRoot "actual-size" $rawWalker
     Require ($null -ne $actual) "sketch/custody live hit test omitted Actual Size"
     $actual.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  }
+  function Wait-SketchGraphCard(
+    [string] $title, [string] $expectedNodeId, [int] $graphSequence, [int] $maximumAttempts = 50
+  ) {
+    $baselineGraph = Find-FragmentByIdWithRetry $renameRoot "graph" $rawWalker
+    Require ($null -ne $baselineGraph) "sketch/custody graph absent before child-card wait"
+    $baselineCards = @(Get-DirectChildren $baselineGraph $rawWalker | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-'
+    })
+    $baselineCount = $baselineCards.Count
+    Require ($baselineCount -gt 0) `
+      "sketch/custody positive rendered-card baseline absent before waiting for '$title'"
+    $lastSnapshot = @()
+    $lastTitleCount = 0
+    $lastIdentityCount = 0
+    $attemptsExecuted = 0
+    for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
+      $attemptsExecuted = $attempt
+      $graph = Find-FragmentByIdWithRetry $renameRoot "graph" $rawWalker
+      Require ($null -ne $graph) `
+        "sketch/custody graph disappeared while waiting for '$title' attempt=$attempt"
+      $cards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+        $_.Current.AutomationId -match '^canvas-card-'
+      })
+      $lastSnapshot = @($cards | ForEach-Object {
+        [ordered]@{ automationId = [string]$_.Current.AutomationId; name = [string]$_.Current.Name }
+      })
+      $titleCards = @($cards | Where-Object { $_.Current.Name -ceq $title })
+      $identityCards = @($titleCards | Where-Object {
+        ([string]$_.Current.AutomationId).IndexOf(
+          $expectedNodeId, [StringComparison]::OrdinalIgnoreCase
+        ) -ge 0
+      })
+      $lastTitleCount = $titleCards.Count
+      $lastIdentityCount = $identityCards.Count
+      Write-Host ("UIA_SKETCH_CUSTODY_CARD_WAIT=" + ([ordered]@{
+        attempt = $attempt; maximumAttempts = $maximumAttempts
+        expectedChildUUID = $expectedNodeId; expectedTitle = $title
+        graphSequence = $graphSequence; positiveBaselineGraphCardCount = $baselineCount
+        graphCardCount = $cards.Count; matchingTitleCount = $lastTitleCount
+        matchingIdentityCount = $lastIdentityCount; graphCards = $lastSnapshot
+      } | ConvertTo-Json -Compress -Depth 5))
+      if ($lastTitleCount -eq 1 -and $lastIdentityCount -eq 1) {
+        return [ordered]@{
+          attempts = $attemptsExecuted; positiveBaselineGraphCardCount = $baselineCount
+          graphCardCount = $cards.Count; expectedChildUUID = $expectedNodeId
+          title = $title; graphSequence = $graphSequence
+          automationId = [string]$identityCards[0].Current.AutomationId
+          graphCards = $lastSnapshot
+        }
+      }
+      if ($attempt -lt $maximumAttempts) { Start-Sleep -Milliseconds 100 }
+    }
+    throw "sketch/custody child card did not converge after attempts=$attemptsExecuted/$maximumAttempts expectedChildUUID=$expectedNodeId expectedTitle='$title' graphSequence=$graphSequence positiveBaselineGraphCardCount=$baselineCount graphCardCount=$($lastSnapshot.Count) matchingTitleCount=$lastTitleCount matchingIdentityCount=$lastIdentityCount graphCards=$($lastSnapshot | ConvertTo-Json -Compress -Depth 4)"
+  }
+  function Open-SketchNodeMenu(
+    [string] $title, [switch] $SkipActualSize, [string] $ExpectedCardId = ""
+  ) {
+    if (-not $SkipActualSize) { Normalize-SketchCanvas }
     $graph = Find-FragmentByIdWithRetry $renameRoot "graph" $rawWalker
     Require ($null -ne $graph) "sketch/custody graph absent before node hit test"
     $cards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
       $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -ceq $title
     })
     Require ($cards.Count -eq 1) "sketch/custody '$title' has $($cards.Count) rendered graph cards"
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedCardId)) {
+      Require (([string]$cards[0].Current.AutomationId).IndexOf(
+        $ExpectedCardId, [StringComparison]::OrdinalIgnoreCase
+      ) -ge 0) `
+        "sketch/custody '$title' fresh card UUID identity differs: expected=$ExpectedCardId actual=$($cards[0].Current.AutomationId)"
+    }
     $rect = $cards[0].Current.BoundingRectangle
     $graphBounds = $graph.Current.BoundingRectangle
     $left = [Math]::Max($rect.Left, $graphBounds.Left)
@@ -7639,7 +7721,10 @@ try {
     $custodyParentAfter[0].loopType -ceq $custodyParentBefore[0].loopType -and
     @($custodyAfter.edges).Count -eq @($custodyBefore.edges).Count) `
     "republished custody graph state omitted the created child or exact custody parent"
-  $custodyRendered = Open-SketchNodeMenu "UIA custody child"
+  Normalize-SketchCanvas
+  $custodyRenderWait = Wait-SketchGraphCard "UIA custody child" $custodyId `
+    ([int]$custodyAfter.graphSequence)
+  $custodyRendered = Open-SketchNodeMenu "UIA custody child" -SkipActualSize -ExpectedCardId $custodyId
   Require (@($custodyRendered.items | Where-Object { $_.Id -eq 5119 -and $_.Enabled }).Count -eq 1) `
     "republished custody child was not hit-tested as an unresolved node"
   Require (Close-PopupMenu $renameProcess $custodyRendered.popup $renameShellWindow "custody child") `
@@ -7673,6 +7758,7 @@ try {
       appliedCount = @($custodyAfter.appliedCreates).Count
       graphSequence = [int]$custodyAfter.graphSequence
       republishedNode = $custodyGraphNode[0]
+      renderedCardWait = $custodyRenderWait
       renderedHitTest = @{ point = $custodyRendered.point; cardId = $custodyRendered.cardId }
     }
     renderedHitTests = 4

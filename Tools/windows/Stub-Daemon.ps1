@@ -129,13 +129,35 @@ function Send-Frame([IO.Stream] $stream, [string] $json, [switch] $Fragment) {
   }
 }
 
+function Get-StubResultWriteWin32Error([System.Exception] $exception) {
+  for ($current = $exception; $null -ne $current; $current = $current.InnerException) {
+    if ($current -is [IO.IOException]) {
+      $nativeCode = [int]($current.HResult -band 0xFFFF)
+      if ($nativeCode -in @(32, 33)) { return $nativeCode }
+    }
+  }
+  return 0
+}
+
 function Write-StubResultFile([string] $path, [string] $json) {
   for ($attempt = 0; $attempt -lt 40; $attempt++) {
     try {
       Set-Content -LiteralPath $path -Value $json -NoNewline -ErrorAction Stop
       return ($attempt + 1)
     } catch [IO.IOException] {
-      if ($attempt -eq 39) { throw }
+      $exception = $_.Exception
+      $nativeCode = Get-StubResultWriteWin32Error $exception
+      $cause = "{0}; HResult=0x{1:X8}; native={2}; {3}" -f `
+        $exception.GetType().FullName, $exception.HResult, $nativeCode, $exception.Message
+      if ($nativeCode -notin @(32, 33)) {
+        Write-Host "STUB_RESULT_WRITE_FAILURE attempt=$($attempt + 1)/40 cause=$cause"
+        throw
+      }
+      if ($attempt -eq 39) {
+        Write-Host "STUB_RESULT_WRITE_EXHAUSTED attempt=40/40 cause=$cause"
+        throw
+      }
+      Write-Host "STUB_RESULT_WRITE_RETRY attempt=$($attempt + 1)/40 cause=$cause"
       Start-Sleep -Milliseconds 25
     }
   }

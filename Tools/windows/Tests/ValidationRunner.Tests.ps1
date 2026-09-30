@@ -1387,7 +1387,8 @@ Start-Sleep -Seconds 60
   if ($stubDaemonSource -notmatch '\$frame\.command\.graphCommand\.command\.createNode\._0' -or
       $stubDaemonSource -notmatch 'appliedCreates' -or
       $stubDaemonSource -notmatch '\$nodeLoopTypes\[\$id\]' -or
-      $stubDaemonSource -notmatch '(?s)function Write-StubResultFile.*?for \(\$attempt = 0; \$attempt -lt 40; \$attempt\+\+\).*?Set-Content -LiteralPath \$path -Value \$json -NoNewline -ErrorAction Stop.*?catch \[IO\.IOException\].*?Start-Sleep -Milliseconds 25' -or
+      $stubDaemonSource -notmatch '(?s)function Get-StubResultWriteWin32Error.*?if \(\$current -is \[IO\.IOException\]\).*?\$current\.HResult -band 0xFFFF.*?if \(\$nativeCode -in @\(32, 33\)\).*?return 0' -or
+      $stubDaemonSource -notmatch '(?s)function Write-StubResultFile.*?for \(\$attempt = 0; \$attempt -lt 40; \$attempt\+\+\).*?Set-Content -LiteralPath \$path -Value \$json -NoNewline -ErrorAction Stop.*?catch \[IO\.IOException\].*?\$nativeCode = Get-StubResultWriteWin32Error \$exception.*?if \(\$nativeCode -notin @\(32, 33\)\).*?STUB_RESULT_WRITE_FAILURE.*?throw.*?STUB_RESULT_WRITE_EXHAUSTED.*?STUB_RESULT_WRITE_RETRY.*?Start-Sleep -Milliseconds 25' -or
       $stubDaemonSource -notmatch '\$null = Write-StubResultFile \$ResultPath \$json' -or
       $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied(?: -or \$promotionApplied)?\)') {
     throw "RED: stub daemon cannot apply exactly the createNode it received and republish the created loop type"
@@ -1498,6 +1499,7 @@ Start-Sleep -Seconds 60
     throw "RED: UIA edge retry/modal/identity proof regressed"
   }
   if ($uiaLiveGateSource -notmatch 'function Edge-TypeText\(' -or
+      $uiaLiveGateSource -notmatch 'function Get-EdgeTextAttemptDecision\(' -or
       $uiaLiveGateSource -notmatch 'Edge-TypeText \$field\.Id \$field\.Text' -or
       $uiaLiveGateSource -notmatch 'UIA_EDGE_TEXT_STABLE id=\$id attempt=\$attempt' -or
       $uiaLiveGateSource -notmatch '\[GraphCodeUiaGateState\]::TypeEditTextById\(\$edgeWorkflowWindow, \$id, \$text\)' -or
@@ -1527,9 +1529,71 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'LastEditTextSent = SendKeyInputs\(LastEditTextExpected' -or
       $uiaLiveGateSource -notmatch 'Require \(\$inputCountsFull\)' -or
       $uiaLiveGateSource -notmatch 'clearSent=\$clearSent/\$clearExpected textSent=\$textSent/\$textExpected' -or
-      $uiaLiveGateSource -notmatch 'for \(\$attempt = 1; \$attempt -le 5' -or
+      $uiaLiveGateSource -notmatch 'for \(\$attempt = 1; \$attempt -le 5; \$attempt\+\+\)' -or
+      $uiaLiveGateSource -notmatch 'Get-EdgeTextAttemptDecision \$stable \$after \$text \$attempt 5' -or
+      $uiaLiveGateSource -notmatch 'attempts=\$attemptsExecuted/5' -or
       $uiaLiveGateSource -notmatch 'for \(\$layoutRetry = 0; \$layoutRetry -lt 20') {
     throw "RED: edge native text entry lacks native ownership, live layout, focus, clear/retype, or exact verification"
+  }
+  $edgeTextGateAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $uiaLiveGateSource, [ref]$null, [ref]$null
+  )
+  $edgeTextHelperAst = $edgeTextGateAst.Find({
+      param($node)
+      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Get-EdgeTextAttemptDecision"
+    }, $true)
+  if (-not $edgeTextHelperAst) {
+    throw "RED: stable-but-wrong native text has no extracted retry-decision helper"
+  }
+  . ([scriptblock]::Create($edgeTextHelperAst.Extent.Text))
+  $edgeTextAttempts = 0
+  $edgeTextValue = $null
+  for ($attempt = 1; $attempt -le 5; $attempt++) {
+    $edgeTextAttempts++
+    $edgeTextValue = if ($edgeTextAttempts -eq 1) { "" } else { "expected text" }
+    $decision = Get-EdgeTextAttemptDecision $true $edgeTextValue "expected text" $attempt 5
+    if ($decision -eq "complete") { break }
+    if ($decision -ne "retry") { throw "Unexpected edge text retry decision '$decision'" }
+  }
+  if ($edgeTextAttempts -ne 2 -or $edgeTextValue -cne "expected text") {
+    throw "RED: stable empty text did not retry exactly once before the expected second attempt"
+  }
+  $edgeTextAttempts = 0
+  $edgeTextExhaustion = $null
+  try {
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+      $edgeTextAttempts++
+      $null = Get-EdgeTextAttemptDecision $true "" "expected text" $attempt 5
+    }
+  } catch {
+    $edgeTextExhaustion = $_
+  }
+  if ($edgeTextAttempts -ne 5 -or $null -eq $edgeTextExhaustion -or
+      $edgeTextExhaustion.Exception.Message -notmatch 'attempts=5/5') {
+    throw "RED: stable-wrong edge text did not exhaust and report exactly five attempts; calls=$edgeTextAttempts error=$($edgeTextExhaustion.Exception.Message)"
+  }
+  if ($uiaLiveGateSource -notmatch 'function Wait-SketchGraphCard\(' -or
+      $uiaLiveGateSource -notmatch 'UIA_SKETCH_CUSTODY_CARD_WAIT=' -or
+      $uiaLiveGateSource -notmatch 'Wait-SketchGraphCard "UIA custody child" \$custodyId' -or
+      $uiaLiveGateSource -notmatch 'Open-SketchNodeMenu "UIA custody child" -SkipActualSize -ExpectedCardId') {
+    throw "RED: custody child render check has no bounded observation-only card reacquisition"
+  }
+  $custodyCardWaitAst = $edgeTextGateAst.Find({
+      param($node)
+      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Wait-SketchGraphCard"
+    }, $true)
+  if (-not $custodyCardWaitAst) {
+    throw "RED: custody graph-card wait helper is not extractable"
+  }
+  $custodyCardWaitSource = $custodyCardWaitAst.Extent.Text
+  if ($custodyCardWaitSource -notmatch '\$baselineCount -gt 0' -or
+      $custodyCardWaitSource -notmatch '\$lastTitleCount -eq 1 -and \$lastIdentityCount -eq 1' -or
+      $custodyCardWaitSource -notmatch '\$expectedNodeId' -or
+      $custodyCardWaitSource -notmatch '\$graphSequence' -or
+      $custodyCardWaitSource -match 'Invoke\(\)|PostRightClick|Actual Size') {
+    throw "RED: custody card wait lacks a positive baseline, unique UUID-bound observation, or action-free polling"
   }
   if ($uiaLiveGateSource -notmatch 'Open-EdgeMenu \$false 5120' -or
       $uiaLiveGateSource -notmatch 'Open-EdgeMenu \$true 5110' -or
