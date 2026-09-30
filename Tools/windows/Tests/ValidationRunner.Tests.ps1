@@ -1439,6 +1439,10 @@ Start-Sleep -Seconds 60
   if ($uiaLiveGateSource -notmatch 'expected label list is empty or blank') {
     throw "RED: UIA live gate node creation sheet label comparison can pass vacuously on an empty expected list"
   }
+  if ($uiaLiveGateSource -notmatch '(?s)for \(\$index = 0; \$index -lt 20 -and\s*\[GraphCodeUiaGateState\]::FocusSourceAutomationId -ne \$safeRowId; \$index\+\+\)' -or
+      $uiaLiveGateSource -notmatch 'Require \(\[GraphCodeUiaGateState\]::FocusSourceAutomationId -eq \$safeRowId\) "FocusChanged source identity changed"') {
+    throw "RED: UIA focus retention waits for any FocusChanged event instead of the focused row identity"
+  }
   if ($uiaLiveGateSource -notmatch 'SystemParametersInfoRect\(0x0030' -or
       $uiaLiveGateSource -notmatch 'HitTarget = !visibleEmpty && sameTopLevel && realChild == target' -or
       $uiaLiveGateSource -notmatch 'RealChildWindowFromPoint\(dialog, clientPoint\)' -or
@@ -1464,6 +1468,20 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'ChosenUncoveredRectangle = piece' -or
       $uiaLiveGateSource -notmatch 'uncoveredRectangles = ') {
     throw "RED: UIA live gate node creation sheet cannot click and record a footer control partly covered by scrolled content"
+  }
+  if ($uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_INVALID_WINDOW' -or
+      $uiaLiveGateSource -notmatch '\$nativeVisible = \[GraphCodeUiaGateState\]::WindowIsVisible\(\$nodeSheetWindow\)' -or
+      $uiaLiveGateSource -notmatch '\$stillOpen = \$nativeVisible -and \$nativeTitle -eq \$nodeSheetTitle' -or
+      $uiaLiveGateSource -notmatch 'Require \$stillOpen') {
+    throw "RED: UIA live gate does not check the native modal remains visible after rejected Create"
+  }
+  if ($uiaLiveGateSource -notmatch '(?s)for \(\$attempt = 1; \$attempt -le 10; \$attempt\+\+\).*?uiaRecoveredAtAttempt = \$attempt' -or
+      $uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_INVALID_WINDOW' -or
+      $uiaLiveGateSource -notmatch 'Require \$nodeSheetClosed' -or
+      $uiaLiveGateSource -notmatch 'if \(-not \[GraphCodeUiaGateState\]::WindowIsVisible\(\$nodeSheetWindow\) -or' -or
+      $uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_FOOTER_CLICK' -or
+      $uiaLiveGateSource -notmatch 'sub-3px verified uncovered strip') {
+    throw "RED: UIA live gate omits modal liveness retry, native closure, or footer-click geometry"
   }
   if ($uiaLiveGateSource -notmatch '(?s)Add-Type -TypeDefinition @"\r?\n(.*?)\r?\n"@ -ReferencedAssemblies @\(') {
     throw "RED: UIA live gate native input helper is missing"

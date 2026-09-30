@@ -639,6 +639,7 @@ public static class GraphCodeUiaGateState {
     public string[] CoveringWindows;
     public int[][] UncoveredRectangles;
     public int[] ChosenUncoveredRectangle;
+    public bool NarrowUncovered;
   }
   public static int[][] SubtractCoveredRectangles(int[] visible, int[][] covers) {
     var remaining = new System.Collections.ArrayList();
@@ -780,6 +781,10 @@ public static class GraphCodeUiaGateState {
       foreach (int[] piece in hit.UncoveredRectangles) {
         var candidate = new ScreenPoint { X = (piece[0] + piece[2]) / 2, Y = (piece[1] + piece[3]) / 2 };
         if (!ResolvesToControl(target, dialog, candidate)) continue;
+        if (piece[2] - piece[0] < 3 || piece[3] - piece[1] < 3) {
+          hit.NarrowUncovered = true;
+          continue;
+        }
         center = candidate;
         hit.ScreenX = candidate.X; hit.ScreenY = candidate.Y;
         hit.HitTarget = true;
@@ -794,6 +799,7 @@ public static class GraphCodeUiaGateState {
           var candidate = new ScreenPoint { X = visibleLeft + column * width / 6, Y = visibleTop + row * height / 4 };
           IntPtr resolved = ResolveChild(dialog, candidate);
           bool uncovered = ResolvesToControl(target, dialog, candidate);
+          if (uncovered && hit.NarrowUncovered) uncovered = false;
           samples[hit.ScannedPoints++] = String.Format("{0},{1}|{2}|{3}|{4}|{5}", candidate.X, candidate.Y,
             resolved == IntPtr.Zero ? 0 : GetDlgCtrlID(resolved), ClassOf(resolved), uncovered ? "control" : "covered",
             resolved == IntPtr.Zero ? "" : EditBufferText(resolved));
@@ -3970,7 +3976,8 @@ try {
   Require ($null -ne $focused) "worktree row could not retain focus against concurrent desktop focus changes; focused=$(Format-AutomationElement $focusResult.Candidate); $(Get-FocusDiagnostics $shellWindow)"
   Require ($focused.Current.AutomationId -eq $safeRowId) "focus source identity was '$($focused.Current.AutomationId)', expected '$safeRowId'"
   Require ((Get-RuntimeIdentity $focused) -eq (Get-RuntimeIdentity $safeFocusRow)) "focus runtime identity changed"
-  for ($index = 0; $index -lt 20 -and -not [GraphCodeUiaGateState]::FocusObserved; $index++) {
+  for ($index = 0; $index -lt 20 -and
+      [GraphCodeUiaGateState]::FocusSourceAutomationId -ne $safeRowId; $index++) {
     Start-Sleep -Milliseconds 50
   }
   Require ([GraphCodeUiaGateState]::FocusObserved) "FocusChanged was not delivered"
@@ -6026,6 +6033,7 @@ try {
   $nodeSheetOcclusions = [Collections.Generic.List[object]]::new()
   $nodeSheetContentOcclusions = [Collections.Generic.List[object]]::new()
   $nodeSheetCreateCentreClicks = [Collections.Generic.List[string]]::new()
+  $nodeSheetFooterClicks = [Collections.Generic.List[object]]::new()
   $nodeSheetAlwaysVisible = @(9100, 9112, 9113, 9114)
   $nodeSheetTypes = @(
     [pscustomobject]@{ Tile = 2; Label = "Goal-based"; Value = "goalBased"; Extra = @(9106, 9107, 9108, 9109, 9110, 9111) },
@@ -6086,6 +6094,9 @@ try {
     Require (-not $hit.VisibleEmpty) `
       ("node creation sheet $label control [$($controlBounds -join ',')] has no visible portion inside " +
        "work area [$($workArea -join ',')]; dialog [$($dialogBounds -join ',')]")
+    Require (-not $hit.NarrowUncovered -or $hit.HitTarget) `
+      ("node creation sheet $label has only a sub-3px verified uncovered strip: " +
+       "$(@($hit.UncoveredRectangles | ForEach-Object { '[' + ($_ -join ',') + ']' }) -join '; ')")
     $occlusion = $null
     if ($hit.OutsideWorkArea) {
       $occlusion = [ordered]@{
@@ -6147,6 +6158,18 @@ try {
     } elseif ($controlId -eq 1 -and $hit.HitTarget) {
       $nodeSheetCreateCentreClicks.Add($label)
     }
+    if ($controlId -eq 1) {
+      $footerClick = [ordered]@{
+        label = $label
+        point = @($hit.ScreenX, $hit.ScreenY)
+        contentOccluded = ($hit.ScannedPoints -gt 0)
+        outsideWorkArea = $hit.OutsideWorkArea
+        chosenUncoveredRectangle = if ($hit.ChosenUncoveredRectangle) { @($hit.ChosenUncoveredRectangle) } else { $null }
+        exactControlHit = $hit.HitTarget
+      }
+      $nodeSheetFooterClicks.Add($footerClick)
+      Write-Host ("UIA_NODE_CREATION_FOOTER_CLICK " + ($footerClick | ConvertTo-Json -Depth 3 -Compress))
+    }
     Require $hit.HitTarget `
       ("node creation sheet $label point ($($hit.ScreenX),$($hit.ScreenY)) inside " +
        "[$($controlBounds -join ',')] resolved to child $($hit.RealChildId) class '$($hit.RealChildClass)' " +
@@ -6199,14 +6222,31 @@ try {
     $click = Invoke-NodeSheetClick 1 "Create ($loopType, invalid)"
     $reasonShown = Wait-NodeSheetStatic $reason
     Start-Sleep -Milliseconds 300
-    $stillOpen = $null -ne $desktop.FindFirst([System.Windows.Automation.TreeScope]::Children, $nodeSheetCondition)
+    $nativeVisible = [GraphCodeUiaGateState]::WindowIsVisible($nodeSheetWindow)
+    $nativeTitle = [GraphCodeUiaGateState]::WindowTextOf($nodeSheetWindow)
+    $stillOpen = $nativeVisible -and $nativeTitle -eq $nodeSheetTitle
+    $uiaDialogPresent = $false
+    $uiaRecoveredAtAttempt = $null
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+      if ($null -ne $desktop.FindFirst([System.Windows.Automation.TreeScope]::Children, $nodeSheetCondition)) {
+        $uiaDialogPresent = $true
+        $uiaRecoveredAtAttempt = $attempt
+        break
+      }
+      if ($attempt -lt 10) { Start-Sleep -Milliseconds 100 }
+    }
+    Write-Host ("UIA_NODE_CREATION_INVALID_WINDOW loopType=$loopType nativeVisible=$nativeVisible " +
+      "nativeTitle='$nativeTitle' uiaDialogPresent=$uiaDialogPresent " +
+      "uiaRecoveredAtAttempt=$uiaRecoveredAtAttempt reasonShown=$reasonShown")
     $logAfter = if (Test-Path -LiteralPath $renameCommandLogPath) { Read-DaemonCommandLog $renameCommandLogPath } else { "" }
     $stubAfter = Read-NodeCreationStubResult
     $graphCommandsAfter = Get-NodeCreationGraphCommandCount $stubAfter
     $visibleTexts = @([GraphCodeUiaGateState]::VisibleStaticTexts($nodeSheetWindow))
     Require $reasonShown `
       ("node creation sheet $loopType Create did not show '$reason'; visible text: " + ($visibleTexts -join " | "))
-    Require $stillOpen "node creation sheet closed after invalid $loopType Create"
+    Require $stillOpen `
+      ("node creation sheet closed after invalid $loopType Create: nativeVisible=$nativeVisible " +
+       "nativeTitle='$nativeTitle' uiaDialogPresent=$uiaDialogPresent")
     Require (-not ($logAfter -match '"createNode"')) "invalid $loopType Create dispatched a createNode command: $logAfter"
     Require (($graphCommandsBefore -ge 0) -and ($graphCommandsAfter -eq $graphCommandsBefore)) `
       "invalid $loopType Create reached the daemon: graphCommand count $graphCommandsBefore -> $graphCommandsAfter"
@@ -6216,6 +6256,8 @@ try {
       reason = $reason
       reasonShown = $reasonShown
       dialogOpen = $stillOpen
+      uiaDialogPresent = $uiaDialogPresent
+      uiaRecoveredAtAttempt = $uiaRecoveredAtAttempt
       commandLogUnchanged = ($logAfter -ceq $logBefore)
       createNodeDispatched = [bool]($logAfter -match '"createNode"')
       daemonCommandCountUnchanged = ($graphCommandsAfter -eq $graphCommandsBefore)
@@ -6329,12 +6371,18 @@ try {
   Write-Host ("UIA_NODE_CREATION_RECAP afterTileClick='$nodeSheetRecapAfterTile' afterEdit='$nodeSheetRecapAfterEdit'")
 
   $nodeSheetSubmitClick = Invoke-NodeSheetClick 1 "Create (valid)"
-  Require (Wait-ForDesktopElementGone `
-    -desktop $desktop `
-    -condition $nodeSheetCondition `
-    -label "node creation sheet valid submit" `
-    -diagnosticWindow $renameShellWindow) `
-    ("node creation sheet stayed open after a valid Create; visible text: " +
+  $nodeSheetClosed = $false
+  for ($attempt = 0; $attempt -lt 100; $attempt++) {
+    if (-not [GraphCodeUiaGateState]::WindowIsVisible($nodeSheetWindow) -or
+        [GraphCodeUiaGateState]::WindowTextOf($nodeSheetWindow) -ne $nodeSheetTitle) {
+      $nodeSheetClosed = $true
+      break
+    }
+    Start-Sleep -Milliseconds 50
+  }
+  Require $nodeSheetClosed `
+    ("node creation sheet stayed natively visible after a valid Create: title='" +
+     ([GraphCodeUiaGateState]::WindowTextOf($nodeSheetWindow)) + "'; visible text: " +
      (@([GraphCodeUiaGateState]::VisibleStaticTexts($nodeSheetWindow)) -join " | "))
 
   $nodeSheetDispatchedCommand = $null
@@ -6471,6 +6519,7 @@ try {
       occluded = ($nodeSheetContentOcclusions.Count -gt 0)
       controls = @($nodeSheetContentOcclusions)
       createCentreClicks = @($nodeSheetCreateCentreClicks)
+      createClicks = @($nodeSheetFooterClicks)
     }
   }
   Write-Host ("UIA_NODE_CREATION_SHEET_EVIDENCE=" + ($nodeCreationSheetEvidence | ConvertTo-Json -Compress -Depth 8))
