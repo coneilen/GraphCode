@@ -890,13 +890,10 @@ public static class GraphCodeUiaGateState {
   public static bool TypeEditTextById(IntPtr parent, int controlId, string text) {
     IntPtr edit = GetDlgItem(parent, controlId);
     if (edit == IntPtr.Zero || !FocusControl(parent, edit)) return false;
-    var clear = new KeyInputRecord[6];
-    clear[0] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x11 } };
-    clear[1] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x41 } };
-    clear[2] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x41, Flags = 2 } };
-    clear[3] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x11, Flags = 2 } };
-    clear[4] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E } };
-    clear[5] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E, Flags = 2 } };
+    SendMessage(edit, 0x00B1, UIntPtr.Zero, new IntPtr(-1));
+    var clear = new KeyInputRecord[2];
+    clear[0] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E } };
+    clear[1] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = 0x2E, Flags = 2 } };
     uint cleared = SendKeyInputs((uint)clear.Length, clear, Marshal.SizeOf(typeof(KeyInputRecord)));
     if (cleared != clear.Length)
       throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} edit-clear events: Win32Error={2}", cleared, clear.Length, Marshal.GetLastWin32Error()));
@@ -6216,7 +6213,8 @@ try {
   function Edge-TypeText([int] $id, [string] $text) {
     $before = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
     $after = $before
-    for ($attempt = 1; $attempt -le 5 -and $after -cne $text; $attempt++) {
+    $stable = $false
+    for ($attempt = 1; $attempt -le 5 -and -not $stable; $attempt++) {
       $control = [IntPtr]::Zero
       $bounds = $null
       for ($layoutRetry = 0; $layoutRetry -lt 20; $layoutRetry++) {
@@ -6243,13 +6241,39 @@ try {
       $sent = $focusSet -and $focusAfter -eq $control -and
         [GraphCodeUiaGateState]::TypeEditTextById($edgeWorkflowWindow, $id, $text)
       $after = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
+      $idle = $renameProcess.WaitForInputIdle(1000)
+      Require $idle "edge edit $id attempt $attempt did not reach native input idle"
+      $stable = $false
+      for ($stableRetry = 0; $stableRetry -lt 10; $stableRetry++) {
+        Start-Sleep -Milliseconds 150
+        $observed = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
+        if ($observed -ceq $after) { $stable = $true; break }
+        $after = $observed
+      }
       $focusFinal = [GraphCodeUiaGateState]::FocusedControlInDialog($edgeWorkflowWindow)
-      Write-Host "UIA_EDGE_TEXT id=$id attempt=$attempt before='$before' after='$after' expected='$text' modal=$modalValid foreground=$foreground focusBefore=0x$('{0:x}' -f $focusBefore.ToInt64()) focusAfter=0x$('{0:x}' -f $focusAfter.ToInt64()) focusFinal=0x$('{0:x}' -f $focusFinal.ToInt64()) sent=$sent control=0x$('{0:x}' -f $control.ToInt64()) bounds=$($bounds -join ',')"
-      if ($after -cne $text -and $attempt -lt 5) { Start-Sleep -Milliseconds 100 }
+      Write-Host "UIA_EDGE_TEXT_STABLE id=$id attempt=$attempt before='$before' after='$after' expected='$text' modal=$modalValid foreground=$foreground idle=$idle stable=$stable focusBefore=0x$('{0:x}' -f $focusBefore.ToInt64()) focusAfter=0x$('{0:x}' -f $focusAfter.ToInt64()) focusFinal=0x$('{0:x}' -f $focusFinal.ToInt64()) sent=$sent control=0x$('{0:x}' -f $control.ToInt64()) bounds=$($bounds -join ',')"
+      Require $stable "edge edit $id did not reach stable WM_GETTEXT state after native input: '$after'"
+      if ($after -cne $text -and $attempt -lt 5) { $before = $after }
     }
-    Require ($after -ceq $text) `
+    Require ($stable -and $after -ceq $text) `
       "edge workflow native SendInput did not fill $id after five attempts: expected='$text' observed='$after' control=0x$('{0:x}' -f $control.ToInt64())"
     return $after
+  }
+  function Read-EdgeStableText([int] $id, [string] $label) {
+    $control = [GraphCodeUiaGateState]::ControlById($edgeWorkflowWindow, $id)
+    $bounds = if ($control -eq [IntPtr]::Zero) { @() } else { @([GraphCodeUiaGateState]::WindowBounds($control)) }
+    Require ($control -ne [IntPtr]::Zero -and
+      [GraphCodeUiaGateState]::IsControlOwnedBy($edgeWorkflowWindow, $control, $id) -and
+      [GraphCodeUiaGateState]::HasVisibleBounds($control)) `
+      "edge submit field $label ($id) unavailable: bounds=$($bounds -join ',')"
+    $idle = $renameProcess.WaitForInputIdle(1000)
+    Require $idle "edge submit field $label did not reach native input idle"
+    $first = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
+    Start-Sleep -Milliseconds 150
+    $second = [GraphCodeUiaGateState]::EditTextById($edgeWorkflowWindow, $id)
+    Write-Host "UIA_EDGE_SUBMIT_FIELD name=$label id=$id idle=$idle first='$first' second='$second'"
+    Require ($first -ceq $second) "edge submit field $label ($id) was not stable: '$first' -> '$second'"
+    return $second
   }
   $edgeFooterClicks = [Collections.Generic.List[object]]::new()
   function Edge-Click([int] $id, [string] $title) {
@@ -6327,6 +6351,12 @@ try {
       @{ Id = 9107; Text = "3" })) {
     Edge-TypeText $field.Id $field.Text
   }
+  $edgePayloadBeforeSubmit = Read-EdgeStableText 9105 "payload"
+  $edgeUntilBeforeSubmit = Read-EdgeStableText 9106 "cycle guard until"
+  $edgeMaxBeforeSubmit = Read-EdgeStableText 9107 "cycle guard max"
+  Require ($edgePayloadBeforeSubmit -ceq "UIA edge payload" -and
+    $edgeUntilBeforeSubmit -ceq "test -f done" -and $edgeMaxBeforeSubmit -ceq "3") `
+    "edge submit fields differed from stable native input: payload='$edgePayloadBeforeSubmit' until='$edgeUntilBeforeSubmit' max='$edgeMaxBeforeSubmit'"
   $edgeCreateClick = Edge-Click 1 "valid edge OK"
   Wait-EdgeClosed $edgeWorkflowTitle
   $edgeCreated = $null

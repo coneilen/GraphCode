@@ -1461,9 +1461,9 @@ Start-Sleep -Seconds 60
   }
   if ($uiaLiveGateSource -notmatch 'function Edge-TypeText\(' -or
       $uiaLiveGateSource -notmatch 'Edge-TypeText \$field\.Id \$field\.Text' -or
-      $uiaLiveGateSource -notmatch 'UIA_EDGE_TEXT id=\$id attempt=\$attempt' -or
+      $uiaLiveGateSource -notmatch 'UIA_EDGE_TEXT_STABLE id=\$id attempt=\$attempt' -or
       $uiaLiveGateSource -notmatch '\[GraphCodeUiaGateState\]::TypeEditTextById\(\$edgeWorkflowWindow, \$id, \$text\)' -or
-      $uiaLiveGateSource -notmatch 'Require \(\$after -ceq \$text\)' -or
+      $uiaLiveGateSource -notmatch 'Require \(\$stable -and \$after -ceq \$text\)' -or
       $uiaLiveGateSource -notmatch 'IsControlOwnedBy\(\$edgeWorkflowWindow, \$control, \$id\)' -or
       $uiaLiveGateSource -notmatch 'HasVisibleBounds\(\$control\)' -or
       $uiaLiveGateSource -notmatch 'FocusedControlInDialog\(\$edgeWorkflowWindow\)' -or
@@ -1471,7 +1471,16 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'WindowTextOf\(\$edgeWorkflowWindow\) -eq \$script:edgeWorkflowTitle' -or
       $uiaLiveGateSource -notmatch 'VirtualKey = 0x2E' -or
       $uiaLiveGateSource -notmatch 'SendMessageText\(edit, 0x000D' -or
-      $uiaLiveGateSource -notmatch '(?s)var clear = new KeyInputRecord\[6\].*?EditBufferText\(edit\).*?var records = new KeyInputRecord\[text\.Length \* 2\]' -or
+      $uiaLiveGateSource -notmatch 'SendMessage\(edit, 0x00B1, UIntPtr\.Zero, new IntPtr\(-1\)\)' -or
+      $uiaLiveGateSource -notmatch '(?s)var clear = new KeyInputRecord\[2\].*?EditBufferText\(edit\).*?var records = new KeyInputRecord\[text\.Length \* 2\]' -or
+      $uiaLiveGateSource -notmatch 'for \(\$stableRetry = 0; \$stableRetry -lt 10' -or
+      $uiaLiveGateSource -notmatch 'UIA_EDGE_TEXT_STABLE id=\$id attempt=\$attempt' -or
+      $uiaLiveGateSource -notmatch '\$renameProcess\.WaitForInputIdle\(1000\)' -or
+      $uiaLiveGateSource -notmatch 'function Read-EdgeStableText\(' -or
+      $uiaLiveGateSource -notmatch 'UIA_EDGE_SUBMIT_FIELD name=\$label id=\$id' -or
+      $uiaLiveGateSource -notmatch 'Read-EdgeStableText 9105 "payload"' -or
+      $uiaLiveGateSource -notmatch 'Read-EdgeStableText 9106 "cycle guard until"' -or
+      $uiaLiveGateSource -notmatch 'Read-EdgeStableText 9107 "cycle guard max"' -or
       $uiaLiveGateSource -notmatch 'for \(\$attempt = 1; \$attempt -le 5' -or
       $uiaLiveGateSource -notmatch 'for \(\$layoutRetry = 0; \$layoutRetry -lt 20') {
     throw "RED: edge native text entry lacks native ownership, live layout, focus, clear/retype, or exact verification"
