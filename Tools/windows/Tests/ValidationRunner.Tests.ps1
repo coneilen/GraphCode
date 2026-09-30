@@ -1424,6 +1424,8 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'commandLogBytesUnchanged' -or
       $uiaLiveGateSource -notmatch 'appliedPromotions' -or
       $uiaLiveGateSource -notmatch 'appliedPromotionRequests' -or
+      $uiaLiveGateSource -notmatch 'UIA_SKETCH_PROMOTION_RENDERED=' -or
+      $uiaLiveGateSource -notmatch '\$promotionChoices\.Count -eq 0 -and \$newChildChoices\.Count -eq 1' -or
       $uiaLiveGateSource -notmatch 'ClickPopupMenuItem' -or
       $uiaLiveGateSource -notmatch 'IsControlOwnedBy' -or
       $uiaLiveGateSource -notmatch 'TypeEditTextById' -or
@@ -1434,7 +1436,14 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'Test-SketchPromotionReceipt \$after \$request \$expectedWire' -or
       $uiaLiveGateSource -notmatch 'receivedWireRaw = \$receivedWireRaw' -or
       $uiaLiveGateSource -notmatch '\$custodyFirstInstruction = Sketch-Field 9104' -or
+      $uiaLiveGateSource -notmatch '\$custodyInstructionAfterBackend = Sketch-Field 9104' -or
       $uiaLiveGateSource -notmatch 'instructionUnchanged = \(\$custodySubmitFields\.firstInstruction -ceq \$custodyFirstInstruction\)' -or
+      $uiaLiveGateSource -notmatch 'firstInstruction -ceq \$custodyFirstInstruction' -or
+      $uiaLiveGateSource -notmatch 'daemonCountsBefore = \$beforeCounts; daemonCountsAfter = \$afterCounts' -or
+      $uiaLiveGateSource -notmatch 'appliedPromotionRequests = @\(\$before\.appliedPromotionRequests\)\.Count' -or
+      $uiaLiveGateSource -notmatch 'requestCount = \[int\]\$before\.requestCount' -or
+      $uiaLiveGateSource -notmatch 'instructionEditing = "not validated;' -or
+      $uiaLiveGateSource -notmatch 'rejected/cancelled no-dispatch evidence combines unchanged UIA-recorder bytes with unchanged stub received/applied/request/response/graph counts' -or
       $stubDaemonSource -notmatch 'appliedPromotions' -or
       $stubDaemonSource -notmatch 'appliedPromotionRequests' -or
       $stubDaemonSource -notmatch 'promoteNode' -or

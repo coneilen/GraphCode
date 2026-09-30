@@ -7220,17 +7220,51 @@ try {
     $after = Read-SketchStub
     $afterBytes = Edge-LogBytes
     $unchanged = $afterBytes -ceq $bytes
-    Require ($bytes.Length -gt 0 -and $unchanged -and
-      (Edge-GraphCount $after) -eq (Edge-GraphCount $before) -and
-      @($after.receivedGraphCommands).Count -eq @($before.receivedGraphCommands).Count -and
-      @($after.appliedPromotions).Count -eq @($before.appliedPromotions).Count -and
-      @($after.appliedCreates).Count -eq @($before.appliedCreates).Count) `
+    $beforeCounts = [ordered]@{
+      graphCommands = Edge-GraphCount $before
+      receivedGraphCommands = @($before.receivedGraphCommands).Count
+      appliedPromotions = @($before.appliedPromotions).Count
+      appliedPromotionRequests = @($before.appliedPromotionRequests).Count
+      appliedCreates = @($before.appliedCreates).Count
+      appliedCreateRequests = @($before.appliedCreateRequests).Count
+      requestCount = [int]$before.requestCount
+      responseCount = [int]$before.responseCount
+      graphSequence = [int]$before.graphSequence
+    }
+    $afterCounts = [ordered]@{
+      graphCommands = Edge-GraphCount $after
+      receivedGraphCommands = @($after.receivedGraphCommands).Count
+      appliedPromotions = @($after.appliedPromotions).Count
+      appliedPromotionRequests = @($after.appliedPromotionRequests).Count
+      appliedCreates = @($after.appliedCreates).Count
+      appliedCreateRequests = @($after.appliedCreateRequests).Count
+      requestCount = [int]$after.requestCount
+      responseCount = [int]$after.responseCount
+      graphSequence = [int]$after.graphSequence
+    }
+    $countsUnchanged = ($afterCounts.graphCommands -eq $beforeCounts.graphCommands -and
+      $afterCounts.receivedGraphCommands -eq $beforeCounts.receivedGraphCommands -and
+      $afterCounts.appliedPromotions -eq $beforeCounts.appliedPromotions -and
+      $afterCounts.appliedPromotionRequests -eq $beforeCounts.appliedPromotionRequests -and
+      $afterCounts.appliedCreates -eq $beforeCounts.appliedCreates -and
+      $afterCounts.appliedCreateRequests -eq $beforeCounts.appliedCreateRequests -and
+      $afterCounts.requestCount -eq $beforeCounts.requestCount -and
+      $afterCounts.responseCount -eq $beforeCounts.responseCount -and
+      $afterCounts.graphSequence -eq $beforeCounts.graphSequence)
+    Require ($bytes.Length -gt 0 -and
+      $beforeCounts.graphCommands -gt 0 -and
+      $beforeCounts.receivedGraphCommands -gt 0 -and
+      $beforeCounts.requestCount -gt 0 -and
+      $beforeCounts.responseCount -gt 0 -and
+      $beforeCounts.graphSequence -gt 0 -and
+      [bool]$before.correlatedRequests -and [bool]$after.correlatedRequests -and
+      $unchanged -and $countsUnchanged) `
       "sketch/custody '$label' mutated daemon command bytes or applied graph state"
     $evidence = [ordered]@{
       label = $label; commandLogBytesUnchanged = $unchanged
       commandLogBytesBeforeBase64 = $bytes; commandLogBytesAfterBase64 = $afterBytes
       commandLogByteLength = [Convert]::FromBase64String($bytes).Length
-      graphCommandsBefore = Edge-GraphCount $before; graphCommandsAfter = Edge-GraphCount $after
+      daemonCountsBefore = $beforeCounts; daemonCountsAfter = $afterCounts
     }
     Write-Host ("UIA_SKETCH_CUSTODY_NO_MUTATION=" + ($evidence | ConvertTo-Json -Compress))
     return $evidence
@@ -7465,10 +7499,19 @@ try {
       $promotedGraphNode[0].loopType -ceq $case.Type) `
       "republished graph state does not retain sketch identity and the selected target type"
     $renderMenu = Open-SketchNodeMenu $title
-    Require (@($renderMenu.items | Where-Object { $_.Text -eq "Promote to..." }).Count -eq 0 -and
-      @($renderMenu.items | Where-Object { $_.Id -eq 5119 -and $_.Enabled }).Count -eq 1 -and
-      $renderMenu.cardId -ceq $menu.cardId) `
-      "republished $($case.Target) node was not hit-tested as promoted"
+    $renderedPromotionMenu = @($renderMenu.items | ForEach-Object {
+        [ordered]@{ id = $_.Id; text = $_.Text; enabled = $_.Enabled }
+      })
+    $promotionChoices = @($renderMenu.items | Where-Object { $_.Text -eq "Promote to..." })
+    $newChildChoices = @($renderMenu.items | Where-Object { $_.Id -eq 5119 -and $_.Enabled })
+    $sameCardAutomationId = $renderMenu.cardId -ceq $menu.cardId
+    Write-Host ("UIA_SKETCH_PROMOTION_RENDERED=" + ([ordered]@{
+      target = $case.Target; nodeId = $id; title = $title; point = $renderMenu.point
+      cardIdBefore = $menu.cardId; cardIdAfter = $renderMenu.cardId
+      sameCardAutomationId = $sameCardAutomationId; menuItems = $renderedPromotionMenu
+    } | ConvertTo-Json -Compress -Depth 6))
+    Require ($promotionChoices.Count -eq 0 -and $newChildChoices.Count -eq 1) `
+      "republished $($case.Target) node menu mismatch: promoteCount=$($promotionChoices.Count) newChildCount=$($newChildChoices.Count) items=$($renderedPromotionMenu | ConvertTo-Json -Compress -Depth 4)"
     Require (Close-PopupMenu $renameProcess $renderMenu.popup $renameShellWindow "promoted $title") `
       "promoted sketch popup did not close"
     $sketchResults.Add([ordered]@{
@@ -7486,7 +7529,8 @@ try {
       republishedNode = $promotedGraphNode[0]
       renderedHitTest = @{
         point = $renderMenu.point; cardIdBefore = $menu.cardId; cardIdAfter = $renderMenu.cardId
-        sameIdentity = ($renderMenu.cardId -ceq $menu.cardId); promotedMenuGone = $true
+        sameCardAutomationId = $sameCardAutomationId; menuItems = $renderedPromotionMenu
+        promotedMenuGone = ($promotionChoices.Count -eq 0)
       }
     })
   }
@@ -7514,6 +7558,9 @@ try {
     "custody child form exposed no default first instruction"
   $null = Sketch-Type 9100 "UIA custody child"
   $null = Sketch-Combo 9112 1 "Claude Code"
+  $custodyInstructionAfterBackend = Sketch-Field 9104 "custody instruction after backend selection"
+  Require ($custodyInstructionAfterBackend -ceq $custodyFirstInstruction) `
+    "custody first instruction changed during backend selection"
   $custodySubmitFields = [ordered]@{
     title = Sketch-Field 9100 "custody title immediately before submit"
     firstInstruction = Sketch-Field 9104 "custody instruction immediately before submit"
@@ -7586,7 +7633,9 @@ try {
       inheritedBackend = $inheritedBackend; changedBackend = $custodyChangedBackend
       cancelInput = $custodyCancel; cancelled = $custodyCancelled; submit = $custodySubmit
       instructionBaseline = $custodyFirstInstruction
+      instructionAfterBackend = $custodyInstructionAfterBackend
       instructionUnchanged = ($custodySubmitFields.firstInstruction -ceq $custodyFirstInstruction)
+      instructionEditing = "not validated; hosted entry attempt reported zero expected and sent text events after the field clear, so this does not establish a dropped key"
       submitFields = $custodySubmitFields
       childId = $custodyId; createdBy = [string]$custodyWire.createdBy
       parentUnchanged = @{
@@ -7607,7 +7656,7 @@ try {
       renderedHitTest = @{ point = $custodyRendered.point; cardId = $custodyRendered.cardId }
     }
     renderedHitTests = 4
-    limit = "The promoteNode path bypasses the UIA command recorder, so exact accepted wire is compared against the correlated stub request; raw recorder bytes establish rejected/cancelled non-mutation. Stub graphChanged and live node-card hit tests do not establish a production daemon session, active session preservation, glyph rendering, or macOS runtime parity."
+    limit = "The promoteNode path bypasses the UIA command recorder, so exact accepted wire is compared against the correlated stub request; rejected/cancelled no-dispatch evidence combines unchanged UIA-recorder bytes with unchanged stub received/applied/request/response/graph counts. The recorder covers only commands on its recorded path. The hosted first-instruction entry attempt reported zero expected and sent text events after clearing the field, so editing is not validated and that result does not establish a dropped key. Stub graphChanged and live node-card hit tests do not establish a production daemon session, active session preservation, glyph rendering, or macOS runtime parity."
   }
   Require ([GraphCodeUiaGateState]::PostCommand($renameShellWindow, 0x5002)) `
     "connected-daemon shell rejected the tray Exit command"
