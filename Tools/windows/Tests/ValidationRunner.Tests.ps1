@@ -1503,7 +1503,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'Edge-TypeText \$field\.Id \$field\.Text' -or
       $uiaLiveGateSource -notmatch 'UIA_EDGE_TEXT_STABLE id=\$id attempt=\$attempt' -or
       $uiaLiveGateSource -notmatch '\[GraphCodeUiaGateState\]::TypeEditTextById\(\$edgeWorkflowWindow, \$id, \$text\)' -or
-      $uiaLiveGateSource -notmatch 'Require \(\$stable -and \$after -ceq \$text\)' -or
+      $uiaLiveGateSource -notmatch 'Require \$completed' -or
       $uiaLiveGateSource -notmatch 'IsControlOwnedBy\(\$edgeWorkflowWindow, \$control, \$id\)' -or
       $uiaLiveGateSource -notmatch 'HasVisibleBounds\(\$control\)' -or
       $uiaLiveGateSource -notmatch 'FocusedControlInDialog\(\$edgeWorkflowWindow\)' -or
@@ -1558,6 +1558,32 @@ Start-Sleep -Seconds 60
   }
   if ($edgeTextAttempts -ne 2 -or $edgeTextValue -cne "expected text") {
     throw "RED: stable empty text did not retry exactly once before the expected second attempt"
+  }
+  $edgeTextHelperSource = $edgeTextHelperAst.Extent.Text
+  if ($edgeTextHelperSource -notmatch '\$actual -ceq \$expected') {
+    throw "RED: edge retry-decision helper lost exact expected-text verification"
+  }
+  $mutatedEdgeTextHelperSource = $edgeTextHelperSource.Replace(
+    'if ($actual -ceq $expected) { return "complete" }',
+    'if ($stable) { return "complete" }'
+  )
+  if ($mutatedEdgeTextHelperSource -ceq $edgeTextHelperSource) {
+    throw "RED: exact-match mutation negative did not find the expected helper branch"
+  }
+  $mutationAttempts = 0
+  $mutationValue = $null
+  for ($attempt = 1; $attempt -le 5; $attempt++) {
+    $mutationAttempts++
+    $mutationValue = if ($mutationAttempts -eq 1) { "" } else { "expected text" }
+    $mutationDecision = & {
+      param($helperSource, $observed, $requested, $ordinal)
+      . ([scriptblock]::Create($helperSource))
+      Get-EdgeTextAttemptDecision $true $observed $requested $ordinal 5
+    } $mutatedEdgeTextHelperSource $mutationValue "expected text" $attempt
+    if ($mutationDecision -eq "complete") { break }
+  }
+  if ($mutationAttempts -eq 2 -and $mutationValue -ceq "expected text") {
+    throw "RED: removing exact expected-text comparison evaded the stable-wrong retry regression"
   }
   $edgeTextAttempts = 0
   $edgeTextExhaustion = $null
