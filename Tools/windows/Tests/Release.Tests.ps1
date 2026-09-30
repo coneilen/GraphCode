@@ -21,6 +21,7 @@ foreach ($script in @($releaseScript, (Join-Path $repoRoot "Tools\windows\stage-
 $fixture = Join-Path ([IO.Path]::GetTempPath()) "graphcode-release-$([guid]::NewGuid())"
 $stubPackage = Join-Path $fixture "stub-package.ps1"
 $stubGh = Join-Path $fixture "stub-gh.ps1"
+$stubGit = Join-Path $fixture "stub-git.ps1"
 $log = Join-Path $fixture "invocations.log"
 
 function Reset-Log { Set-Content -LiteralPath $log -Value "" -Encoding utf8 }
@@ -33,7 +34,7 @@ function Get-PackageCommands([string] $command) {
 function Invoke-Release([hashtable] $parameters, [switch] $ExpectFailure, [string] $Message) {
   Reset-Log
   $arguments = @("-NoProfile", "-File", $releaseScript,
-    "-PackageScript", $stubPackage, "-GitHubCli", $stubGh)
+    "-PackageScript", $stubPackage, "-GitHubCli", $stubGh, "-GitCli", $stubGit)
   foreach ($key in $parameters.Keys) {
     $value = $parameters[$key]
     if ($value -is [bool] -or $value -is [switch]) {
@@ -75,7 +76,12 @@ param(
   [string] $WinghosttyRoot,
   [string] $ZmxRoot,
   [string] $Zig0152,
-  [string] $Zig0160
+  [string] $Zig0160,
+  [string] $ReleaseTag,
+  [string] $ReleaseTagCommit,
+  [string] $SourceCommit,
+  [string] $ReleaseTagMatchesSource,
+  [string] $TagMismatchAllowed
 )
 $ErrorActionPreference = "Stop"
 $record = [ordered]@{ tool = "package" }
@@ -98,7 +104,19 @@ $root = Join-Path $OutputDirectory "GraphCode-$Version-windows-x86_64"
 if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 New-Item -ItemType Directory -Path (Join-Path $root "bin") -Force | Out-Null
 Set-Content -LiteralPath (Join-Path $root "bin\graphcode-windows.exe") "stub payload $Version"
-[ordered]@{ schemaVersion = 1; version = $Version; platform = "windows-x86_64"; signing = $label } |
+[ordered]@{
+  schemaVersion = 1
+  version = $Version
+  platform = "windows-x86_64"
+  signing = $label
+  sourceProvenance = [ordered]@{
+    tag = $ReleaseTag
+    tagCommit = $ReleaseTagCommit
+    sourceCommit = $SourceCommit
+    tagMatchesSource = ($ReleaseTagMatchesSource -eq "true")
+    tagMismatchAllowed = ($TagMismatchAllowed -eq "true")
+  }
+} |
   ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $root "metadata.json") -Encoding utf8
 $archive = Join-Path $OutputDirectory "GraphCode-$Version-windows-x86_64.zip"
 if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
@@ -116,7 +134,32 @@ if ($env:GRAPHCODE_STUB_GH_FAILS -eq "1") { exit 7 }
 exit 0
 '@ | Set-Content -LiteralPath $stubGh -Encoding utf8
 
+  @'
+$ErrorActionPreference = "Stop"
+([ordered]@{ tool = "git"; arguments = @($args) } | ConvertTo-Json -Compress) |
+  Add-Content -LiteralPath $env:GRAPHCODE_STUB_LOG
+if ($args.Count -lt 4 -or $args[0] -ne "-C" -or $args[2] -ne "rev-parse" -or
+    $args[3] -ne "--verify") {
+  Write-Error "unexpected git invocation: $($args -join ' ')"
+  exit 2
+}
+$revision = [string] $args[4]
+if ($revision -eq "HEAD") {
+  Write-Output $env:GRAPHCODE_STUB_HEAD_COMMIT
+  exit 0
+}
+if ($revision -like "*^{commit}") {
+  if ($env:GRAPHCODE_STUB_TAG_MISSING -eq "1") { exit 1 }
+  Write-Output $env:GRAPHCODE_STUB_TAG_COMMIT
+  exit 0
+}
+Write-Error "unexpected revision: $revision"
+exit 2
+'@ | Set-Content -LiteralPath $stubGit -Encoding utf8
+
   $env:GRAPHCODE_STUB_LOG = $log
+  $env:GRAPHCODE_STUB_HEAD_COMMIT = "1111111111111111111111111111111111111111"
+  $env:GRAPHCODE_STUB_TAG_COMMIT = $env:GRAPHCODE_STUB_HEAD_COMMIT
   $out = Join-Path $fixture "out"
 
   # 1. A release tag becomes the package version, and junk tags are refused
@@ -136,7 +179,59 @@ exit 0
   }
   Write-Output "Release tag resolution and rejection: PASS"
 
-  # 2. The ordinary release artifact is explicitly unsigned, uses the stable
+  # 2. The requested tag must peel to the checked-out commit. A deliberate
+  #    mismatch override is recorded but can never be combined with publishing.
+  $env:GRAPHCODE_STUB_TAG_COMMIT = "2222222222222222222222222222222222222222"
+  $mismatch = Invoke-Release @{ Tag = "v0.1.74"; OutputDirectory = $out } `
+    -ExpectFailure -Message "v0.1.74"
+  foreach ($commit in @($env:GRAPHCODE_STUB_TAG_COMMIT, $env:GRAPHCODE_STUB_HEAD_COMMIT)) {
+    if ($mismatch -notmatch [regex]::Escape($commit)) {
+      throw "tag mismatch refusal omitted compared commit '$commit': $mismatch"
+    }
+  }
+  if (@(Get-Invocations | Where-Object tool -eq "package").Count -ne 0) {
+    throw "tag mismatch still invoked packaging"
+  }
+  Invoke-Release @{
+    Tag = "v0.1.74"
+    OutputDirectory = $out
+    AllowTagMismatch = $true
+  } | Out-Null
+  $mismatchBuild = @(Get-PackageCommands "Build")
+  if ($mismatchBuild.Count -ne 1 -or
+      $mismatchBuild[0].ReleaseTag -ne "v0.1.74" -or
+      $mismatchBuild[0].ReleaseTagCommit -ne $env:GRAPHCODE_STUB_TAG_COMMIT -or
+      $mismatchBuild[0].SourceCommit -ne $env:GRAPHCODE_STUB_HEAD_COMMIT -or
+      $mismatchBuild[0].ReleaseTagMatchesSource -ne "false" -or
+      $mismatchBuild[0].TagMismatchAllowed -ne "true") {
+    throw "mismatch override did not record explicit package provenance: $($mismatchBuild | ConvertTo-Json -Compress)"
+  }
+  $mismatchMetadata = Get-Content -LiteralPath (Join-Path $out "publish\metadata.json") -Raw |
+    ConvertFrom-Json
+  if ($mismatchMetadata.sourceProvenance.tagMatchesSource -ne $false -or
+      $mismatchMetadata.sourceProvenance.tagMismatchAllowed -ne $true) {
+    throw "mismatch override was not disclosed in package metadata: $($mismatchMetadata | ConvertTo-Json -Compress)"
+  }
+  Invoke-Release @{
+    Tag = "v0.1.74"
+    OutputDirectory = $out
+    AllowTagMismatch = $true
+    Publish = $true
+  } -ExpectFailure -Message "AllowTagMismatch" | Out-Null
+  if (@(Get-Invocations | Where-Object tool -in @("package", "gh")).Count -ne 0) {
+    throw "mismatch publishing refusal still built or uploaded an artifact"
+  }
+  $env:GRAPHCODE_STUB_TAG_MISSING = "1"
+  Invoke-Release @{ Tag = "v0.1.74"; OutputDirectory = $out } `
+    -ExpectFailure -Message "could not resolve release tag" | Out-Null
+  if (@(Get-Invocations | Where-Object tool -eq "package").Count -ne 0) {
+    throw "missing tag still invoked packaging"
+  }
+  $env:GRAPHCODE_STUB_TAG_MISSING = $null
+  $env:GRAPHCODE_STUB_TAG_COMMIT = $env:GRAPHCODE_STUB_HEAD_COMMIT
+  Write-Output "Release source provenance gate: PASS"
+
+  # 3. The ordinary release artifact is explicitly unsigned, uses the stable
   #    versionless asset name, and can be published without a certificate gate.
   $output = Invoke-Release @{ Tag = "v0.1.74"; OutputDirectory = $out }
   $asset = Join-Path $out "publish\graphcode-windows-x86_64.zip"
@@ -153,8 +248,21 @@ exit 0
   }
   $summary = Get-Content -LiteralPath (Join-Path $out "publish\release-summary.json") -Raw | ConvertFrom-Json
   if ($summary.signed -ne $false -or $summary.signing -notmatch "^UNSIGNED" -or
-    $summary.published -ne $false -or $summary.asset -ne "graphcode-windows-x86_64.zip") {
+    $summary.published -ne $false -or $summary.asset -ne "graphcode-windows-x86_64.zip" -or
+    $summary.sourceProvenance.tag -ne "v0.1.74" -or
+    $summary.sourceProvenance.tagCommit -ne $env:GRAPHCODE_STUB_TAG_COMMIT -or
+    $summary.sourceProvenance.sourceCommit -ne $env:GRAPHCODE_STUB_HEAD_COMMIT -or
+    $summary.sourceProvenance.tagMatchesSource -ne $true -or
+    $summary.sourceProvenance.tagMismatchAllowed -ne $false) {
     throw "unsigned release summary is not honest: $($summary | ConvertTo-Json -Compress)"
+  }
+  $packageMetadata = Get-Content -LiteralPath (Join-Path $out "publish\metadata.json") -Raw |
+    ConvertFrom-Json
+  if ($packageMetadata.sourceProvenance.tagMatchesSource -ne $true -or
+      $packageMetadata.sourceProvenance.tagMismatchAllowed -ne $false -or
+      $packageMetadata.sourceProvenance.tagCommit -ne $env:GRAPHCODE_STUB_TAG_COMMIT -or
+      $packageMetadata.sourceProvenance.sourceCommit -ne $env:GRAPHCODE_STUB_HEAD_COMMIT) {
+    throw "package metadata omitted verified source provenance: $($packageMetadata | ConvertTo-Json -Compress)"
   }
   if ((Get-PackageCommands "Verify").Count -ne 1 -or
     (Get-PackageCommands "Verify")[0].PSObject.Properties.Name -contains "TrustedSignerThumbprint") {
@@ -162,7 +270,7 @@ exit 0
   }
   Write-Output "Standard unsigned release artifact: PASS"
 
-  # 3. Publishing uploads the standard ZIP and checksum without a signing
+  # 4. Publishing uploads the standard ZIP and checksum without a signing
   #    override or certificate configuration.
   Invoke-Release @{ Tag = "v0.1.74"; OutputDirectory = $out; Publish = $true } | Out-Null
   $uploads = @(Get-Invocations | Where-Object tool -eq "gh")
@@ -176,7 +284,7 @@ exit 0
   }
   Write-Output "Unsigned release publication: PASS"
 
-  # 4. The orchestrator rejects a package that unexpectedly reports a signed
+  # 5. The orchestrator rejects a package that unexpectedly reports a signed
   #    state instead of silently changing release policy.
   $env:GRAPHCODE_STUB_SIGNING_LABEL = "signed"
   Invoke-Release @{ Tag = "v0.1.74"; OutputDirectory = $out; Publish = $true } `
@@ -187,7 +295,7 @@ exit 0
   $env:GRAPHCODE_STUB_SIGNING_LABEL = $null
   Write-Output "Unsigned release-state honesty gate: PASS"
 
-  # 5. Build and upload failures propagate and never look like successful
+  # 6. Build and upload failures propagate and never look like successful
   #    publication.
   $env:GRAPHCODE_STUB_BUILD_FAILS = "1"
   Invoke-Release @{ Tag = "v0.1.74"; OutputDirectory = $out; Publish = $true } `
@@ -202,13 +310,16 @@ exit 0
   $env:GRAPHCODE_STUB_GH_FAILS = $null
   Write-Output "Build and upload failure propagation: PASS"
 
-  # 6. The workflow stays manual, action-pinned, and free of certificate or
+  # 7. The workflow stays manual, action-pinned, and free of certificate or
   #    unsigned-override configuration.
   $workflow = Get-Content -LiteralPath (Join-Path $repoRoot ".github\workflows\windows-release.yml") -Raw
   foreach ($required in @("workflow_dispatch:", "Tools/windows/release.ps1", "actions/checkout@")) {
     if ($workflow -notmatch [regex]::Escape($required)) {
       throw "the release workflow no longer references $required"
     }
+  }
+  if ($workflow -notmatch 'ref:\s*\$\{\{\s*inputs\.tag\s*\}\}') {
+    throw "the release workflow does not check out the requested tag"
   }
   foreach ($removed in @("WINDOWS_SIGNING_", "GRAPHCODE_SIGNING_", "allow_unsigned_publish",
       "RELEASE_ALLOW_UNSIGNED_PUBLISH", "add-mask")) {
@@ -237,7 +348,7 @@ exit 0
   }
   Write-Output "Release workflow contract: PASS"
 
-  # 7. The workflow's own invocation actually binds release.ps1's parameters.
+  # 8. The workflow's own invocation actually binds release.ps1's parameters.
   $workflowLines = $workflow -split "\r?\n"
   $packageBlock = $null
   for ($i = 0; $i -lt $workflowLines.Count; $i++) {
@@ -308,7 +419,9 @@ param(
 } finally {
   foreach ($name in @("GRAPHCODE_STUB_LOG", "GRAPHCODE_STUB_SIGNING_LABEL",
       "GRAPHCODE_STUB_BUILD_FAILS", "GRAPHCODE_STUB_GH_FAILS",
-      "GRAPHCODE_PROBE_LOG", "RELEASE_TAG", "RELEASE_PUBLISH")) {
+      "GRAPHCODE_STUB_HEAD_COMMIT", "GRAPHCODE_STUB_TAG_COMMIT",
+      "GRAPHCODE_STUB_TAG_MISSING", "GRAPHCODE_PROBE_LOG", "RELEASE_TAG",
+      "RELEASE_PUBLISH")) {
     Remove-Item -LiteralPath "env:$name" -ErrorAction SilentlyContinue
   }
   if (Test-Path -LiteralPath $fixture) {
