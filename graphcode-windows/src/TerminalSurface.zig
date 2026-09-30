@@ -106,9 +106,12 @@ fn paneBounds(
     position: usize,
     pane_count: usize,
 ) c.winghostty_rect {
+    if (width <= 0 or height <= Tokens.tab_bar_height + Tokens.pane_header_height) {
+        return .{ .x = origin_x, .y = origin_y, .width = 0, .height = 0 };
+    }
+    const available_height = height - Tokens.tab_bar_height - Tokens.pane_header_height;
     const safe_count = @max(pane_count, 1);
-    const available_height = @max(1, height - Tokens.tab_bar_height - Tokens.pane_header_height);
-    const available_width = @max(1, width);
+    const available_width = width;
     const horizontal = direction == .horizontal;
     const first = if (horizontal)
         @divTrunc(@as(i64, available_width) * @as(i64, @intCast(position)), @as(i64, @intCast(safe_count)))
@@ -1156,37 +1159,14 @@ pub const Workspace = struct {
                     position,
                     pane_count,
                 );
-                _ = c.winghostty_surface_set_bounds(slot.surface, &bounds);
-                var metrics = slot.cell_metrics;
-                if (c.winghostty_surface_get_cell_metrics(slot.surface, &metrics) == c.WINGHOSTTY_OK) {
-                    slot.cell_metrics = metrics;
-                }
-                const requested_size: ?GridSize = gridSizeForBounds(
-                    bounds.width,
-                    bounds.height,
-                    slot.cell_metrics,
-                ) catch |err| blk: {
-                    std.debug.print("Terminal grid bounds rejected pane={d} error={s}\n", .{
-                        index,
-                        @errorName(err),
-                    });
-                    self.setInputError("terminal grid exceeds the supported size");
-                    break :blk null;
-                };
-                if (requested_size) |size| {
-                    var grid_ready = true;
-                    if (!slot.grid.eql(size)) {
-                        self.resizeSurfaceGrid(index, size) catch |err| {
-                            std.debug.print("Terminal grid resize failed pane={d} error={s}\n", .{
-                                index,
-                                @errorName(err),
-                            });
-                            self.setInputError("terminal grid resize failed");
-                            grid_ready = false;
-                        };
+                if (bounds.width != 0 and bounds.height != 0) {
+                    _ = c.winghostty_surface_set_bounds(slot.surface, &bounds);
+                    var metrics = slot.cell_metrics;
+                    if (c.winghostty_surface_get_cell_metrics(slot.surface, &metrics) == c.WINGHOSTTY_OK) {
+                        slot.cell_metrics = metrics;
                     }
-                    if (grid_ready) self.queueResize(index, size);
                 }
+                self.syncPaneGrid(index, bounds, Workspace.resizeSurfaceGrid);
                 const focused = position == selected.focused_pane;
                 _ = c.winghostty_surface_set_focus(slot.surface, if (focused) 1 else 0);
                 if (focused) self.active_surface = index;
@@ -1273,6 +1253,11 @@ pub const Workspace = struct {
     }
 
     fn resizeSurfaceGrid(self: *Workspace, index: usize, size: GridSize) !void {
+        try self.resizeSurfaceGridState(index, size);
+        if (self.surfaces[index].surface != null) self.feedTerminalOutput(index, "");
+    }
+
+    fn resizeSurfaceGridState(self: *Workspace, index: usize, size: GridSize) !void {
         const slot = &self.surfaces[index];
         if (slot.grid.eql(size)) return;
         const cells = try resizedCellBuffer(self.allocator, slot.cells, slot.grid, size, slot.vt);
@@ -1282,7 +1267,30 @@ pub const Workspace = struct {
         slot.grid = size;
         slot.terminal_x = @min(slot.terminal_x, @as(usize, size.cols));
         slot.terminal_y = @min(slot.terminal_y, @as(usize, size.rows - 1));
-        if (slot.surface != null) self.feedTerminalOutput(index, "");
+    }
+
+    fn syncPaneGrid(self: *Workspace, index: usize, bounds: c.winghostty_rect, comptime resize_grid: anytype) void {
+        if (bounds.width == 0 or bounds.height == 0) return;
+        const slot = &self.surfaces[index];
+        const requested_size = gridSizeForBounds(bounds.width, bounds.height, slot.cell_metrics) catch |err| {
+            std.debug.print("Terminal grid bounds rejected pane={d} error={s}\n", .{
+                index,
+                @errorName(err),
+            });
+            self.setInputError("terminal grid exceeds the supported size");
+            return;
+        };
+        if (!slot.grid.eql(requested_size)) {
+            resize_grid(self, index, requested_size) catch |err| {
+                std.debug.print("Terminal grid resize failed pane={d} error={s}\n", .{
+                    index,
+                    @errorName(err),
+                });
+                self.setInputError("terminal grid resize failed");
+                return;
+            };
+        }
+        self.queueResize(index, requested_size);
     }
 
     fn queueResize(self: *Workspace, index: usize, size: GridSize) void {
@@ -3414,6 +3422,23 @@ fn minimalWorkspaceForOptionsTest(allocator: std.mem.Allocator) !Workspace {
     };
 }
 
+fn paneResizeWorkspaceForTest(allocator: std.mem.Allocator) !Workspace {
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    errdefer workspace.layout.deinit();
+    workspace.surfaces[0].cells = try allocator.alloc(c.winghostty_terminal_cell, cell_count);
+    clearCells(&workspace.surfaces[0]);
+    workspace.surfaces[0].cell_metrics = .{
+        .font_width = 8,
+        .font_height = 16,
+        .cell_width = 8,
+        .cell_height = 16,
+        .baseline = 13,
+    };
+    workspace.surfaces[0].session_name = @constCast("session-a");
+    workspace.surfaces[0].last_resize_size = default_grid;
+    return workspace;
+}
+
 test "restored workspace focus follows selected tab and focused pane rather than slot zero" {
     const NativeFocus = struct {
         var focused: ?*c.winghostty_surface = null;
@@ -3832,6 +3857,93 @@ test "pane bounds partition available area without losing remainder pixels" {
     try std.testing.expectEqual(@as(u32, 401), right.width);
     try std.testing.expectEqual(@as(u32, 348), left.height);
     try std.testing.expectEqual(@as(u32, 348), right.height);
+}
+
+test "pane bounds ignore zero or unavailable client geometry" {
+    const bounds = paneBounds(0, 0, 0, 0, .horizontal, 0, 1);
+    try std.testing.expectEqual(@as(u32, 0), bounds.width);
+    try std.testing.expectEqual(@as(u32, 0), bounds.height);
+    const no_width = paneBounds(0, 0, 0, 400, .horizontal, 0, 1);
+    try std.testing.expectEqual(@as(u32, 0), no_width.width);
+    try std.testing.expectEqual(@as(u32, 0), no_width.height);
+    const no_height = paneBounds(0, 0, 480, 0, .horizontal, 0, 1);
+    try std.testing.expectEqual(@as(u32, 0), no_height.width);
+    try std.testing.expectEqual(@as(u32, 0), no_height.height);
+    const no_client_area = paneBounds(
+        0,
+        0,
+        480,
+        Tokens.tab_bar_height + Tokens.pane_header_height,
+        .horizontal,
+        0,
+        1,
+    );
+    try std.testing.expectEqual(@as(u32, 0), no_client_area.width);
+    try std.testing.expectEqual(@as(u32, 0), no_client_area.height);
+}
+
+test "zero pane geometry leaves the grid and backend resize queue unchanged" {
+    var workspace = try paneResizeWorkspaceForTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer std.testing.allocator.free(workspace.surfaces[0].cells);
+
+    const bounds = paneBounds(0, 0, 0, 0, .horizontal, 0, 1);
+    workspace.syncPaneGrid(0, bounds, Workspace.resizeSurfaceGridState);
+
+    try std.testing.expectEqual(default_grid, workspace.surfaces[0].grid);
+    try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
+}
+
+test "minimize and restore to the same pane size does not queue a resize" {
+    var workspace = try paneResizeWorkspaceForTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer std.testing.allocator.free(workspace.surfaces[0].cells);
+
+    const minimized = paneBounds(0, 0, 0, 0, .horizontal, 0, 1);
+    workspace.syncPaneGrid(0, minimized, Workspace.resizeSurfaceGridState);
+    try std.testing.expectEqual(default_grid, workspace.surfaces[0].grid);
+    try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
+
+    const original = paneBounds(
+        0,
+        0,
+        960,
+        Tokens.tab_bar_height + Tokens.pane_header_height + 640,
+        .horizontal,
+        0,
+        1,
+    );
+    workspace.syncPaneGrid(0, original, Workspace.resizeSurfaceGridState);
+
+    try std.testing.expectEqual(default_grid, workspace.surfaces[0].grid);
+    try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
+}
+
+test "minimize and restore to a new pane size queues one resize for the new grid" {
+    var workspace = try paneResizeWorkspaceForTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer std.testing.allocator.free(workspace.surfaces[0].cells);
+
+    const minimized = paneBounds(0, 0, 0, 0, .horizontal, 0, 1);
+    workspace.syncPaneGrid(0, minimized, Workspace.resizeSurfaceGridState);
+    try std.testing.expectEqual(default_grid, workspace.surfaces[0].grid);
+    try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
+
+    const restored = paneBounds(
+        0,
+        0,
+        800,
+        Tokens.tab_bar_height + Tokens.pane_header_height + 320,
+        .horizontal,
+        0,
+        1,
+    );
+    workspace.syncPaneGrid(0, restored, Workspace.resizeSurfaceGridState);
+    try std.testing.expectEqual(GridSize{ .cols = 100, .rows = 20 }, workspace.surfaces[0].grid);
+    try std.testing.expectEqual(GridSize{ .cols = 100, .rows = 20 }, workspace.surfaces[0].pending_resize_size.?);
+
+    workspace.syncPaneGrid(0, restored, Workspace.resizeSurfaceGridState);
+    try std.testing.expectEqual(GridSize{ .cols = 100, .rows = 20 }, workspace.surfaces[0].pending_resize_size.?);
 }
 
 test "terminal grid resizing reallocates pane cells and keeps legacy output in bounds" {
