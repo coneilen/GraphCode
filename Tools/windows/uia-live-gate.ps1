@@ -7509,8 +7509,10 @@ try {
   $custodyModal = Assert-SketchModal "Create or edit node"
   Require ([GraphCodeUiaGateState]::ComboSelection($script:edgeWorkflowWindow, 9112) -ceq
     "2|GitHub Copilot CLI") "reopened custody child lost inherited backend"
+  $custodyFirstInstruction = Sketch-Field 9104 "custody instruction inherited baseline"
+  Require (-not [string]::IsNullOrWhiteSpace($custodyFirstInstruction)) `
+    "custody child form exposed no default first instruction"
   $null = Sketch-Type 9100 "UIA custody child"
-  $null = Sketch-Type 9104 "Continue under parent"
   $null = Sketch-Combo 9112 1 "Claude Code"
   $custodySubmitFields = [ordered]@{
     title = Sketch-Field 9100 "custody title immediately before submit"
@@ -7518,7 +7520,7 @@ try {
     backend = Sketch-Combo 9112 1 "Claude Code"
   }
   Require ($custodySubmitFields.title -ceq "UIA custody child" -and
-    $custodySubmitFields.firstInstruction -ceq "Continue under parent" -and
+    $custodySubmitFields.firstInstruction -ceq $custodyFirstInstruction -and
     $custodySubmitFields.backend -ceq "1|Claude Code") `
     "custody child native fields changed before submission"
   Write-Host ("UIA_CUSTODY_SUBMIT_FIELDS=" + ($custodySubmitFields | ConvertTo-Json -Compress))
@@ -7557,7 +7559,7 @@ try {
     $custodyWire.id -ceq $custodyId -and $custodyWire.title -ceq "UIA custody child" -and
     $custodyWire.createdBy -ceq $renameNodeId -and $custodyWire.backend -ceq "claudeCode" -and
     $custodyWire.loopType -ceq "turnBased" -and
-    $custodyWire.firstInstruction -ceq "Continue under parent" -and
+    $custodyWire.firstInstruction -ceq $custodyFirstInstruction -and
     $null -eq $custodyWire.subGraph) `
     "custody createNode wire differs from the exact stub-received child/parent identity"
   $custodyGraphNode = @($custodyAfter.graphNodes | Where-Object { $_.id -ceq $custodyId })
@@ -7583,6 +7585,8 @@ try {
       parentId = $renameNodeId; menuClick = $custodyMenuClick; modal = $custodyModal
       inheritedBackend = $inheritedBackend; changedBackend = $custodyChangedBackend
       cancelInput = $custodyCancel; cancelled = $custodyCancelled; submit = $custodySubmit
+      instructionBaseline = $custodyFirstInstruction
+      instructionUnchanged = ($custodySubmitFields.firstInstruction -ceq $custodyFirstInstruction)
       submitFields = $custodySubmitFields
       childId = $custodyId; createdBy = [string]$custodyWire.createdBy
       parentUnchanged = @{

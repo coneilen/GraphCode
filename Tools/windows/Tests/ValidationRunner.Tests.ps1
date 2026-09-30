@@ -1433,6 +1433,8 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'function Test-SketchPromotionReceipt' -or
       $uiaLiveGateSource -notmatch 'Test-SketchPromotionReceipt \$after \$request \$expectedWire' -or
       $uiaLiveGateSource -notmatch 'receivedWireRaw = \$receivedWireRaw' -or
+      $uiaLiveGateSource -notmatch '\$custodyFirstInstruction = Sketch-Field 9104' -or
+      $uiaLiveGateSource -notmatch 'instructionUnchanged = \(\$custodySubmitFields\.firstInstruction -ceq \$custodyFirstInstruction\)' -or
       $stubDaemonSource -notmatch 'appliedPromotions' -or
       $stubDaemonSource -notmatch 'appliedPromotionRequests' -or
       $stubDaemonSource -notmatch 'promoteNode' -or
