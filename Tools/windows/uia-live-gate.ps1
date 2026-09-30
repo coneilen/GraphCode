@@ -580,6 +580,315 @@ public static class GraphCodeUiaGateState {
     if (edit == IntPtr.Zero) return null;
     return EditBufferText(edit);
   }
+  // Node creation sheet helpers. Every click below is a real cursor move plus
+  // SendInput at the live window rectangle of the target control, and the
+  // window under that point is checked first so a covered or mis-scaled target
+  // fails instead of silently clicking something else.
+  [DllImport("user32.dll")]
+  private static extern bool GetWindowRect(IntPtr window, out RECT rect);
+  [DllImport("user32.dll")]
+  private static extern IntPtr WindowFromPoint(ScreenPoint point);
+  private delegate bool EnumChildProc(IntPtr window, IntPtr parameter);
+  [DllImport("user32.dll")]
+  private static extern bool EnumChildWindows(IntPtr parent, EnumChildProc callback, IntPtr parameter);
+  [StructLayout(LayoutKind.Sequential)]
+  private struct KeybdInput {
+    public ushort VirtualKey, ScanCode;
+    public uint Flags, Time;
+    public UIntPtr ExtraInfo;
+  }
+  // INPUT is a union sized by MOUSEINPUT; the trailing padding keeps this
+  // keyboard record the same size so SendInput accepts cbSize.
+  [StructLayout(LayoutKind.Sequential)]
+  private struct KeyInputRecord {
+    public uint Type;
+    public KeybdInput Key;
+    public uint Pad0, Pad1;
+  }
+  [DllImport("user32.dll", SetLastError = true, EntryPoint = "SendInput")]
+  private static extern uint SendKeyInputs(uint count, KeyInputRecord[] inputs, int size);
+  [DllImport("user32.dll", SetLastError = true, EntryPoint = "SystemParametersInfoW")]
+  private static extern bool SystemParametersInfoRect(uint action, uint param, out RECT rect, uint winIni);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+  [DllImport("user32.dll")]
+  private static extern IntPtr RealChildWindowFromPoint(IntPtr parent, ScreenPoint clientPoint);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetWindow(IntPtr window, uint command);
+  public sealed class ControlClick {
+    public int ControlId, Left, Top, Right, Bottom, ScreenX, ScreenY;
+    public int CursorBeforeX, CursorBeforeY, CursorAtX, CursorAtY;
+    public bool HitTarget;
+    public int WindowAtPointId;
+    public string WindowAtPointClass, WindowAtPointRootClass, WindowAtPointText;
+    public int WindowAtPointProcessId;
+    public int RealChildId;
+    public string RealChildClass, RealChildText;
+    public bool SameTopLevel;
+    public bool VisibleEmpty;
+    public int WorkLeft, WorkTop, WorkRight, WorkBottom;
+    public bool OutsideWorkArea;
+    public int CenterX, CenterY;
+    public bool CenterHitTarget;
+    public string WindowAtCenterClass, WindowAtCenterRootClass;
+    public bool ScanUsed;
+    public int ScannedPoints, CoveredPoints;
+    public int CoveringId, CoveringLeft, CoveringTop, CoveringRight, CoveringBottom;
+    public string CoveringClass, CoveringText;
+    public string[] Samples;
+    public string[] CoveringWindows;
+    public int[][] UncoveredRectangles;
+    public int[] ChosenUncoveredRectangle;
+    public bool NarrowUncovered;
+  }
+  public static int[][] SubtractCoveredRectangles(int[] visible, int[][] covers) {
+    var remaining = new System.Collections.ArrayList();
+    if (visible[2] > visible[0] && visible[3] > visible[1]) remaining.Add(visible);
+    foreach (int[] cover in covers) {
+      var next = new System.Collections.ArrayList();
+      foreach (int[] piece in remaining) {
+        int left = Math.Max(piece[0], cover[0]), top = Math.Max(piece[1], cover[1]);
+        int right = Math.Min(piece[2], cover[2]), bottom = Math.Min(piece[3], cover[3]);
+        if (left >= right || top >= bottom) { next.Add(piece); continue; }
+        if (piece[0] < left) next.Add(new[] { piece[0], piece[1], left, piece[3] });
+        if (right < piece[2]) next.Add(new[] { right, piece[1], piece[2], piece[3] });
+        if (piece[1] < top) next.Add(new[] { left, piece[1], right, top });
+        if (bottom < piece[3]) next.Add(new[] { left, bottom, right, piece[3] });
+      }
+      remaining = next;
+    }
+    var result = new int[remaining.Count][];
+    remaining.CopyTo(result);
+    Array.Sort(result, delegate(int[] a, int[] b) {
+      long areaA = (long)(a[2] - a[0]) * (a[3] - a[1]);
+      long areaB = (long)(b[2] - b[0]) * (b[3] - b[1]);
+      int byArea = areaB.CompareTo(areaA);
+      if (byArea != 0) return byArea;
+      int byTop = a[1].CompareTo(b[1]);
+      return byTop != 0 ? byTop : a[0].CompareTo(b[0]);
+    });
+    return result;
+  }
+  private static IntPtr ResolveChild(IntPtr dialog, ScreenPoint point) {
+    var clientPoint = point;
+    if (!ScreenToClient(dialog, ref clientPoint)) return IntPtr.Zero;
+    return RealChildWindowFromPoint(dialog, clientPoint);
+  }
+  private static bool ResolvesToControl(IntPtr target, IntPtr dialog, ScreenPoint point) {
+    IntPtr atPoint = WindowFromPoint(point);
+    if (atPoint == IntPtr.Zero || GetAncestor(atPoint, 2) != GetAncestor(target, 2)) return false;
+    var clientPoint = point;
+    if (!ScreenToClient(dialog, ref clientPoint)) return false;
+    return RealChildWindowFromPoint(dialog, clientPoint) == target;
+  }
+  private static string ClassOf(IntPtr window) {
+    if (window == IntPtr.Zero) return "";
+    var name = new StringBuilder(128);
+    GetClassName(window, name, name.Capacity);
+    return name.ToString();
+  }
+  public static int[] WindowBounds(IntPtr window) {
+    RECT rect;
+    if (window == IntPtr.Zero || !GetWindowRect(window, out rect)) return null;
+    return new[] { rect.Left, rect.Top, rect.Right, rect.Bottom };
+  }
+  public static IntPtr ControlById(IntPtr parent, int controlId) {
+    return parent == IntPtr.Zero ? IntPtr.Zero : GetDlgItem(parent, controlId);
+  }
+  public static ControlClick ClickScreenPoint(IntPtr target) {
+    RECT rect;
+    if (target == IntPtr.Zero || !GetWindowRect(target, out rect) ||
+        rect.Right <= rect.Left || rect.Bottom <= rect.Top) return null;
+    RECT work;
+    if (!SystemParametersInfoRect(0x0030, 0, out work, 0))
+      throw new InvalidOperationException(String.Format("SPI_GETWORKAREA failed: Win32Error={0}", Marshal.GetLastWin32Error()));
+    var rectCenter = new ScreenPoint { X = (rect.Left + rect.Right) / 2, Y = (rect.Top + rect.Bottom) / 2 };
+    IntPtr atRectCenter = WindowFromPoint(rectCenter);
+    // A user clicks the part of a control they can see. When the control lies
+    // inside the work area this is exactly its centre; only when it crosses the
+    // work-area edge does the point move into the visible portion. A control with
+    // no visible portion is reported as VisibleEmpty and never clicked.
+    int visibleLeft = Math.Max(rect.Left, work.Left), visibleTop = Math.Max(rect.Top, work.Top);
+    int visibleRight = Math.Min(rect.Right, work.Right), visibleBottom = Math.Min(rect.Bottom, work.Bottom);
+    var center = new ScreenPoint { X = (visibleLeft + visibleRight) / 2, Y = (visibleTop + visibleBottom) / 2 };
+    bool visibleEmpty = visibleRight <= visibleLeft || visibleBottom <= visibleTop;
+    IntPtr atPoint = visibleEmpty ? IntPtr.Zero : WindowFromPoint(center);
+    IntPtr rootAtPoint = atPoint == IntPtr.Zero ? IntPtr.Zero : GetAncestor(atPoint, 2);
+    uint ownerProcess = 0;
+    if (rootAtPoint != IntPtr.Zero) GetWindowThreadProcessId(rootAtPoint, out ownerProcess);
+    // Real mouse input skips HTTRANSPARENT children such as plain static text;
+    // cross-process WindowFromPoint does not. RealChildWindowFromPoint applies
+    // the same rule within the dialog, and the top-level check still rejects
+    // any other window (for example the taskbar) covering the point.
+    IntPtr dialog = GetAncestor(target, 1);
+    IntPtr realChild = IntPtr.Zero;
+    if (!visibleEmpty && dialog != IntPtr.Zero) {
+      var clientPoint = center;
+      if (ScreenToClient(dialog, ref clientPoint)) realChild = RealChildWindowFromPoint(dialog, clientPoint);
+    }
+    bool sameTopLevel = rootAtPoint != IntPtr.Zero && rootAtPoint == GetAncestor(target, 2);
+    var hit = new ControlClick {
+      ControlId = GetDlgCtrlID(target), Left = rect.Left, Top = rect.Top, Right = rect.Right,
+      Bottom = rect.Bottom, ScreenX = center.X, ScreenY = center.Y,
+      HitTarget = !visibleEmpty && sameTopLevel && realChild == target,
+      VisibleEmpty = visibleEmpty,
+      WindowAtPointId = atPoint == IntPtr.Zero ? 0 : GetDlgCtrlID(atPoint),
+      WindowAtPointClass = ClassOf(atPoint),
+      WindowAtPointText = atPoint == IntPtr.Zero ? "" : EditBufferText(atPoint),
+      WindowAtPointRootClass = ClassOf(rootAtPoint),
+      WindowAtPointProcessId = (int)ownerProcess,
+      RealChildId = realChild == IntPtr.Zero ? 0 : GetDlgCtrlID(realChild),
+      RealChildClass = ClassOf(realChild),
+      RealChildText = realChild == IntPtr.Zero ? "" : EditBufferText(realChild),
+      SameTopLevel = sameTopLevel,
+      WorkLeft = work.Left, WorkTop = work.Top, WorkRight = work.Right, WorkBottom = work.Bottom,
+      OutsideWorkArea = rect.Left < work.Left || rect.Top < work.Top || rect.Right > work.Right || rect.Bottom > work.Bottom,
+      CenterX = rectCenter.X, CenterY = rectCenter.Y,
+      CenterHitTarget = atRectCenter == target,
+      WindowAtCenterClass = ClassOf(atRectCenter),
+      WindowAtCenterRootClass = ClassOf(atRectCenter == IntPtr.Zero ? IntPtr.Zero : GetAncestor(atRectCenter, 2))
+    };
+    // Subtract visible siblings above the target in Z order. A narrow uncovered
+    // strip can fall between grid rows, so try the largest residual rectangle
+    // before scanning the fixed grid as a diagnostic fallback.
+    if (!hit.HitTarget && !visibleEmpty && dialog != IntPtr.Zero) {
+      IntPtr covering = realChild != IntPtr.Zero && realChild != target && realChild != dialog ? realChild : atPoint;
+      RECT coveringRect;
+      if (covering != IntPtr.Zero && GetWindowRect(covering, out coveringRect)) {
+        hit.CoveringLeft = coveringRect.Left; hit.CoveringTop = coveringRect.Top;
+        hit.CoveringRight = coveringRect.Right; hit.CoveringBottom = coveringRect.Bottom;
+      }
+      hit.CoveringId = covering == IntPtr.Zero ? 0 : GetDlgCtrlID(covering);
+      hit.CoveringClass = ClassOf(covering);
+      hit.CoveringText = covering == IntPtr.Zero ? "" : EditBufferText(covering);
+      var covers = new System.Collections.ArrayList();
+      var coveringWindows = new System.Collections.ArrayList();
+      for (IntPtr sibling = GetWindow(target, 3); sibling != IntPtr.Zero; sibling = GetWindow(sibling, 3)) {
+        RECT siblingRect;
+        if (!IsWindowVisible(sibling) || !GetWindowRect(sibling, out siblingRect)) continue;
+        int left = Math.Max(visibleLeft, siblingRect.Left), top = Math.Max(visibleTop, siblingRect.Top);
+        int right = Math.Min(visibleRight, siblingRect.Right), bottom = Math.Min(visibleBottom, siblingRect.Bottom);
+        if (left >= right || top >= bottom) continue;
+        var overlapCenter = new ScreenPoint { X = (left + right) / 2, Y = (top + bottom) / 2 };
+        if (ResolveChild(dialog, overlapCenter) != sibling) continue;
+        covers.Add(new[] { siblingRect.Left, siblingRect.Top, siblingRect.Right, siblingRect.Bottom });
+        coveringWindows.Add(String.Format("{0}|{1}|{2}|{3},{4},{5},{6}", GetDlgCtrlID(sibling),
+          ClassOf(sibling), EditBufferText(sibling), siblingRect.Left, siblingRect.Top, siblingRect.Right, siblingRect.Bottom));
+      }
+      hit.CoveringWindows = (string[])coveringWindows.ToArray(typeof(string));
+      hit.UncoveredRectangles = SubtractCoveredRectangles(new[] { visibleLeft, visibleTop, visibleRight, visibleBottom },
+        (int[][])covers.ToArray(typeof(int[])));
+      foreach (int[] piece in hit.UncoveredRectangles) {
+        var candidate = new ScreenPoint { X = (piece[0] + piece[2]) / 2, Y = (piece[1] + piece[3]) / 2 };
+        if (!ResolvesToControl(target, dialog, candidate)) continue;
+        if (piece[2] - piece[0] < 3 || piece[3] - piece[1] < 3) {
+          hit.NarrowUncovered = true;
+          continue;
+        }
+        center = candidate;
+        hit.ScreenX = candidate.X; hit.ScreenY = candidate.Y;
+        hit.HitTarget = true;
+        hit.ScanUsed = true;
+        hit.ChosenUncoveredRectangle = piece;
+        break;
+      }
+      int width = visibleRight - visibleLeft, height = visibleBottom - visibleTop;
+      var samples = new string[15];
+      for (int row = 1; row <= 3; row++) {
+        for (int column = 1; column <= 5; column++) {
+          var candidate = new ScreenPoint { X = visibleLeft + column * width / 6, Y = visibleTop + row * height / 4 };
+          IntPtr resolved = ResolveChild(dialog, candidate);
+          bool uncovered = ResolvesToControl(target, dialog, candidate);
+          if (uncovered && hit.NarrowUncovered) uncovered = false;
+          samples[hit.ScannedPoints++] = String.Format("{0},{1}|{2}|{3}|{4}|{5}", candidate.X, candidate.Y,
+            resolved == IntPtr.Zero ? 0 : GetDlgCtrlID(resolved), ClassOf(resolved), uncovered ? "control" : "covered",
+            resolved == IntPtr.Zero ? "" : EditBufferText(resolved));
+          if (!uncovered) {
+            hit.CoveredPoints++;
+          } else if (!hit.HitTarget) {
+            center = candidate;
+            hit.ScreenX = candidate.X; hit.ScreenY = candidate.Y;
+            hit.HitTarget = true;
+            hit.ScanUsed = true;
+          }
+        }
+      }
+      hit.Samples = samples;
+    }
+    if (!hit.HitTarget) return hit;
+    ScreenPoint before, at;
+    if (!GetCursorPos(out before))
+      throw new InvalidOperationException(String.Format("GetCursorPos before control click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
+    if (!SetCursorPos(center.X, center.Y))
+      throw new InvalidOperationException(String.Format("SetCursorPos for control click failed: Win32Error={0}", Marshal.GetLastWin32Error()));
+    if (!GetCursorPos(out at))
+      throw new InvalidOperationException(String.Format("GetCursorPos after control move failed: Win32Error={0}", Marshal.GetLastWin32Error()));
+    if (at.X != center.X || at.Y != center.Y)
+      throw new InvalidOperationException(String.Format("Control cursor landed at ({0},{1}), expected ({2},{3})", at.X, at.Y, center.X, center.Y));
+    hit.CursorBeforeX = before.X; hit.CursorBeforeY = before.Y;
+    hit.CursorAtX = at.X; hit.CursorAtY = at.Y;
+    var inputs = new[] {
+      new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0002 } },
+      new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0004 } }
+    };
+    uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
+    if (sent != inputs.Length)
+      throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} control mouse events: Win32Error={2}", sent, inputs.Length, Marshal.GetLastWin32Error()));
+    return hit;
+  }
+  public static int SendKeyInput(ushort virtualKey, int count) {
+    if (count <= 0) return 0;
+    var inputs = new KeyInputRecord[count * 2];
+    for (int index = 0; index < count; index++) {
+      inputs[index * 2] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = virtualKey } };
+      inputs[index * 2 + 1] = new KeyInputRecord { Type = 1, Key = new KeybdInput { VirtualKey = virtualKey, Flags = 0x0002 } };
+    }
+    uint sent = SendKeyInputs((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(KeyInputRecord)));
+    if (sent != inputs.Length)
+      throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} key events (cbSize={2}): Win32Error={3}", sent, inputs.Length, Marshal.SizeOf(typeof(KeyInputRecord)), Marshal.GetLastWin32Error()));
+    return count;
+  }
+  public static int[] VisibleChildIds(IntPtr parent, int first, int last) {
+    var buffer = new int[Math.Max(0, last - first + 1)];
+    int found = 0;
+    for (int id = first; id <= last; id++) {
+      IntPtr child = GetDlgItem(parent, id);
+      if (child != IntPtr.Zero && IsWindowVisible(child)) buffer[found++] = id;
+    }
+    var result = new int[found];
+    Array.Copy(buffer, result, found);
+    return result;
+  }
+  public static string[] VisibleStaticTexts(IntPtr parent) {
+    var buffer = new string[256];
+    int found = 0;
+    if (parent == IntPtr.Zero) return new string[0];
+    EnumChildWindows(parent, delegate(IntPtr window, IntPtr parameter) {
+      var actualClass = new StringBuilder(64);
+      GetClassName(window, actualClass, actualClass.Capacity);
+      if (String.Equals(actualClass.ToString(), "Static", StringComparison.OrdinalIgnoreCase) &&
+          IsWindowVisible(window) && found < buffer.Length) {
+        buffer[found++] = EditBufferText(window);
+      }
+      return true;
+    }, IntPtr.Zero);
+    var result = new string[found];
+    Array.Copy(buffer, result, found);
+    return result;
+  }
+  public static string WindowTextOf(IntPtr window) {
+    return window == IntPtr.Zero ? null : EditBufferText(window);
+  }
+  public static string ComboSelection(IntPtr parent, int controlId) {
+    IntPtr combo = GetDlgItem(parent, controlId);
+    if (combo == IntPtr.Zero) return null;
+    int index = (int)SendMessage(combo, 0x0147, UIntPtr.Zero, IntPtr.Zero);
+    if (index < 0) return index + "|";
+    int length = (int)SendMessage(combo, 0x0149, (UIntPtr)index, IntPtr.Zero);
+    var text = new StringBuilder(Math.Max(length, 0) + 1);
+    SendMessageText(combo, 0x0148, (UIntPtr)index, text);
+    return index + "|" + text.ToString();
+  }
 }
 "@ -ReferencedAssemblies @(
   [System.Windows.Automation.AutomationElement].Assembly.Location,
@@ -1612,6 +1921,12 @@ function Get-UiaOwnedProcessDescendants([int[]] $rootProcessIds) {
   $descendants = [Collections.Generic.List[object]]::new()
   $depthById = @{}
   foreach ($rootProcessId in $rootProcessIds) { $depthById[$rootProcessId] = 0 }
+  # A process only descends from a parent created no later than itself; this
+  # stops a reused parent PID from adopting older, unrelated processes.
+  $creationById = @{}
+  foreach ($candidate in $all) {
+    if ($known.Contains([int]$candidate.ProcessId)) { $creationById[[int]$candidate.ProcessId] = $candidate.CreationDate }
+  }
   $changed = $true
   while ($changed) {
     $changed = $false
@@ -1619,7 +1934,11 @@ function Get-UiaOwnedProcessDescendants([int[]] $rootProcessIds) {
       $processId = [int]$candidate.ProcessId
       $parentProcessId = [int]$candidate.ParentProcessId
       if ($known.Contains($processId) -or -not $known.Contains($parentProcessId)) { continue }
+      $parentCreation = $creationById[$parentProcessId]
+      if ($null -eq $parentCreation -or $null -eq $candidate.CreationDate -or
+          $candidate.CreationDate -lt $parentCreation) { continue }
       [void]$known.Add($processId)
+      $creationById[$processId] = $candidate.CreationDate
       $depthById[$processId] = $depthById[$parentProcessId] + 1
       $descendants.Add([pscustomobject]@{
         ProcessId = $processId
@@ -3657,7 +3976,8 @@ try {
   Require ($null -ne $focused) "worktree row could not retain focus against concurrent desktop focus changes; focused=$(Format-AutomationElement $focusResult.Candidate); $(Get-FocusDiagnostics $shellWindow)"
   Require ($focused.Current.AutomationId -eq $safeRowId) "focus source identity was '$($focused.Current.AutomationId)', expected '$safeRowId'"
   Require ((Get-RuntimeIdentity $focused) -eq (Get-RuntimeIdentity $safeFocusRow)) "focus runtime identity changed"
-  for ($index = 0; $index -lt 20 -and -not [GraphCodeUiaGateState]::FocusObserved; $index++) {
+  for ($index = 0; $index -lt 20 -and
+      [GraphCodeUiaGateState]::FocusSourceAutomationId -ne $safeRowId; $index++) {
     Start-Sleep -Milliseconds 50
   }
   Require ([GraphCodeUiaGateState]::FocusObserved) "FocusChanged was not delivered"
@@ -5670,6 +5990,564 @@ try {
       "$renamePropagationStubDiagnostic; stub stderr: " + (Read-UiaTextFile $renameStubErrorPath))
   }
 
+  # --- Node creation sheet (ledger row 96) -------------------------------------
+  # Same connected shell, same stub daemon. Every loop-type change and button
+  # press below is a real cursor move plus SendInput at the control's live window
+  # rectangle; combo choices are real keystrokes into the focused combo. Visible
+  # fields are measured with IsWindowVisible against the NativeForms.zig control
+  # table (field index i is control 9100+i; tiles are 9600+i), so the expected
+  # sets below are that source's updateConditionalVisibility, not a guess.
+  # No canvas geometry is used here: every click targets the modal's own child
+  # controls, so retained canvas zoom/pan cannot move these points.
+  function Read-NodeCreationStubResult {
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+      if (Test-Path -LiteralPath $renameStubResultPath) {
+        try {
+          return (Get-Content -LiteralPath $renameStubResultPath -Raw | ConvertFrom-Json -ErrorAction Stop)
+        } catch { }
+      }
+      Start-Sleep -Milliseconds 50
+    }
+    return $null
+  }
+  function Get-NodeCreationGraphCommandCount($stubResult) {
+    if ($null -eq $stubResult) { return -1 }
+    return @(@($stubResult.commands) | Where-Object { $_ -eq "graphCommand" }).Count
+  }
+  function Test-NodeCreationLogHasCreate {
+    if (-not (Test-Path -LiteralPath $renameCommandLogPath)) { return $false }
+    $logText = Read-DaemonCommandLog $renameCommandLogPath
+    return ($logText -match '"createNode"')
+  }
+  $nodeSheetTitle = "Create or edit node"
+  $nodeSheetFieldLabels = @{
+    9100 = "Name (optional)"; 9102 = "What are you checking for? (optional)"
+    9103 = "What should it do each time?"; 9104 = "First instruction"
+    9106 = "What does done look like?"; 9107 = "Done check command (optional)"
+    9108 = "Check every (seconds)"; 9109 = "Declare stalled after (seconds, optional)"
+    9110 = "Progress metric command (optional)"; 9111 = "When is the metric better?"
+    9112 = "Agent"; 9113 = "Model"; 9114 = "Branch"
+  }
+  # 9105 is a checkbox; NativeForms.zig gives checkbox fields an empty label.
+  $nodeSheetCheckboxIds = @(9105)
+  $nodeSheetOcclusions = [Collections.Generic.List[object]]::new()
+  $nodeSheetContentOcclusions = [Collections.Generic.List[object]]::new()
+  $nodeSheetCreateCentreClicks = [Collections.Generic.List[string]]::new()
+  $nodeSheetFooterClicks = [Collections.Generic.List[object]]::new()
+  $nodeSheetAlwaysVisible = @(9100, 9112, 9113, 9114)
+  $nodeSheetTypes = @(
+    [pscustomobject]@{ Tile = 2; Label = "Goal-based"; Value = "goalBased"; Extra = @(9106, 9107, 9108, 9109, 9110, 9111) },
+    [pscustomobject]@{ Tile = 3; Label = "Proactive"; Value = "proactive"; Extra = @() },
+    [pscustomobject]@{ Tile = 0; Label = "Turn-based"; Value = "turnBased"; Extra = @(9102, 9104, 9105) },
+    [pscustomobject]@{ Tile = 1; Label = "Time-based"; Value = "timeBased"; Extra = @(9103) }
+  )
+  $nodeSheetGoalReason = "Say what done looks like and use positive timing values."
+  $nodeSheetTimedReason = "Say what to do each time to continue."
+  $nodeSheetCreatedTitle = "UIA created timed loop"
+  $nodeSheetTriggerPrompt = "Summarize new commits"
+  $expectedCreateLoopType = "timeBased"
+  $expectedCreateBackend = "copilotCLI"
+  $expectedModelTier = "capable"
+
+  $nodeSheetProjects = Find-FragmentByIdWithRetry $renameRoot "projects" $rawWalker
+  Require ($null -ne $nodeSheetProjects) "connected-daemon shell omitted its Projects fragment"
+  $nodeSheetNewLoop = @(Get-DirectChildren $nodeSheetProjects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^project-new-loop-' -and $_.Current.Name -eq "New Loop"
+  }) | Select-Object -First 1
+  Require ($null -ne $nodeSheetNewLoop) `
+    ("connected-daemon project row omitted New Loop; project children: " +
+     ((@(Get-DirectChildren $nodeSheetProjects $rawWalker | ForEach-Object {
+        "$($_.Current.AutomationId)='$($_.Current.Name)'"
+      })) -join ", "))
+  Require (Ensure-ShellForeground $renameShellWindow "connected-daemon New Loop") `
+    "connected-daemon shell did not reacquire foreground before New Loop"
+  $nodeSheetNewLoop.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $nodeSheetCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $renameProcess.Id
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, $nodeSheetTitle
+    ))
+  )
+  $nodeSheet = Wait-ForDesktopElement `
+    -desktop $desktop `
+    -condition $nodeSheetCondition `
+    -label "connected-daemon New Loop node form" `
+    -diagnosticWindow $renameShellWindow `
+    -RecoverForeground
+  Require ($null -ne $nodeSheet) "connected-daemon New Loop did not open '$nodeSheetTitle'"
+  $nodeSheetWindow = [IntPtr]$nodeSheet.Current.NativeWindowHandle
+  Require ($nodeSheetWindow -ne [IntPtr]::Zero) "node creation sheet exposed no native window handle"
+
+  function Invoke-NodeSheetClick([int] $controlId, [string] $label, [switch] $allowOccludedEnter) {
+    $control = [GraphCodeUiaGateState]::ControlById($nodeSheetWindow, $controlId)
+    Require ($control -ne [IntPtr]::Zero) "node creation sheet omitted control $controlId ($label)"
+    Require (Ensure-ShellForeground $nodeSheetWindow "node creation sheet $label") `
+      "node creation sheet did not hold foreground before clicking $label"
+    $uiaBounds = [System.Windows.Automation.AutomationElement]::FromHandle($control).Current.BoundingRectangle
+    $hit = [GraphCodeUiaGateState]::ClickScreenPoint($control)
+    Require ($null -ne $hit) "node creation sheet control $controlId ($label) has no live window rectangle"
+    $dialogBounds = @([GraphCodeUiaGateState]::WindowBounds($nodeSheetWindow))
+    $controlBounds = @($hit.Left, $hit.Top, $hit.Right, $hit.Bottom)
+    $workArea = @($hit.WorkLeft, $hit.WorkTop, $hit.WorkRight, $hit.WorkBottom)
+    Require (-not $hit.VisibleEmpty) `
+      ("node creation sheet $label control [$($controlBounds -join ',')] has no visible portion inside " +
+       "work area [$($workArea -join ',')]; dialog [$($dialogBounds -join ',')]")
+    $occlusion = $null
+    if ($hit.OutsideWorkArea) {
+      $occlusion = [ordered]@{
+        controlId = $controlId
+        label = $label
+        controlBounds = $controlBounds
+        dialogBounds = $dialogBounds
+        workArea = $workArea
+        overlapPixels = [ordered]@{
+          left = [Math]::Max(0, $hit.WorkLeft - $hit.Left)
+          top = [Math]::Max(0, $hit.WorkTop - $hit.Top)
+          right = [Math]::Max(0, $hit.Right - $hit.WorkRight)
+          bottom = [Math]::Max(0, $hit.Bottom - $hit.WorkBottom)
+        }
+        dialogOverlapBottomPixels = if ($dialogBounds.Count -eq 4) { [Math]::Max(0, $dialogBounds[3] - $hit.WorkBottom) } else { $null }
+        rectCenter = @($hit.CenterX, $hit.CenterY)
+        rectCenterHitsControl = $hit.CenterHitTarget
+        rectCenterWindowClass = $hit.WindowAtCenterClass
+        rectCenterRootClass = $hit.WindowAtCenterRootClass
+        candidatePoint = @($hit.ScreenX, $hit.ScreenY)
+      }
+      $nodeSheetOcclusions.Add($occlusion)
+      Write-Host ("UIA_NODE_CREATION_OCCLUSION " + ($occlusion | ConvertTo-Json -Depth 4 -Compress))
+    }
+    $contentOcclusion = $null
+    if ($hit.ScannedPoints -gt 0) {
+      $contentOcclusion = [ordered]@{
+        controlId = $controlId
+        label = $label
+        controlBounds = $controlBounds
+        dialogBounds = $dialogBounds
+        centreResolvedTo = [ordered]@{
+          id = $hit.RealChildId; class = $hit.RealChildClass; text = $hit.RealChildText
+        }
+        covering = [ordered]@{
+          id = $hit.CoveringId; class = $hit.CoveringClass; text = $hit.CoveringText
+          bounds = @($hit.CoveringLeft, $hit.CoveringTop, $hit.CoveringRight, $hit.CoveringBottom)
+        }
+        coveringSiblings = @($hit.CoveringWindows)
+        uncoveredRectangles = @($hit.UncoveredRectangles | ForEach-Object { ,@($_) })
+        chosenUncoveredRectangle = if ($hit.ChosenUncoveredRectangle) { @($hit.ChosenUncoveredRectangle) } else { $null }
+        sampledPoints = $hit.ScannedPoints
+        coveredPoints = $hit.CoveredPoints
+        coveredFraction = [Math]::Round($hit.CoveredPoints / [double]$hit.ScannedPoints, 3)
+        samples = @($hit.Samples | ForEach-Object {
+          $parts = ([string]$_).Split([char[]]'|', 5)
+          [ordered]@{ point = $parts[0]; id = [int]$parts[1]; class = $parts[2]; result = $parts[3]; text = $parts[4] }
+        })
+        clickedPoint = if ($hit.HitTarget) { @($hit.ScreenX, $hit.ScreenY) } else { $null }
+      }
+      $nodeSheetContentOcclusions.Add($contentOcclusion)
+      Write-Host ("UIA_NODE_CREATION_CONTENT_OCCLUSION " + ($contentOcclusion | ConvertTo-Json -Depth 5 -Compress))
+    } elseif ($controlId -eq 1 -and $hit.HitTarget) {
+      $nodeSheetCreateCentreClicks.Add($label)
+    }
+    $mouseSubmitUnavailable = $false
+    $method = "mouse"
+    if ($allowOccludedEnter -and -not $hit.HitTarget -and $hit.ScannedPoints -gt 0 -and
+        $hit.CoveredPoints -eq $hit.ScannedPoints -and @($hit.CoveringWindows).Count -gt 0) {
+      Require ([GraphCodeUiaGateState]::WindowIsVisible($nodeSheetWindow) -and
+        [GraphCodeUiaGateState]::WindowTextOf($nodeSheetWindow) -eq $nodeSheetTitle) `
+        "node creation sheet $label disappeared before occluded keyboard submit"
+      Require ([GraphCodeUiaGateState]::IsForegroundWindow($nodeSheetWindow)) `
+        "node creation sheet $label did not hold foreground for occluded keyboard submit"
+      $goalEdit = [GraphCodeUiaGateState]::ControlById($nodeSheetWindow, 9106)
+      Require ($goalEdit -ne [IntPtr]::Zero -and
+        [GraphCodeUiaGateState]::FocusControl($nodeSheetWindow, $goalEdit)) `
+        "node creation sheet $label could not focus the Goal field before Enter"
+      Require ([GraphCodeUiaGateState]::SendKeyInput(0x0D, 1) -eq 1) `
+        "node creation sheet $label could not send a native Enter key"
+      $method = "keyboardEnter"
+      $mouseSubmitUnavailable = $true
+    } else {
+      Require (-not $hit.NarrowUncovered -or $hit.HitTarget) `
+        ("node creation sheet $label has only a sub-3px verified uncovered strip: " +
+         "$(@($hit.UncoveredRectangles | ForEach-Object { '[' + ($_ -join ',') + ']' }) -join '; ')")
+      Require $hit.HitTarget `
+        ("node creation sheet $label has no verified uncovered point in [$($controlBounds -join ',')]: " +
+         "$($hit.CoveredPoints)/$($hit.ScannedPoints) sampled points covered by control $($hit.CoveringId) " +
+         "class '$($hit.CoveringClass)' text '$($hit.CoveringText)' at " +
+         "[$($hit.CoveringLeft),$($hit.CoveringTop),$($hit.CoveringRight),$($hit.CoveringBottom)]; " +
+         "remaining $(@($hit.UncoveredRectangles | ForEach-Object { '[' + ($_ -join ',') + ']' }) -join '; ')")
+    }
+    if ($controlId -eq 1) {
+      $footerClick = [ordered]@{
+        label = $label
+        method = $method
+        mouseSubmitUnavailable = $mouseSubmitUnavailable
+        point = if ($method -eq "mouse") { @($hit.ScreenX, $hit.ScreenY) } else { $null }
+        unavailableMousePoint = if ($mouseSubmitUnavailable) { @($hit.ScreenX, $hit.ScreenY) } else { $null }
+        contentOccluded = ($hit.ScannedPoints -gt 0)
+        outsideWorkArea = $hit.OutsideWorkArea
+        chosenUncoveredRectangle = if ($hit.ChosenUncoveredRectangle) { @($hit.ChosenUncoveredRectangle) } else { $null }
+        exactControlHit = $hit.HitTarget
+      }
+      $nodeSheetFooterClicks.Add($footerClick)
+      Write-Host ("UIA_NODE_CREATION_FOOTER_CLICK " + ($footerClick | ConvertTo-Json -Depth 3 -Compress))
+    }
+    Require ($hit.HitTarget -or $mouseSubmitUnavailable) `
+      ("node creation sheet $label point ($($hit.ScreenX),$($hit.ScreenY)) inside " +
+       "[$($controlBounds -join ',')] resolved to child $($hit.RealChildId) class '$($hit.RealChildClass)' " +
+       "text '$($hit.RealChildText)' (sameTopLevel=$($hit.SameTopLevel)), not $controlId; WindowFromPoint " +
+       "control $($hit.WindowAtPointId) class '$($hit.WindowAtPointClass)' text '$($hit.WindowAtPointText)' " +
+       "root '$($hit.WindowAtPointRootClass)' pid $($hit.WindowAtPointProcessId); " +
+       "work area [$($workArea -join ',')], dialog [$($dialogBounds -join ',')]")
+    return [ordered]@{
+      label = $label
+      controlId = $controlId
+      text = [GraphCodeUiaGateState]::WindowTextOf($control)
+      bounds = $controlBounds
+      uiaBounds = @([int]$uiaBounds.Left, [int]$uiaBounds.Top, [int]$uiaBounds.Right, [int]$uiaBounds.Bottom)
+      point = if ($method -eq "mouse") { @($hit.ScreenX, $hit.ScreenY) } else { $null }
+      outsideWorkArea = $hit.OutsideWorkArea
+      scanUsed = $hit.ScanUsed
+      method = $method
+      mouseSubmitUnavailable = $mouseSubmitUnavailable
+      hitTest = [ordered]@{
+        realChildId = $hit.RealChildId
+        windowFromPointId = $hit.WindowAtPointId
+        windowFromPointClass = $hit.WindowAtPointClass
+        windowFromPointText = $hit.WindowAtPointText
+      }
+      cursorBefore = @($hit.CursorBeforeX, $hit.CursorBeforeY)
+      cursorAt = @($hit.CursorAtX, $hit.CursorAtY)
+    }
+  }
+  function Wait-NodeSheetVisibleIds([int[]] $expected) {
+    $observed = @()
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+      $observed = @([GraphCodeUiaGateState]::VisibleChildIds($nodeSheetWindow, 9100, 9119))
+      if ((($observed | Sort-Object) -join ",") -eq (($expected | Sort-Object) -join ",")) { break }
+      Start-Sleep -Milliseconds 50
+    }
+    return $observed
+  }
+  function Wait-NodeSheetStatic([string] $text) {
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+      if (@([GraphCodeUiaGateState]::VisibleStaticTexts($nodeSheetWindow)) -contains $text) { return $true }
+      Start-Sleep -Milliseconds 50
+    }
+    return $false
+  }
+  function Get-NodeSheetRecap {
+    return [string](@([GraphCodeUiaGateState]::VisibleStaticTexts($nodeSheetWindow) | Where-Object {
+      $_ -like "Recap:*"
+    }) | Select-Object -First 1)
+  }
+  function Assert-NodeSheetRejected([string] $loopType, [string] $reason, [int] $graphCommandsBefore) {
+    $logBefore = if (Test-Path -LiteralPath $renameCommandLogPath) { Read-DaemonCommandLog $renameCommandLogPath } else { "" }
+    $click = Invoke-NodeSheetClick 1 "Create ($loopType, invalid)" -allowOccludedEnter:($loopType -eq "goalBased")
+    $reasonShown = Wait-NodeSheetStatic $reason
+    Start-Sleep -Milliseconds 300
+    $nativeVisible = [GraphCodeUiaGateState]::WindowIsVisible($nodeSheetWindow)
+    $nativeTitle = [GraphCodeUiaGateState]::WindowTextOf($nodeSheetWindow)
+    $stillOpen = $nativeVisible -and $nativeTitle -eq $nodeSheetTitle
+    $uiaDialogPresent = $false
+    $uiaRecoveredAtAttempt = $null
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+      if ($null -ne $desktop.FindFirst([System.Windows.Automation.TreeScope]::Children, $nodeSheetCondition)) {
+        $uiaDialogPresent = $true
+        $uiaRecoveredAtAttempt = $attempt
+        break
+      }
+      if ($attempt -lt 10) { Start-Sleep -Milliseconds 100 }
+    }
+    Write-Host ("UIA_NODE_CREATION_INVALID_WINDOW loopType=$loopType nativeVisible=$nativeVisible " +
+      "nativeTitle='$nativeTitle' uiaDialogPresent=$uiaDialogPresent " +
+      "uiaRecoveredAtAttempt=$uiaRecoveredAtAttempt reasonShown=$reasonShown")
+    $logAfter = if (Test-Path -LiteralPath $renameCommandLogPath) { Read-DaemonCommandLog $renameCommandLogPath } else { "" }
+    $stubAfter = Read-NodeCreationStubResult
+    $graphCommandsAfter = Get-NodeCreationGraphCommandCount $stubAfter
+    $visibleTexts = @([GraphCodeUiaGateState]::VisibleStaticTexts($nodeSheetWindow))
+    Require $reasonShown `
+      ("node creation sheet $loopType Create did not show '$reason'; visible text: " + ($visibleTexts -join " | "))
+    Require $stillOpen `
+      ("node creation sheet closed after invalid $loopType Create: nativeVisible=$nativeVisible " +
+       "nativeTitle='$nativeTitle' uiaDialogPresent=$uiaDialogPresent")
+    Require (-not ($logAfter -match '"createNode"')) "invalid $loopType Create dispatched a createNode command: $logAfter"
+    Require (($graphCommandsBefore -ge 0) -and ($graphCommandsAfter -eq $graphCommandsBefore)) `
+      "invalid $loopType Create reached the daemon: graphCommand count $graphCommandsBefore -> $graphCommandsAfter"
+    Require (@($stubAfter.appliedCreates).Count -eq 0) "invalid $loopType Create was applied by the daemon"
+    return [ordered]@{
+      loopType = $loopType
+      reason = $reason
+      reasonShown = $reasonShown
+      dialogOpen = $stillOpen
+      uiaDialogPresent = $uiaDialogPresent
+      uiaRecoveredAtAttempt = $uiaRecoveredAtAttempt
+      commandLogUnchanged = ($logAfter -ceq $logBefore)
+      createNodeDispatched = [bool]($logAfter -match '"createNode"')
+      daemonCommandCountUnchanged = ($graphCommandsAfter -eq $graphCommandsBefore)
+      daemonGraphCommands = $graphCommandsAfter
+      click = $click
+    }
+  }
+
+  $nodeSheetTileClicks = [Collections.Generic.List[object]]::new()
+  $nodeSheetConditional = [ordered]@{}
+  $nodeSheetInvalid = [Collections.Generic.List[object]]::new()
+  $nodeSheetReasonCleared = $null
+  $nodeSheetRecapAfterTile = $null
+  $nodeSheetStubBefore = Read-NodeCreationStubResult
+  $nodeSheetGraphCommandsBefore = Get-NodeCreationGraphCommandCount $nodeSheetStubBefore
+  Require ($nodeSheetGraphCommandsBefore -ge 0) "stub daemon result was unreadable before node creation"
+  foreach ($loopTypeCase in $nodeSheetTypes) {
+    $tileIndex = $loopTypeCase.Tile
+    $tileClick = Invoke-NodeSheetClick (9600 + $tileIndex) "$($loopTypeCase.Label) tile"
+    Require ($tileClick.text -eq $loopTypeCase.Label) `
+      "tile $(9600 + $tileIndex) reads '$($tileClick.text)', expected '$($loopTypeCase.Label)'"
+    $expectedIds = @($nodeSheetAlwaysVisible + $loopTypeCase.Extra | Sort-Object)
+    $visibleIds = @(Wait-NodeSheetVisibleIds $expectedIds | Sort-Object)
+    $visibleTexts = @([GraphCodeUiaGateState]::VisibleStaticTexts($nodeSheetWindow))
+    $visibleLabels = @($nodeSheetFieldLabels.Keys | Sort-Object | Where-Object { $visibleTexts -contains $nodeSheetFieldLabels[$_] } |
+      ForEach-Object { $nodeSheetFieldLabels[$_] })
+    $expectedLabels = @($nodeSheetFieldLabels.Keys | Sort-Object | Where-Object { $expectedIds -contains $_ } |
+      ForEach-Object { $nodeSheetFieldLabels[$_] })
+    $expectedLabelIds = @($expectedIds | Where-Object { $nodeSheetCheckboxIds -notcontains $_ })
+    $blankExpectedLabels = @($expectedLabels | Where-Object { [string]::IsNullOrWhiteSpace([string]$_) })
+    Require ($expectedLabels.Count -gt 0 -and $expectedLabels.Count -eq $expectedLabelIds.Count -and
+      $blankExpectedLabels.Count -eq 0) `
+      ("node creation sheet $($loopTypeCase.Value) expected label list is empty or blank: " +
+       "$($expectedLabels.Count) labels for ids $($expectedLabelIds -join ','), blank=$($blankExpectedLabels.Count)")
+    Write-Host ("UIA_NODE_CREATION_FIELDS type=$($loopTypeCase.Value) tile=$(9600 + $tileIndex) " +
+      "point=$($tileClick.point -join ',') visible=$($visibleIds -join ',') expected=$($expectedIds -join ',') " +
+      "labels='$($visibleLabels -join '; ')'")
+    Require (($visibleIds -join ",") -eq ($expectedIds -join ",")) `
+      ("node creation sheet $($loopTypeCase.Value) visible fields mismatch: expected " +
+       ($expectedIds -join ",") + " observed " + ($visibleIds -join ","))
+    Require (($visibleLabels -join "|") -eq ($expectedLabels -join "|")) `
+      ("node creation sheet $($loopTypeCase.Value) visible labels mismatch: expected '" +
+       ($expectedLabels -join "; ") + "' observed '" + ($visibleLabels -join "; ") + "'")
+    $tileClick.loopType = $loopTypeCase.Value
+    $nodeSheetTileClicks.Add($tileClick)
+    $nodeSheetConditional[$loopTypeCase.Value] = [ordered]@{
+      visibleIds = $visibleIds
+      visibleLabels = $visibleLabels
+    }
+    switch ($loopTypeCase.Value) {
+      "goalBased" {
+        Require ([GraphCodeUiaGateState]::SetEditTextById($nodeSheetWindow, 9106, "")) `
+          "node creation sheet omitted its goal summary edit (9106)"
+        Require ([GraphCodeUiaGateState]::SetEditTextById($nodeSheetWindow, 9108, "60")) `
+          "node creation sheet omitted its goal poll edit (9108)"
+        Require ([GraphCodeUiaGateState]::SetEditTextById($nodeSheetWindow, 9109, "")) `
+          "node creation sheet omitted its stall edit (9109)"
+        $nodeSheetInvalid.Add((Assert-NodeSheetRejected "goalBased" $nodeSheetGoalReason $nodeSheetGraphCommandsBefore))
+      }
+      "proactive" {
+        $nodeSheetReasonCleared = -not (@([GraphCodeUiaGateState]::VisibleStaticTexts($nodeSheetWindow)) -contains $nodeSheetGoalReason)
+        Require $nodeSheetReasonCleared "changing the loop type left the stale goal validation reason visible"
+      }
+      "timeBased" {
+        $nodeSheetRecapAfterTile = Get-NodeSheetRecap
+        Require ([GraphCodeUiaGateState]::SetEditTextById($nodeSheetWindow, 9103, "")) `
+          "node creation sheet omitted its time-based prompt edit (9103)"
+        $nodeSheetInvalid.Add((Assert-NodeSheetRejected "timeBased" $nodeSheetTimedReason $nodeSheetGraphCommandsBefore))
+      }
+    }
+  }
+
+  Require ([GraphCodeUiaGateState]::SetEditTextById($nodeSheetWindow, 9100, $nodeSheetCreatedTitle)) `
+    "node creation sheet omitted its Name edit (9100)"
+  Require ([GraphCodeUiaGateState]::SetEditTextById($nodeSheetWindow, 9103, $nodeSheetTriggerPrompt)) `
+    "node creation sheet omitted its time-based prompt edit (9103)"
+  Require ([GraphCodeUiaGateState]::EditTextById($nodeSheetWindow, 9100) -eq $nodeSheetCreatedTitle) `
+    "node creation sheet Name did not retain the typed title"
+  Require ([GraphCodeUiaGateState]::EditTextById($nodeSheetWindow, 9103) -eq $nodeSheetTriggerPrompt) `
+    "node creation sheet prompt did not retain the typed prompt"
+  $nodeSheetRecapAfterEdit = Get-NodeSheetRecap
+  $nodeSheetCombos = [ordered]@{}
+  foreach ($comboCase in @(
+      [pscustomobject]@{ Id = 9112; Name = "agent"; Index = 2; Text = "GitHub Copilot CLI" },
+      [pscustomobject]@{ Id = 9113; Name = "model"; Index = 3; Text = "Capable" })) {
+    $combo = [GraphCodeUiaGateState]::ControlById($nodeSheetWindow, $comboCase.Id)
+    Require ($combo -ne [IntPtr]::Zero) "node creation sheet omitted its $($comboCase.Name) picker ($($comboCase.Id))"
+    $before = [GraphCodeUiaGateState]::ComboSelection($nodeSheetWindow, $comboCase.Id)
+    $currentIndex = [int]($before.Split("|")[0])
+    Require (Ensure-ShellForeground $nodeSheetWindow "node creation sheet $($comboCase.Name) picker") `
+      "node creation sheet did not hold foreground before the $($comboCase.Name) picker"
+    Require ([GraphCodeUiaGateState]::FocusControl($nodeSheetWindow, $combo)) `
+      "node creation sheet $($comboCase.Name) picker could not take keyboard focus"
+    $delta = $comboCase.Index - $currentIndex
+    $keys = 0
+    if ($delta -ne 0) {
+      $keys = [GraphCodeUiaGateState]::SendKeyInput([uint16]$(if ($delta -gt 0) { 0x28 } else { 0x26 }), [Math]::Abs($delta))
+    }
+    $after = $before
+    for ($attempt = 0; $attempt -lt 40 -and $after -ne "$($comboCase.Index)|$($comboCase.Text)"; $attempt++) {
+      Start-Sleep -Milliseconds 50
+      $after = [GraphCodeUiaGateState]::ComboSelection($nodeSheetWindow, $comboCase.Id)
+    }
+    Require ($after -eq "$($comboCase.Index)|$($comboCase.Text)") `
+      "node creation sheet $($comboCase.Name) picker reads '$after' after $keys keystrokes, expected '$($comboCase.Index)|$($comboCase.Text)'"
+    $nodeSheetCombos[$comboCase.Name] = [ordered]@{ before = $before; after = $after; keystrokes = $keys }
+  }
+  $nodeSheetBranch = [GraphCodeUiaGateState]::ComboSelection($nodeSheetWindow, 9114)
+  Require ($nodeSheetBranch -eq "0|This folder") `
+    "node creation sheet Branch picker reads '$nodeSheetBranch', expected '0|This folder'"
+  Write-Host ("UIA_NODE_CREATION_RECAP afterTileClick='$nodeSheetRecapAfterTile' afterEdit='$nodeSheetRecapAfterEdit'")
+
+  $nodeSheetSubmitClick = Invoke-NodeSheetClick 1 "Create (valid)"
+  $nodeSheetClosed = $false
+  for ($attempt = 0; $attempt -lt 100; $attempt++) {
+    if (-not [GraphCodeUiaGateState]::WindowIsVisible($nodeSheetWindow) -or
+        [GraphCodeUiaGateState]::WindowTextOf($nodeSheetWindow) -ne $nodeSheetTitle) {
+      $nodeSheetClosed = $true
+      break
+    }
+    Start-Sleep -Milliseconds 50
+  }
+  Require $nodeSheetClosed `
+    ("node creation sheet stayed natively visible after a valid Create: title='" +
+     ([GraphCodeUiaGateState]::WindowTextOf($nodeSheetWindow)) + "'; visible text: " +
+     (@([GraphCodeUiaGateState]::VisibleStaticTexts($nodeSheetWindow)) -join " | "))
+
+  $nodeSheetDispatchedCommand = $null
+  for ($index = 0; $index -lt 100 -and $null -eq $nodeSheetDispatchedCommand; $index++) {
+    if (Test-NodeCreationLogHasCreate) {
+      $nodeSheetDispatchedCommand = ConvertFrom-Json -InputObject (Read-DaemonCommandLog $renameCommandLogPath)
+    } else {
+      Start-Sleep -Milliseconds 50
+    }
+  }
+  $nodeSheetStubAfter = $null
+  $nodeSheetAppliedCreate = $null
+  for ($index = 0; $index -lt 100 -and $null -eq $nodeSheetAppliedCreate; $index++) {
+    $nodeSheetStubAfter = Read-NodeCreationStubResult
+    $nodeSheetAppliedCreate = @(@($nodeSheetStubAfter.appliedCreates) | Where-Object {
+      ([string]$_).Split("|")[1] -eq $nodeSheetCreatedTitle
+    }) | Select-Object -First 1
+    if ($null -eq $nodeSheetAppliedCreate) { Start-Sleep -Milliseconds 100 }
+  }
+  Require ($null -ne $nodeSheetAppliedCreate) `
+    ("stub daemon never received and applied the created node '$nodeSheetCreatedTitle'; command log createNode=" +
+     "$($null -ne $nodeSheetDispatchedCommand); stub result: " + (Read-UiaTextFile $renameStubResultPath) +
+     "; stub stderr: " + (Read-UiaTextFile $renameStubErrorPath))
+  $appliedParts = ([string]$nodeSheetAppliedCreate).Split("|")
+  $createdNodeId = $appliedParts[0]
+  $createdPosition = [array]::IndexOf(@($nodeSheetStubAfter.appliedCreates), [string]$nodeSheetAppliedCreate)
+  $createdRequestId = [string](@($nodeSheetStubAfter.appliedCreateRequests)[$createdPosition])
+  $createdRequestAnswered = (-not [string]::IsNullOrEmpty($createdRequestId)) -and
+    -not (@($nodeSheetStubAfter.unansweredRequests) -contains $createdRequestId)
+  Write-Host ("UIA_NODE_CREATION_DISPATCH nodeId=$createdNodeId title='$($appliedParts[1])' " +
+    "loopType=$($appliedParts[2]) backend=$($appliedParts[3]) modelTier=$($appliedParts[4]) " +
+    "triggerPrompt='$($appliedParts[5])' requestID=$createdRequestId answered=$createdRequestAnswered " +
+    "commandLogCreateNode=$($null -ne $nodeSheetDispatchedCommand)")
+  Require ($createdNodeId -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') `
+    "node creation dispatched a non-UUID node id '$createdNodeId'"
+  Require ($appliedParts[2] -eq $expectedCreateLoopType) `
+    "node creation dispatched loopType '$($appliedParts[2])', expected '$expectedCreateLoopType'"
+  Require ($appliedParts[3] -eq $expectedCreateBackend) `
+    "node creation dispatched backend '$($appliedParts[3])', expected '$expectedCreateBackend'"
+  Require ($appliedParts[4] -eq $expectedModelTier) `
+    "node creation dispatched modelTier '$($appliedParts[4])', expected '$expectedModelTier'"
+  Require ($appliedParts[5] -eq $nodeSheetTriggerPrompt) `
+    "node creation dispatched triggerPrompt '$($appliedParts[5])', expected '$nodeSheetTriggerPrompt'"
+  Require $createdRequestAnswered `
+    "stub daemon did not answer the createNode request '$createdRequestId'"
+  $nodeSheetDispatched = $null
+  if ($null -ne $nodeSheetDispatchedCommand) {
+    $wireNode = $nodeSheetDispatchedCommand.graphCommand.command.createNode._0
+    Require ([string]$wireNode.id -eq $createdNodeId) `
+      "command log createNode id '$($wireNode.id)' differs from the daemon-applied id '$createdNodeId'"
+    $nodeSheetDispatched = [ordered]@{
+      nodeId = [string]$wireNode.id
+      projectPath = [string]$nodeSheetDispatchedCommand.graphCommand.projectPath
+      title = [string]$wireNode.title
+      loopType = [string]$wireNode.loopType
+      triggerPrompt = [string]$wireNode.triggerPrompt
+      backend = [string]$wireNode.backend
+      modelTier = [string]$wireNode.modelTier
+    }
+  }
+
+  $renderedSidebar = @()
+  $renderedCards = @()
+  for ($index = 0; $index -lt 200; $index++) {
+    $createdLoops = Find-FragmentById $renameRoot "loops" $rawWalker
+    $createdGraph = Find-FragmentById $renameRoot "graph" $rawWalker
+    $renderedSidebar = @(if ($null -ne $createdLoops) {
+      Get-DirectChildren $createdLoops $rawWalker | Where-Object {
+        $_.Current.AutomationId -match '^loop-row-' -and $_.Current.Name -eq $nodeSheetCreatedTitle
+      }
+    })
+    $renderedCards = @(if ($null -ne $createdGraph) {
+      Get-DirectChildren $createdGraph $rawWalker | Where-Object {
+        $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -eq $nodeSheetCreatedTitle
+      }
+    })
+    if ($renderedSidebar.Count -gt 0 -and $renderedCards.Count -gt 0) { break }
+    Start-Sleep -Milliseconds 100
+  }
+  $renderedSidebarCount = $renderedSidebar.Count
+  $renderedCardCount = $renderedCards.Count
+  $renderedSidebarIdentity = if ($renderedSidebarCount -gt 0) { $renderedSidebar[0].Current.AutomationId } else { "" }
+  $renderedCardIdentity = if ($renderedCardCount -gt 0) { $renderedCards[0].Current.AutomationId } else { "" }
+  Write-Host ("UIA_NODE_CREATION_RENDERED title='$nodeSheetCreatedTitle' sidebarRows=$renderedSidebarCount " +
+    "sidebarIdentity=$renderedSidebarIdentity graphCards=$renderedCardCount graphIdentity=$renderedCardIdentity")
+  $renderedDiagnostic = "stub result: " + (Read-UiaTextFile $renameStubResultPath) +
+    "; stub stderr: " + (Read-UiaTextFile $renameStubErrorPath)
+  Require ($renderedSidebarCount -gt 0) `
+    "created node '$nodeSheetCreatedTitle' never rendered as a sidebar loop row; $renderedDiagnostic"
+  Require ($renderedCardCount -gt 0) `
+    "created node '$nodeSheetCreatedTitle' never rendered as a graph card; $renderedDiagnostic"
+
+  $nodeCreationSheetEvidence = [ordered]@{
+    formTitle = $nodeSheetTitle
+    tileClicks = @($nodeSheetTileClicks)
+    conditionalFields = $nodeSheetConditional
+    recap = [ordered]@{
+      afterTileClick = $nodeSheetRecapAfterTile
+      afterEdit = $nodeSheetRecapAfterEdit
+    }
+    invalid = @($nodeSheetInvalid)
+    reasonClearedOnTypeChange = $nodeSheetReasonCleared
+    pickers = $nodeSheetCombos
+    submitted = [ordered]@{
+      title = $nodeSheetCreatedTitle
+      loopType = $expectedCreateLoopType
+      triggerPrompt = $nodeSheetTriggerPrompt
+      backend = $expectedCreateBackend
+      modelTier = $expectedModelTier
+      branch = $nodeSheetBranch
+      click = $nodeSheetSubmitClick
+    }
+    dispatched = $nodeSheetDispatched
+    daemon = [ordered]@{
+      requestId = $createdRequestId
+      requestAnswered = $createdRequestAnswered
+      appliedCreate = [string]$nodeSheetAppliedCreate
+      graphCommandsBefore = $nodeSheetGraphCommandsBefore
+      graphCommandsAfter = Get-NodeCreationGraphCommandCount $nodeSheetStubAfter
+    }
+    rendered = [ordered]@{
+      sidebarCount = $renderedSidebarCount
+      sidebarIdentity = $renderedSidebarIdentity
+      sidebarName = if ($renderedSidebarCount -gt 0) { $renderedSidebar[0].Current.Name } else { "" }
+      graphCardCount = $renderedCardCount
+      graphCardIdentity = $renderedCardIdentity
+      graphCardName = if ($renderedCardCount -gt 0) { $renderedCards[0].Current.Name } else { "" }
+    }
+    footerOccludedByTaskbar = [ordered]@{
+      occluded = ($nodeSheetOcclusions.Count -gt 0)
+      controls = @($nodeSheetOcclusions)
+    }
+    footerOccludedByContent = [ordered]@{
+      occluded = ($nodeSheetContentOcclusions.Count -gt 0)
+      controls = @($nodeSheetContentOcclusions)
+      createCentreClicks = @($nodeSheetCreateCentreClicks)
+      createClicks = @($nodeSheetFooterClicks)
+    }
+  }
+  Write-Host ("UIA_NODE_CREATION_SHEET_EVIDENCE=" + ($nodeCreationSheetEvidence | ConvertTo-Json -Compress -Depth 8))
+
   Require ([GraphCodeUiaGateState]::PostCommand($renameShellWindow, 0x5002)) `
     "connected-daemon shell rejected the tray Exit command"
   Require $renameProcess.WaitForExit(5000) "connected-daemon shell did not exit"
@@ -5758,6 +6636,7 @@ try {
     providerTeardownSafe = $retainedProviderSafe
     connectionFailureBanner = $connectionFailureBannerEvidence
     canvasContextMenu = $canvasContextMenuEvidence
+    nodeCreationSheet = $nodeCreationSheetEvidence
     contextMenuItemCount = $projectMenuItems.Count
     contextMenuMoveProjectText = $moveProjectItem.Text
     contextMenuMoveProjectEnabled = $moveProjectItem.Enabled

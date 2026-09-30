@@ -1179,6 +1179,21 @@ Start-Sleep -Seconds 60
     }
     Remove-Item -LiteralPath $treeFixturePath -Force -ErrorAction SilentlyContinue
   }
+  $pidReuseAdopted = & {
+    $rootCreated = [datetime]"2026-01-01T12:00:00"
+    function Get-CimInstance {
+      @(
+        [pscustomobject]@{ ProcessId = 624; ParentProcessId = 7416; Name = "conhost.exe"; ExecutablePath = ""; CreationDate = $rootCreated }
+        [pscustomobject]@{ ProcessId = 700; ParentProcessId = 624; Name = "child.exe"; ExecutablePath = ""; CreationDate = $rootCreated.AddSeconds(5) }
+        [pscustomobject]@{ ProcessId = 636; ParentProcessId = 624; Name = "csrss.exe"; ExecutablePath = ""; CreationDate = $rootCreated.AddHours(-3) }
+        [pscustomobject]@{ ProcessId = 732; ParentProcessId = 636; Name = "wininit.exe"; ExecutablePath = ""; CreationDate = $rootCreated.AddHours(-2) }
+      )
+    }
+    @(Get-UiaOwnedProcessDescendants @(624) | ForEach-Object { $_.Name })
+  }
+  if (($pidReuseAdopted -join ",") -ne "child.exe") {
+    throw "RED: UIA owned-process traversal adopts processes older than a reused parent PID: $($pidReuseAdopted -join ',')"
+  }
   if ($uiaLiveGateSource -notmatch 'UIA_ROOT_ACCESS' -or
       $uiaLiveGateSource -notmatch 'UIA_UPDATE_DIALOG_DIAGNOSTICS' -or
       $uiaLiveGateSource -notmatch 'maxSandboxRootUtf16' -or
@@ -1368,6 +1383,139 @@ Start-Sleep -Seconds 60
   }
   if ($uiaLiveGateSource -notmatch '(?s)canvasContextMenu = \$canvasContextMenuEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
     throw "RED: UIA final summary loses nested canvas menu items and edge action measurements"
+  }
+  if ($stubDaemonSource -notmatch '\$frame\.command\.graphCommand\.command\.createNode\._0' -or
+      $stubDaemonSource -notmatch 'appliedCreates' -or
+      $stubDaemonSource -notmatch '\$nodeLoopTypes\[\$id\]' -or
+      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied\)') {
+    throw "RED: stub daemon cannot apply exactly the createNode it received and republish the created loop type"
+  }
+  if ($uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_SHEET_EVIDENCE' -or
+      $uiaLiveGateSource -notmatch '\$nodeCreationSheetEvidence = \[ordered\]@\{' -or
+      $uiaLiveGateSource -notmatch 'ClickScreenPoint' -or
+      $uiaLiveGateSource -notmatch 'VisibleChildIds\(' -or
+      $uiaLiveGateSource -notmatch '9600 \+ \$tileIndex' -or
+      $uiaLiveGateSource -notmatch 'Say what done looks like and use positive timing values\.' -or
+      $uiaLiveGateSource -notmatch 'Say what to do each time to continue\.' -or
+      $uiaLiveGateSource -notmatch 'commandLogUnchanged = ' -or
+      $uiaLiveGateSource -notmatch 'reasonClearedOnTypeChange = ' -or
+      $uiaLiveGateSource -notmatch 'SendKeyInput\(' -or
+      $uiaLiveGateSource -notmatch 'ComboSelection\(' -or
+      $uiaLiveGateSource -notmatch 'graphCommand\.command\.createNode\._0' -or
+      $uiaLiveGateSource -notmatch 'node creation dispatched modelTier' -or
+      $uiaLiveGateSource -notmatch 'appliedCreates' -or
+      $uiaLiveGateSource -notmatch 'afterTileClick = ' -or
+      $uiaLiveGateSource -notmatch 'afterEdit = ' -or
+      $uiaLiveGateSource -notmatch 'renderedSidebarCount -gt 0' -or
+      $uiaLiveGateSource -notmatch 'renderedCardCount -gt 0') {
+    throw "RED: UIA live gate does not drive the node creation sheet through conditional fields, rejected input, and a daemon-rendered create"
+  }
+  if ($uiaLiveGateSource -notmatch '(?s)nodeCreationSheet = \$nodeCreationSheetEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
+    throw "RED: UIA final summary omits the parsable node creation sheet evidence"
+  }
+  $nativeFormsSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\NativeForms.zig") -Raw
+  if ($nativeFormsSource -notmatch '(?s)const node_labels = \[_\]\[\]const u8\{(.*?)\};') {
+    throw "RED: NativeForms.zig node_labels table not found for node creation sheet label contract"
+  }
+  $nativeNodeLabels = @([regex]::Matches($Matches[1], '"((?:[^"\\]|\\.)*)"') | ForEach-Object { $_.Groups[1].Value })
+  $gateAst = [System.Management.Automation.Language.Parser]::ParseInput($uiaLiveGateSource, [ref]$null, [ref]$null)
+  $labelMapAst = $gateAst.Find({
+      param($node)
+      $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+      $node.Left.Extent.Text -eq '$nodeSheetFieldLabels'
+    }, $true)
+  $labelHashAst = if ($labelMapAst) { $labelMapAst.Right.Find({ param($node) $node -is [System.Management.Automation.Language.HashtableAst] }, $true) }
+  if (-not $labelHashAst) {
+    throw "RED: UIA live gate node creation sheet label map is missing"
+  }
+  $gateLabelMap = [System.Management.Automation.ScriptBlock]::Create($labelMapAst.Right.Extent.Text).InvokeReturnAsIs()
+  foreach ($labelId in @(9100, 9102, 9103, 9104, 9106, 9107, 9108, 9109, 9110, 9111, 9112, 9113, 9114)) {
+    $expectedLabel = $nativeNodeLabels[$labelId - 9100]
+    $actualLabel = [string]$gateLabelMap[$labelId]
+    if ([string]::IsNullOrWhiteSpace($expectedLabel) -or $actualLabel -ne $expectedLabel) {
+      throw "RED: UIA live gate node creation sheet label lookup for $labelId returned '$actualLabel', expected '$expectedLabel' from NativeForms.zig"
+    }
+  }
+  if ($uiaLiveGateSource -notmatch 'expected label list is empty or blank') {
+    throw "RED: UIA live gate node creation sheet label comparison can pass vacuously on an empty expected list"
+  }
+  if ($uiaLiveGateSource -notmatch '(?s)for \(\$index = 0; \$index -lt 20 -and\s*\[GraphCodeUiaGateState\]::FocusSourceAutomationId -ne \$safeRowId; \$index\+\+\)' -or
+      $uiaLiveGateSource -notmatch 'Require \(\[GraphCodeUiaGateState\]::FocusSourceAutomationId -eq \$safeRowId\) "FocusChanged source identity changed"') {
+    throw "RED: UIA focus retention waits for any FocusChanged event instead of the focused row identity"
+  }
+  if ($uiaLiveGateSource -notmatch 'SystemParametersInfoRect\(0x0030' -or
+      $uiaLiveGateSource -notmatch 'HitTarget = !visibleEmpty && sameTopLevel && realChild == target' -or
+      $uiaLiveGateSource -notmatch 'RealChildWindowFromPoint\(dialog, clientPoint\)' -or
+      $uiaLiveGateSource -notmatch 'Require \(-not \$hit\.VisibleEmpty\)' -or
+      $uiaLiveGateSource -notmatch 'has no visible portion inside' -or
+      $uiaLiveGateSource -notmatch 'footerOccludedByTaskbar = ' -or
+      $uiaLiveGateSource -notmatch 'overlapPixels = ' -or
+      $uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_OCCLUSION') {
+    throw "RED: UIA live gate node creation sheet cannot measure and record controls occluded outside the monitor work area"
+  }
+  if ($uiaLiveGateSource -notmatch 'if \(!hit\.HitTarget && !visibleEmpty && dialog != IntPtr\.Zero\)' -or
+      $uiaLiveGateSource -notmatch 'for \(int row = 1; row <= 3; row\+\+\)' -or
+      $uiaLiveGateSource -notmatch 'for \(int column = 1; column <= 5; column\+\+\)' -or
+      $uiaLiveGateSource -notmatch 'return RealChildWindowFromPoint\(dialog, clientPoint\) == target;' -or
+      $uiaLiveGateSource -notmatch '\} else if \(!hit\.HitTarget\) \{' -or
+      $uiaLiveGateSource -notmatch 'footerOccludedByContent = ' -or
+      $uiaLiveGateSource -notmatch 'coveredFraction = ' -or
+      $uiaLiveGateSource -notmatch 'createCentreClicks = ' -or
+      $uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_CONTENT_OCCLUSION' -or
+      $uiaLiveGateSource -notmatch 'has no verified uncovered point in' -or
+      $uiaLiveGateSource -notmatch 'SubtractCoveredRectangles' -or
+      $uiaLiveGateSource -notmatch 'GetWindow\(target, 3\)' -or
+      $uiaLiveGateSource -notmatch 'ChosenUncoveredRectangle = piece' -or
+      $uiaLiveGateSource -notmatch 'uncoveredRectangles = ') {
+    throw "RED: UIA live gate node creation sheet cannot click and record a footer control partly covered by scrolled content"
+  }
+  if ($uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_INVALID_WINDOW' -or
+      $uiaLiveGateSource -notmatch '\$nativeVisible = \[GraphCodeUiaGateState\]::WindowIsVisible\(\$nodeSheetWindow\)' -or
+      $uiaLiveGateSource -notmatch '\$stillOpen = \$nativeVisible -and \$nativeTitle -eq \$nodeSheetTitle' -or
+      $uiaLiveGateSource -notmatch 'Require \$stillOpen') {
+    throw "RED: UIA live gate does not check the native modal remains visible after rejected Create"
+  }
+  if ($uiaLiveGateSource -notmatch '(?s)for \(\$attempt = 1; \$attempt -le 10; \$attempt\+\+\).*?uiaRecoveredAtAttempt = \$attempt' -or
+      $uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_INVALID_WINDOW' -or
+      $uiaLiveGateSource -notmatch 'Require \$nodeSheetClosed' -or
+      $uiaLiveGateSource -notmatch 'if \(-not \[GraphCodeUiaGateState\]::WindowIsVisible\(\$nodeSheetWindow\) -or' -or
+      $uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_FOOTER_CLICK' -or
+      $uiaLiveGateSource -notmatch 'sub-3px verified uncovered strip') {
+    throw "RED: UIA live gate omits modal liveness retry, native closure, or footer-click geometry"
+  }
+  if ($uiaLiveGateSource -notmatch 'mouseSubmitUnavailable = ' -or
+      $uiaLiveGateSource -notmatch '\$allowOccludedEnter -and -not \$hit\.HitTarget -and \$hit\.ScannedPoints -gt 0' -or
+      $uiaLiveGateSource -notmatch 'IsForegroundWindow\(\$nodeSheetWindow\)' -or
+      $uiaLiveGateSource -notmatch 'FocusControl\(\$nodeSheetWindow, \$goalEdit\)' -or
+      $uiaLiveGateSource -notmatch 'SendKeyInput\(0x0D, 1\)' -or
+      $uiaLiveGateSource -notmatch 'Invoke-NodeSheetClick 1 "Create \(\$loopType, invalid\)" -allowOccludedEnter:\(\$loopType -eq "goalBased"\)') {
+    throw "RED: occluded Goal Create cannot submit with a measured, focused native Enter fallback"
+  }
+  if ($uiaLiveGateSource -notmatch '(?s)Add-Type -TypeDefinition @"\r?\n(.*?)\r?\n"@ -ReferencedAssemblies @\(') {
+    throw "RED: UIA live gate native input helper is missing"
+  }
+  Add-Type -AssemblyName UIAutomationClient
+  Add-Type -AssemblyName UIAutomationTypes
+  Add-Type -TypeDefinition $Matches[1] -ReferencedAssemblies @(
+    [System.Windows.Automation.AutomationElement].Assembly.Location,
+    [System.Windows.Automation.AutomationEventArgs].Assembly.Location
+  )
+  $goalCover = [int[][]]::new(1)
+  $goalCover[0] = [int[]]@(84, 699, 763, 721)
+  $goalRemainder = [GraphCodeUiaGateState]::SubtractCoveredRectangles(
+    [int[]]@(667, 698, 763, 728), $goalCover)
+  if ($goalRemainder.Count -ne 2 -or
+      ($goalRemainder[0] -join ',') -ne '667,721,763,728') {
+    throw "RED: node sheet rectangle subtraction misses the real seven-pixel uncovered Create band"
+  }
+  $twoCovers = [int[][]]::new(2)
+  $twoCovers[0] = [int[]]@(84, 699, 763, 721)
+  $twoCovers[1] = [int[]]@(667, 721, 715, 728)
+  $twoRemainders = [GraphCodeUiaGateState]::SubtractCoveredRectangles(
+    [int[]]@(667, 698, 763, 728), $twoCovers)
+  if ($twoRemainders.Count -ne 2 -or
+      ($twoRemainders[0] -join ',') -ne '715,721,763,728') {
+    throw "RED: node sheet rectangle subtraction does not handle more than one covering control"
   }
   if ($shellTests -notmatch '(?s)Windows update feed executable tests.*?zig test src\\WindowsUpdates\.zig.*?-lwinhttp') {
     throw "RED: Windows shell validation does not run the native updater tests"
