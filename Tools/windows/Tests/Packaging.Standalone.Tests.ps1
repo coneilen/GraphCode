@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
   [switch] $SelfTest,
+  [switch] $DiagnosticSelfTest,
   [switch] $HelpersOnly
 )
 
@@ -8,7 +9,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $shellRoot = Join-Path $repoRoot "graphcode-windows"
 $fixture = Join-Path ([IO.Path]::GetTempPath()) "graphcode-standalone-$([guid]::NewGuid())"
-$setupCases = @{ Completed = 0 }
+$setupCases = @{ Completed = 0; Scenarios = @{}; LastDiagnostic = $null }
 $definitions = @{}
 foreach ($file in @("package.ps1", "PackageRuntime.ps1")) {
   $path = Join-Path $repoRoot "Tools\windows\$file"
@@ -32,8 +33,43 @@ foreach ($name in @("Fail", "Require", "Get-Manifest", "Write-Metadata", "Write-
 function Invoke-Setup(
   [string] $hostPath, [string[]] $arguments, [string] $expectedError,
   [string] $entryPoint = $setup, [string] $successMarker = "Package verification: PASS",
-  [ValidateRange(1, 60000)][int] $timeoutMilliseconds = 60000
+  [ValidateRange(1, 60000)][int] $timeoutMilliseconds = 60000,
+  [string] $scenario = ""
 ) {
+  if ($scenario -notmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$' -or $setupCases.Scenarios.ContainsKey($scenario)) {
+    throw "Standalone scenario identity is missing or ambiguous"
+  }
+  $setupCases.Scenarios[$scenario] = $true
+  $trace = Join-Path $fixture "stage-$([guid]::NewGuid()).log"
+  $display = {
+    param([string] $value)
+    $value.Replace($fixture, "(fixture)").Replace($repoRoot, "(repo)")
+  }
+  $report = [ordered]@{
+    Scenario = $scenario
+    Host = (& $display $hostPath)
+    HostVersion = $null
+    Arguments = @($arguments | ForEach-Object { & $display $_ })
+    EntryPoint = (& $display $entryPoint)
+    BudgetMilliseconds = $timeoutMilliseconds
+    ControllerStage = "job-create"
+    CurrentStage = "host-not-entered"
+    Stages = @()
+    ProcessId = $null
+    CreationUtcTicks = $null
+    HasExited = $null
+    ExitCode = $null
+    HostArguments = @("-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", "(owned launch payload)")
+    StdoutBeforeTeardown = $null
+    StderrBeforeTeardown = $null
+    StdoutAfterTeardown = $null
+    StderrAfterTeardown = $null
+    ActiveBeforeTeardown = $null
+    ActiveAfterTeardown = $null
+    JobBeforeTeardown = $null
+    ElapsedMilliseconds = 0
+  }
+  Write-Output "Standalone scenario BEGIN: $($report | ConvertTo-Json -Depth 8 -Compress)"
   $start = [Diagnostics.ProcessStartInfo]::new()
   $start.FileName = $hostPath
   $start.UseShellExecute = $false
@@ -48,24 +84,56 @@ function Invoke-Setup(
     [void] $start.Environment.Remove($variable)
   }
   $gate = Join-Path $fixture "setup-start-$([guid]::NewGuid())"
-  $launch = @{ gate = $gate; entryPoint = $entryPoint; arguments = @($arguments) } | ConvertTo-Json -Compress
+  $scripts = @($entryPoint)
+  if ($entryPoint -eq (Join-Path $repoRoot "Tools\windows\package.ps1")) {
+    $scripts += Join-Path $repoRoot "Tools\windows\PackageRuntime.ps1"
+  }
+  $launch = @{ gate = $gate; entryPoint = $entryPoint; arguments = @($arguments); scripts = $scripts } | ConvertTo-Json -Compress
   $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($launch))
   # Assignment precedes the gate, so even an immediately spawning script belongs to our job.
   $command = @'
+$global:StandaloneDiagnosticTracePath = 'TRACE_PATH'
+$global:StandaloneDiagnosticClock = [Diagnostics.Stopwatch]::StartNew()
+[IO.File]::AppendAllText($global:StandaloneDiagnosticTracePath, "0:host-entered" + [Environment]::NewLine)
+function Write-StandaloneStage([string] $stage) {
+  [IO.File]::AppendAllText($global:StandaloneDiagnosticTracePath,
+    $global:StandaloneDiagnosticClock.ElapsedMilliseconds.ToString() + ":" + $stage + [Environment]::NewLine)
+}
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $global:LASTEXITCODE = 0
+Write-StandaloneStage ("host-version:" + $PSVersionTable.PSVersion.ToString())
+Write-StandaloneStage "launch-json:begin"
 $launch = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("LAUNCH_PAYLOAD")) | ConvertFrom-Json
+Write-StandaloneStage "launch-json:end"
+Write-StandaloneStage "gate-wait:begin"
 while (-not [IO.File]::Exists($launch.gate)) { [Threading.Thread]::Sleep(10) }
+Write-StandaloneStage "gate-wait:end"
+Write-StandaloneStage "stage-registration:begin"
+$global:StandaloneDiagnosticScripts = $launch.scripts
+foreach ($name in @("Open-Package", "Verify-PackageContents", "Assert-Package", "Verify-Manifest",
+    "Read-ProviderProvenance", "Verify-SignedPackage", "Invoke-PackageCommand", "Close-Package",
+    "Get-Content", "ConvertFrom-Json", "Get-FileHash", "Expand-Archive", "Get-AuthenticodeSignature",
+    "Test-FileCatalog", "Import-Module", "Add-Type", "Get-Command")) {
+  $action = [scriptblock]::Create("`$frame = Get-PSCallStack | Where-Object { " +
+    "`$_.ScriptName -in `$global:StandaloneDiagnosticScripts } | Select-Object -First 1; " +
+    "[IO.File]::AppendAllText(`$global:StandaloneDiagnosticTracePath, " +
+    "`$global:StandaloneDiagnosticClock.ElapsedMilliseconds.ToString() + ':command:${name}:script=' + " +
+    "[IO.Path]::GetFileName(`$frame.ScriptName) + ':line=' + `$frame.ScriptLineNumber + [Environment]::NewLine)")
+  Set-PSBreakpoint -Script $launch.scripts -Command $name -Action $action | Out-Null
+}
+Write-StandaloneStage "stage-registration:end"
 $tokens = foreach ($argument in $launch.arguments) {
   if ($argument -match '^-[A-Za-z][A-Za-z0-9]*$') { $argument }
   else { "'" + $argument.Replace("'", "''") + "'" }
 }
 # Array splatting makes -Command positional; parse only parameter tokens and quoted literal values.
+Write-StandaloneStage "dispatch:begin"
 & ([scriptblock]::Create('& $launch.entryPoint ' + ($tokens -join ' ')))
+Write-StandaloneStage "dispatch:end"
 exit $LASTEXITCODE
 '@
-  $command = $command.Replace("LAUNCH_PAYLOAD", $payload)
+  $command = $command.Replace("LAUNCH_PAYLOAD", $payload).Replace("TRACE_PATH", $trace.Replace("'", "''"))
   foreach ($argument in @("-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand",
       [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)))) {
     [void] $start.ArgumentList.Add($argument)
@@ -81,21 +149,29 @@ exit $LASTEXITCODE
   $clock = [Diagnostics.Stopwatch]::StartNew()
   try {
     $job = [StandaloneProcessJob]::Create()
+    $report.ControllerStage = "process-start"
     $started = $process.Start()
     if (-not $started) { throw "Could not start standalone setup host" }
+    $report.ProcessId = $process.Id
+    $report.CreationUtcTicks = $process.StartTime.ToUniversalTime().Ticks
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
+    $report.ControllerStage = "job-assign"
     [StandaloneProcessJob]::Assign($job, $process.Handle)
     $assigned = $true
+    $report.ControllerStage = "gate-release"
     [IO.File]::WriteAllText($gate, "assigned")
+    $report.ControllerStage = "process-wait"
     $remaining = [Math]::Max(0, $timeoutMilliseconds - [int] $clock.ElapsedMilliseconds)
     if (-not $process.WaitForExit($remaining)) {
       throw "Standalone setup timed out"
     }
+    $report.ControllerStage = "output-capture"
     $remaining = [Math]::Max(0, $timeoutMilliseconds - [int] $clock.ElapsedMilliseconds)
     if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]] @($stdout, $stderr), $remaining)) {
       throw "Standalone setup output capture timed out"
     }
+    $report.ControllerStage = "result-assertions"
     $output = $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()
     if ($expectedError) {
       if ($process.ExitCode -eq 0 -or $output -notmatch [regex]::Escape($expectedError)) {
@@ -104,6 +180,13 @@ exit $LASTEXITCODE
     } elseif ($process.ExitCode -ne 0 -or $output -notmatch ("(?m)^" + [regex]::Escape($successMarker) + "\r?$")) {
       throw "Standalone verification failed with $hostPath`: $output"
     }
+    $stages = if ([IO.File]::Exists($trace)) { [IO.File]::ReadAllLines($trace) } else { @() }
+    foreach ($stage in @("host-entered", "launch-json:begin", "launch-json:end", "gate-wait:begin",
+        "gate-wait:end", "stage-registration:begin", "stage-registration:end", "dispatch:begin")) {
+      if (@($stages | Where-Object { $_ -match ("^\d+:" + [regex]::Escape($stage) + "$") }).Count -ne 1) {
+        throw "Standalone stage evidence is missing or incomplete"
+      }
+    }
     $setupCases.Completed++
   } catch {
     $primaryError = $_
@@ -111,9 +194,40 @@ exit $LASTEXITCODE
   } finally {
     $cleanupErrors = [Collections.Generic.List[string]]::new()
     try {
+      $report.ElapsedMilliseconds = $clock.ElapsedMilliseconds
+      $report.Stages = @(if ([IO.File]::Exists($trace)) { [IO.File]::ReadAllLines($trace) })
+      if ($report.Stages.Count) { $report.CurrentStage = ($report.Stages[-1] -split ":", 2)[1] }
+      $versions = @($report.Stages | Where-Object { $_ -match '^\d+:host-version:' })
+      if ($versions.Count -eq 1) { $report.HostVersion = ($versions[0] -split ":", 3)[2] }
+      if ($started) {
+        $report.HasExited = $process.HasExited
+        if ($process.HasExited) { $report.ExitCode = $process.ExitCode }
+      }
+      if ($assigned) {
+        $report.ActiveBeforeTeardown = [StandaloneProcessJob]::Active($job)
+        $report.JobBeforeTeardown = [StandaloneProcessJob]::Summary($job)
+      }
+      # ReadToEndAsync cannot expose partial pipes; distinguish pending capture from empty output.
+      $report.StdoutBeforeTeardown = if ($stdout -and $stdout.IsCompletedSuccessfully) {
+        & $display $stdout.GetAwaiter().GetResult()
+      } else { "(capture pending)" }
+      $report.StderrBeforeTeardown = if ($stderr -and $stderr.IsCompletedSuccessfully) {
+        & $display $stderr.GetAwaiter().GetResult()
+      } else { "(capture pending)" }
+      $setupCases.LastDiagnostic = $report
+      if ($primaryError) {
+        $primaryError.Exception.Data["StandaloneDiagnostic"] = $report
+        $primaryError.Exception.Data["StandaloneInvocation"] = @{
+          Host = $hostPath; HostArguments = @($start.ArgumentList); EntryPoint = $entryPoint; Arguments = @($arguments)
+        }
+        Write-Warning "Standalone failure BEFORE owned teardown: $($report | ConvertTo-Json -Depth 8 -Compress)" -WarningAction Continue
+      }
+    } catch { $cleanupErrors.Add("capturing standalone stage evidence: $($_.Exception.Message)") }
+    try {
       if ($assigned) {
         [StandaloneProcessJob]::Terminate($job)
         [StandaloneProcessJob]::WaitForEmpty($job, 5000)
+        $report.ActiveAfterTeardown = [StandaloneProcessJob]::Active($job)
       } elseif ($started -and -not $process.HasExited) {
         $process.Kill($true)
       }
@@ -127,8 +241,12 @@ exit $LASTEXITCODE
         if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]] @($stdout, $stderr), 5000)) {
           throw "Standalone output readers did not complete after owned teardown"
         }
+        $report.StdoutAfterTeardown = & $display $stdout.GetAwaiter().GetResult()
+        $report.StderrAfterTeardown = & $display $stderr.GetAwaiter().GetResult()
         if ($primaryError) {
           $primaryError.Exception.Data["StandaloneOutput"] = $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()
+          $primaryError.Exception.Data["StandaloneStdout"] = $stdout.GetAwaiter().GetResult()
+          $primaryError.Exception.Data["StandaloneStderr"] = $stderr.GetAwaiter().GetResult()
           if ($primaryError.Exception.Message -in @("Standalone setup timed out", "Standalone setup output capture timed out") -and
               $primaryError.Exception.Data["StandaloneOutput"].Trim()) {
             Write-Warning "Standalone setup captured output after owned teardown: $($primaryError.Exception.Data['StandaloneOutput'])" -WarningAction Continue
@@ -137,6 +255,7 @@ exit $LASTEXITCODE
       }
     } catch { $cleanupErrors.Add("draining redirected output: $($_.Exception.Message)") }
     try { $process.Dispose() } catch { $cleanupErrors.Add("disposing host: $($_.Exception.Message)") }
+    Write-Output "Standalone scenario END: $($report | ConvertTo-Json -Depth 8 -Compress)"
     if ($cleanupErrors.Count) {
       $diagnostic = "Standalone setup teardown failed: $($cleanupErrors -join '; ')"
       if ($primaryError) {
@@ -204,6 +323,12 @@ public static class StandaloneProcessJob {
         if (!QueryInformationJobObject(job, 1, out value, (uint)Marshal.SizeOf<Accounting>(), IntPtr.Zero)) throw new Win32Exception();
         return value.Active;
     }
+    public static string Summary(IntPtr job) {
+        Accounting value;
+        if (!QueryInformationJobObject(job, 1, out value, (uint)Marshal.SizeOf<Accounting>(), IntPtr.Zero)) throw new Win32Exception();
+        return String.Format("total={0}; active={1}; terminated={2}; user100ns={3}; kernel100ns={4}",
+            value.Total, value.Active, value.Terminated, value.User, value.Kernel);
+    }
     public static void Terminate(IntPtr job) { if (!TerminateJobObject(job, 124)) throw new Win32Exception(); }
     public static void WaitForEmpty(IntPtr job, int milliseconds) {
         var clock = Stopwatch.StartNew();
@@ -217,7 +342,7 @@ public static class StandaloneProcessJob {
 '@
 }
 
-function Test-StandaloneHarness {
+function Test-StandaloneHarness([switch] $diagnosticOnly) {
   $hostPath = (Get-Command pwsh).Source
   $failures = 0
   $passed = 0
@@ -249,14 +374,29 @@ Write-Output "Package verification: PASS"
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot "marker-written"), "ready")
 if ($mode -like "timeout*") { [Threading.Thread]::Sleep(30000) }
 '@
-  foreach ($case in @("success", "exit-stderr", "malformed-marker", "missing-marker", "timeout",
+  $cases = @("success", "exit-stderr", "malformed-marker", "missing-marker", "timeout",
       "inherited-pipes", "cleanup-failure", "primary-and-cleanup", "timeout-and-cleanup",
-      "exit-and-cleanup", "marker-and-cleanup")) {
-    $caseRoot = Join-Path $fixture $case
+      "exit-and-cleanup", "marker-and-cleanup")
+  $specs = @()
+  if (-not $diagnosticOnly) {
+    $specs += @($cases | ForEach-Object { @{ Case = $_; HostPath = $hostPath; HostId = "pwsh7" } })
+  }
+  foreach ($hostSpec in @(
+      @{ Path = (Get-Command powershell.exe).Source; Id = "winps51" },
+      @{ Path = $hostPath; Id = "pwsh7" }
+    )) {
+    foreach ($case in @("diagnostic-success", "diagnostic-missing-stage", "diagnostic-identity", "diagnostic-timeout")) {
+      $specs += @{ Case = $case; HostPath = $hostSpec.Path; HostId = $hostSpec.Id }
+    }
+  }
+  foreach ($spec in $specs) {
+    $case = $spec.Case
+    $caseId = "$($spec.HostId)-$case"
+    $caseRoot = Join-Path $fixture $caseId
     New-Item -ItemType Directory -Path $caseRoot -Force | Out-Null
-    $worker = Join-Path $fixture "$case-worker.ps1"
+    $worker = Join-Path $fixture "$caseId-worker.ps1"
     $source = @'
-param([string] $sourcePath, [string] $caseRoot, [string] $case, [string] $hostPath)
+param([string] $sourcePath, [string] $caseRoot, [string] $case, [string] $hostPath, [string] $testHostPath)
 $ErrorActionPreference = "Stop"
 . $sourcePath -HelpersOnly
 $fixture = $caseRoot
@@ -269,12 +409,78 @@ switch ($case) {
   }
   { $_ -in @("malformed-marker", "marker-and-cleanup") } { $child = 'Write-Output "Package verification: PASS-extra"' }
   "missing-marker" { $child = 'Write-Output "verification completed without marker"' }
+  "diagnostic-success" {
+    $child = 'param([string] $Label); if ($Label -ne "fixture label with spaces") { throw "Fixture argument changed" }; function Verify-PackageContents { Write-Output "Package verification: PASS" }; Verify-PackageContents'
+  }
+  "diagnostic-identity" {
+    $child = 'function Verify-PackageContents { Write-Output "Package verification: PASS" }; Verify-PackageContents'
+  }
+  "diagnostic-missing-stage" {
+    $child = 'if ($global:StandaloneDiagnosticTracePath) { [IO.File]::Delete($global:StandaloneDiagnosticTracePath) }; Write-Output "Package verification: PASS"'
+  }
+  "diagnostic-timeout" {
+    $child = 'Write-StandaloneStage "fixture-timeout-ready"; Write-Output "diagnostic-fixture-wait"; [Threading.Thread]::Sleep(120000)'
+  }
   { $_ -in @("timeout", "inherited-pipes", "timeout-and-cleanup") } {
     $child = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("CHILD_SOURCE_BASE64"))
   }
 }
 if ($child) { [IO.File]::WriteAllText($entry, $child) }
-if ($case -eq "cleanup-failure" -or $case -like "*-and-cleanup") {
+if ($case -like "diagnostic-*") {
+  $actual = $null
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  try {
+    $diagnosticArguments = @(if ($case -eq "diagnostic-success") { "-Label"; "fixture label with spaces" })
+    Invoke-Setup $testHostPath $diagnosticArguments "" $entry "Package verification: PASS" 60000 $case
+  } catch { $actual = $_ }
+  if ($case -eq "diagnostic-success") {
+    if ($actual) { throw $actual }
+    $report = $setupCases.LastDiagnostic
+    if (-not $report -or $report.Scenario -ne $case -or
+        ($report.Arguments -join "|") -ne "-Label|fixture label with spaces" -or
+        $report.Host -notmatch 'powershell\.exe|pwsh\.exe' -or $report.HostVersion -notmatch '^(5\.1|7\.)' -or
+        $report.EntryPoint -ne "(fixture)\child.ps1" -or
+        ($report.Stages -join "`n") -notmatch "command:Verify-PackageContents:script=child.ps1:line=1" -or
+        ($report.Stages -join "`n") -notmatch "dispatch:end" -or $report.ActiveAfterTeardown -ne 0) {
+      throw "Standalone scenario/host/argv/stage/owned-teardown diagnostics were missing"
+    }
+    if (($report | ConvertTo-Json -Depth 8) -match [regex]::Escape($fixture)) {
+      throw "Standalone diagnostics leaked the private fixture root"
+    }
+  } elseif ($case -eq "diagnostic-missing-stage") {
+    if (-not $actual -or $actual.Exception.Message -ne "Standalone stage evidence is missing or incomplete") {
+      throw "Silent missing-stage result was accepted: $actual"
+    }
+    $report = $actual.Exception.Data["StandaloneDiagnostic"]
+    if ($report.Stages.Count -ne 1 -or $report.CurrentStage -ne "dispatch:end") {
+      throw "Incomplete stage evidence lost its exact surviving stage"
+    }
+  } elseif ($case -eq "diagnostic-timeout") {
+    if (-not $actual -or $actual.Exception.Message -ne "Standalone setup timed out") {
+      throw "Diagnostic timeout lost the exact primary failure: $actual"
+    }
+    $report = $actual.Exception.Data["StandaloneDiagnostic"]
+    if (-not $report -or $report.CurrentStage -ne "fixture-timeout-ready" -or
+        $report.ControllerStage -ne "process-wait" -or $report.ActiveBeforeTeardown -lt 1 -or
+        $report.ActiveAfterTeardown -ne 0 -or $report.ProcessId -le 0 -or $report.CreationUtcTicks -le 0 -or
+        $actual.Exception.Data["StandaloneOutput"] -notmatch "diagnostic-fixture-wait") {
+      throw "Timeout stage, identity, output, or owned accounting was missing"
+    }
+    if ($clock.ElapsedMilliseconds -gt 67000) { throw "Diagnostic timeout exceeded bounded teardown" }
+  } else {
+    if ($actual) { throw $actual }
+    $completed = $setupCases.Completed
+    foreach ($identity in @("", $case)) {
+      $actual = $null
+      try { Invoke-Setup $testHostPath @() "" $entry "Package verification: PASS" 3500 $identity }
+      catch { $actual = $_ }
+      if (-not $actual -or $actual.Exception.Message -ne "Standalone scenario identity is missing or ambiguous") {
+        throw "Missing or duplicate scenario identity was accepted"
+      }
+    }
+    if ($setupCases.Completed -ne $completed) { throw "Ambiguous scenario launched an unlabelled helper" }
+  }
+} elseif ($case -eq "cleanup-failure" -or $case -like "*-and-cleanup") {
   $locked = Join-Path $fixture "locked.txt"
   [IO.File]::WriteAllText($locked, "owned lock")
   $handle = [IO.File]::Open($locked, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
@@ -285,7 +491,7 @@ if ($case -eq "cleanup-failure" -or $case -like "*-and-cleanup") {
       Invoke-StandaloneFixture {
         if ($case -eq "primary-and-cleanup") { throw "exact primary failure" }
         if ($case -ne "cleanup-failure") {
-          Invoke-Setup $hostPath @($hostPath, $case) "" $entry "Package verification: PASS" 2000
+          Invoke-Setup $hostPath @($hostPath, $case) "" $entry "Package verification: PASS" 2000 $case
         }
       } -WarningVariable warnings
     } catch { $actual = $_ }
@@ -313,7 +519,7 @@ if ($case -eq "cleanup-failure" -or $case -like "*-and-cleanup") {
   $actual = $null
   $clock = [Diagnostics.Stopwatch]::StartNew()
   try {
-    Invoke-Setup $hostPath @($hostPath, $case) "" $entry "Package verification: PASS" 2000
+    Invoke-Setup $hostPath @($hostPath, $case) "" $entry "Package verification: PASS" 2000 $case
   } catch { $actual = $_ }
   if ($case -eq "success") {
     if ($actual) { throw $actual }
@@ -344,7 +550,7 @@ Write-Output "CASE PASS: $case"
     $source = $source.Replace("CHILD_SOURCE_BASE64", [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($descendantSource)))
     [IO.File]::WriteAllText($worker, $source)
     $gate = Join-Path $fixture "$case-start"
-    $workerArguments = @($worker, $PSCommandPath, $caseRoot, $case, $hostPath) |
+    $workerArguments = @($worker, $PSCommandPath, $caseRoot, $case, $hostPath, $spec.HostPath) |
       ForEach-Object { "'" + $_.Replace("'", "''") + "'" }
     $command = "while (-not [IO.File]::Exists('" + $gate.Replace("'", "''") +
       "')) { [Threading.Thread]::Sleep(10) }; & " + ($workerArguments -join " ")
@@ -372,7 +578,8 @@ Write-Output "CASE PASS: $case"
       [StandaloneProcessJob]::Assign($job, $process.Handle)
       $assigned = $true
       [IO.File]::WriteAllText($gate, "assigned")
-      $finished = $process.WaitForExit(12000)
+      $workerBudget = if ($case -like "diagnostic-*") { 70000 } else { 12000 }
+      $finished = $process.WaitForExit($workerBudget)
       $settle = [Diagnostics.Stopwatch]::StartNew()
       while ($finished -and [StandaloneProcessJob]::Active($job) -ne 0 -and $settle.ElapsedMilliseconds -lt 250) {
         Start-Sleep -Milliseconds 10
@@ -400,7 +607,11 @@ Write-Output "CASE PASS: $case"
       Write-Output $output
       if (-not $finished -or $process.ExitCode -ne 0 -or $activeBeforeTeardown -ne 0 -or $output -notmatch "CASE PASS: $case") {
         $failures++
-        Write-Output "CASE FAIL: $case; finished=$finished; exit=$($process.ExitCode); activeBeforeTeardown=$activeBeforeTeardown; activeAfterTeardown=$([StandaloneProcessJob]::Active($job))"
+        Write-Output "CASE FAIL: $caseId; finished=$finished; exit=$($process.ExitCode); activeBeforeTeardown=$activeBeforeTeardown; activeAfterTeardown=$([StandaloneProcessJob]::Active($job))"
+        if (-not $finished -or $activeBeforeTeardown -ne 0 -or
+            $output -match "Standalone setup (?:output capture )?timed out") {
+          throw "Stopped standalone harness at unexpected timeout or ownership failure: $caseId"
+        }
       } else {
         $passed++
         Write-Output "Owned worker job: activeBeforeTeardown=$activeBeforeTeardown; activeAfterTeardown=$([StandaloneProcessJob]::Active($job))"
@@ -426,8 +637,8 @@ Write-Output "CASE PASS: $case"
 if ($HelpersOnly) { return }
 
 Invoke-StandaloneFixture {
-  Test-StandaloneHarness
-  if ($SelfTest) { return }
+  Test-StandaloneHarness -diagnosticOnly:$DiagnosticSelfTest
+  if ($SelfTest -or $DiagnosticSelfTest) { return }
   $root = Join-Path $fixture "extracted package\GraphCode"
   New-Item -ItemType Directory -Path (Join-Path $root "bin"), (Join-Path $root "licenses"), (Join-Path $root "assets") -Force | Out-Null
   foreach ($name in @("graphcode-windows.exe", "graphcoded.exe", "graphcode.exe", "zmx.exe", "swiftCore.dll")) {
@@ -503,23 +714,26 @@ Write-Output "Native command exit/stderr preservation: PASS"
 '@
   [IO.File]::WriteAllText($nativeProbe, $nativeSource, [Text.UTF8Encoding]::new($true))
   foreach ($hostPath in @((Get-Command powershell.exe).Source, (Get-Command pwsh).Source)) {
-    Invoke-Setup $hostPath @() ""
-    Invoke-Setup $hostPath @("-Command", "Verify", "-Package", $zip) ""
-    Invoke-Setup $hostPath @("-Command", "Verify", "-Package", $nextRoot) ""
-    Invoke-Setup $hostPath @("-Command", "Verify", "-Package", $nextZip) ""
+    $hostId = if ([IO.Path]::GetFileName($hostPath) -eq "powershell.exe") { "winps51" } else { "pwsh7" }
+    Invoke-Setup $hostPath @() "" -scenario "$hostId-default-verify"
+    Invoke-Setup $hostPath @("-Command", "Verify", "-Package", $zip) "" -scenario "$hostId-zip-verify"
+    Invoke-Setup $hostPath @("-Command", "Verify", "-Package", $nextRoot) "" -scenario "$hostId-next-directory-verify"
+    Invoke-Setup $hostPath @("-Command", "Verify", "-Package", $nextZip) "" -scenario "$hostId-next-zip-verify"
     Invoke-Setup $hostPath @("-Command", "Verify", "-Package", $nextRoot) "zmx provenance pin mismatch" `
-      (Join-Path $repoRoot "Tools\windows\package.ps1")
-    Invoke-Setup $hostPath @("-Command", "Verify", "-TrustedSignerThumbprint", ("A" * 40)) "trusted publisher verification requires a signed package"
-    Invoke-Setup $hostPath @("-Command", "Build") "Cannot validate argument"
-    Invoke-Setup $hostPath @() "" $nativeProbe "Native command exit/stderr preservation: PASS"
+      (Join-Path $repoRoot "Tools\windows\package.ps1") -scenario "$hostId-repository-pin-rejection"
+    Invoke-Setup $hostPath @("-Command", "Verify", "-TrustedSignerThumbprint", ("A" * 40)) `
+      "trusted publisher verification requires a signed package" -scenario "$hostId-unsigned-trust-rejection"
+    Invoke-Setup $hostPath @("-Command", "Build") "Cannot validate argument" -scenario "$hostId-invalid-command-rejection"
+    Invoke-Setup $hostPath @() "" $nativeProbe "Native command exit/stderr preservation: PASS" -scenario "$hostId-native-capture"
   }
   $pins.zmx.sha = "2" * 40
   $pins | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $nextRoot "provider-pins.json") -Encoding utf8
   @{ schemaVersion = 1; files = @(Get-Manifest $nextRoot) } |
     ConvertTo-Json -Depth 10 | Set-Content (Join-Path $nextRoot "manifest.json") -Encoding utf8
-  Invoke-Setup (Get-Command powershell.exe).Source @("-Command", "Verify", "-Package", $nextRoot) "zmx provenance pin mismatch"
+  Invoke-Setup (Get-Command powershell.exe).Source @("-Command", "Verify", "-Package", $nextRoot) `
+    "zmx provenance pin mismatch" -scenario "winps51-tampered-pin-rejection"
   Add-Content (Join-Path $root "bin\swiftCore.dll") "tamper"
-  Invoke-Setup (Get-Command powershell.exe).Source @("-Command", "Verify") "size mismatch"
+  Invoke-Setup (Get-Command powershell.exe).Source @("-Command", "Verify") "size mismatch" -scenario "winps51-tampered-size-rejection"
   if ($setupCases.Completed -ne 18) { throw "Expected 18 standalone setup cases, completed $($setupCases.Completed)" }
   Write-Output "Standalone setup without repository/toolchains on Windows PowerShell 5.1 and PowerShell 7: PASS; executed=$($setupCases.Completed)"
 }
