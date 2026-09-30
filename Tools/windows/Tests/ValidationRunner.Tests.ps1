@@ -1387,7 +1387,7 @@ Start-Sleep -Seconds 60
   if ($stubDaemonSource -notmatch '\$frame\.command\.graphCommand\.command\.createNode\._0' -or
       $stubDaemonSource -notmatch 'appliedCreates' -or
       $stubDaemonSource -notmatch '\$nodeLoopTypes\[\$id\]' -or
-      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied\)') {
+      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied(?: -or \$promotionApplied)?\)') {
     throw "RED: stub daemon cannot apply exactly the createNode it received and republish the created loop type"
   }
   if ($uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_SHEET_EVIDENCE' -or
@@ -1412,6 +1412,26 @@ Start-Sleep -Seconds 60
   }
   if ($uiaLiveGateSource -notmatch '(?s)nodeCreationSheet = \$nodeCreationSheetEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
     throw "RED: UIA final summary omits the parsable node creation sheet evidence"
+  }
+  if ($uiaLiveGateSource -notmatch 'UIA_SKETCH_CUSTODY_EVIDENCE=' -or
+      $uiaLiveGateSource -notmatch '(?s)sketchCustody = \$sketchCustodyEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress' -or
+      $uiaLiveGateSource -notmatch 'promotion\.goal' -or
+      $uiaLiveGateSource -notmatch 'promotion\.turn' -or
+      $uiaLiveGateSource -notmatch 'promotion\.timed' -or
+      $uiaLiveGateSource -notmatch 'createdBy' -or
+      $uiaLiveGateSource -notmatch 'commandLogBytesUnchanged' -or
+      $uiaLiveGateSource -notmatch 'appliedPromotions' -or
+      $uiaLiveGateSource -notmatch 'appliedPromotionRequests' -or
+      $uiaLiveGateSource -notmatch 'ClickPopupMenuItem' -or
+      $uiaLiveGateSource -notmatch 'IsControlOwnedBy' -or
+      $uiaLiveGateSource -notmatch 'TypeEditTextById' -or
+      $uiaLiveGateSource -notmatch 'Read-EdgeStableText' -or
+      $uiaLiveGateSource -notmatch 'renderedHitTests' -or
+      $stubDaemonSource -notmatch 'appliedPromotions' -or
+      $stubDaemonSource -notmatch 'appliedPromotionRequests' -or
+      $stubDaemonSource -notmatch 'promoteNode' -or
+      $stubDaemonSource -notmatch 'createdBy') {
+    throw "RED: UIA gate does not prove all sketch promotions and custody child through native interaction, correlated wire, no mutation and rendered hit tests"
   }
   $uiaLiveGateType = [regex]::Match(
     $uiaLiveGateSource, '(?s)Add-Type -TypeDefinition @"\s*(?<source>.*?)\r?\n"@'
@@ -1516,7 +1536,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'appliedEdgeUpdateRequests' -or
       $stubDaemonSource -notmatch 'appliedEdgeCreateRequests' -or
       $stubDaemonSource -notmatch 'appliedEdgeUpdateRequests' -or
-      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied\)') {
+      $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied(?: -or \$promotionApplied)?\)') {
     throw "RED: edge workflow does not pin native input, exact CAS wire, correlated application, and stable rendered identity"
   }
   $nativeFormsSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\NativeForms.zig") -Raw

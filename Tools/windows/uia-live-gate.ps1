@@ -197,6 +197,32 @@ public static class GraphCodeUiaGateState {
     if (popup == IntPtr.Zero) return IntPtr.Zero;
     return SendMessage(popup, 0x01E1, UIntPtr.Zero, IntPtr.Zero);
   }
+  public static IntPtr FindPopupForMenu(uint processId, IntPtr menu) {
+    IntPtr result = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+      uint owner;
+      GetWindowThreadProcessId(window, out owner);
+      if (owner == processId && IsWindowVisible(window) &&
+          String.Equals(ClassOf(window), "#32768", StringComparison.Ordinal) &&
+          PopupMenuHandle(window) == menu) {
+        result = window;
+        return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return result;
+  }
+  public static bool HoverPopupMenuItem(IntPtr owner, IntPtr menu, int position) {
+    RECT item;
+    if (menu == IntPtr.Zero || !GetMenuItemRect(owner, menu, (uint)position, out item)) return false;
+    int x = item.Right - Math.Min(12, (item.Right - item.Left) / 2);
+    int y = (item.Top + item.Bottom) / 2;
+    if (!SetCursorPos(x, y))
+      throw new InvalidOperationException(String.Format("SetCursorPos for submenu failed: Win32Error={0}", Marshal.GetLastWin32Error()));
+    ScreenPoint at;
+    if (!GetCursorPos(out at)) return false;
+    return at.X == x && at.Y == y;
+  }
   public static int PopupMenuItemCount(IntPtr menu) {
     if (menu == IntPtr.Zero) return -1;
     return GetMenuItemCount(menu);
@@ -5844,7 +5870,8 @@ try {
       ('"' + $renameNodeId + '"'),
       "-NodeATitle",
       ('"' + $renameInitialTitle + '"'),
-      "-ApplyGraphCommands"
+      "-ApplyGraphCommands",
+      "-SeedSketches"
     )
   # Enumerating the pipe namespace is only a diagnostic: the shell reconnects on
   # its own schedule, exactly as windows-shell.ps1 relies on, so a pipe that has
@@ -7056,6 +7083,473 @@ try {
   }
   Write-Host ("UIA_NODE_CREATION_SHEET_EVIDENCE=" + ($nodeCreationSheetEvidence | ConvertTo-Json -Compress -Depth 8))
 
+  # --- Connected sketch promotion and custody child (ledger rows 100, 94) ---
+  function Read-SketchStub {
+    $result = Read-NodeCreationStubResult
+    Require ($null -ne $result -and (Edge-GraphCount $result) -gt 0) `
+      "sketch/custody stub has no positive graph-command baseline"
+    return $result
+  }
+  function Assert-SketchModal([string] $title) {
+    $script:edgeWorkflowTitle = $title
+    $script:edgeWorkflowWindow = [IntPtr]::Zero
+    for ($retry = 0; $retry -lt 100 -and $script:edgeWorkflowWindow -eq [IntPtr]::Zero; $retry++) {
+      $script:edgeWorkflowWindow = [GraphCodeUiaGateState]::FindVisibleProcessWindow([uint32]$renameProcess.Id, $title)
+      if ($script:edgeWorkflowWindow -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+    }
+    $census = $null
+    if ($script:edgeWorkflowWindow -ne [IntPtr]::Zero) {
+      $census = $desktop.FindFirst([System.Windows.Automation.TreeScope]::Children,
+        (New-Object System.Windows.Automation.AndCondition(
+          (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $renameProcess.Id)),
+          (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::NameProperty, $title)))))
+    }
+    Write-Host "UIA_SKETCH_CUSTODY_MODAL title='$title' native=$($script:edgeWorkflowWindow -ne [IntPtr]::Zero) desktopUia=$($null -ne $census)"
+    Require ($script:edgeWorkflowWindow -ne [IntPtr]::Zero -and
+      [GraphCodeUiaGateState]::WindowProcessId($script:edgeWorkflowWindow) -eq $renameProcess.Id -and
+      [GraphCodeUiaGateState]::WindowIsVisible($script:edgeWorkflowWindow) -and
+      [GraphCodeUiaGateState]::WindowTextOf($script:edgeWorkflowWindow) -ceq $title) `
+      "sketch/custody native modal '$title' absent or belongs to another process"
+    return [ordered]@{ title = $title; nativeVisible = $true; desktopUia = ($null -ne $census) }
+  }
+  function Assert-SketchControl([int] $id) {
+    $control = [GraphCodeUiaGateState]::ControlById($script:edgeWorkflowWindow, $id)
+    Require ($control -ne [IntPtr]::Zero -and
+      [GraphCodeUiaGateState]::IsControlOwnedBy($script:edgeWorkflowWindow, $control, $id) -and
+      [GraphCodeUiaGateState]::HasVisibleBounds($control) -and
+      [GraphCodeUiaGateState]::WindowProcessId($script:edgeWorkflowWindow) -eq $renameProcess.Id) `
+      "sketch/custody field $id has wrong control ID, top-level owner or visibility"
+    return $control
+  }
+  function Sketch-Type([int] $id, [string] $text) {
+    $null = Assert-SketchControl $id
+    $value = Edge-TypeText $id $text
+    Require ($value -ceq $text) "sketch/custody field $id lost real SendInput text"
+    return $value
+  }
+  function Sketch-Combo([int] $id, [int] $index, [string] $label) {
+    $null = Assert-SketchControl $id
+    return Edge-Combo $id $index $label
+  }
+  function Sketch-Field([int] $id, [string] $label) {
+    $null = Assert-SketchControl $id
+    return Read-EdgeStableText $id $label
+  }
+  function Sketch-Submit([string] $label, [int] $focusId) {
+    $button = Assert-SketchControl 1
+    Require (Ensure-ShellForeground $script:edgeWorkflowWindow $label) `
+      "sketch/custody submit '$label' lost native foreground"
+    $hit = [GraphCodeUiaGateState]::ClickScreenPoint($button)
+    Require ($null -ne $hit -and -not $hit.VisibleEmpty) `
+      "sketch/custody submit '$label' has no visible native rectangle"
+    $method = "mouse"
+    if (-not $hit.HitTarget) {
+      Require ($hit.ScannedPoints -gt 0 -and $hit.CoveredPoints -eq $hit.ScannedPoints -and
+        @($hit.CoveringWindows).Count -gt 0) `
+        "sketch/custody submit '$label' has no verified uncovered point or measured occlusion"
+      $focus = Assert-SketchControl $focusId
+      Require ([GraphCodeUiaGateState]::WindowIsVisible($script:edgeWorkflowWindow) -and
+        [GraphCodeUiaGateState]::FocusControl($script:edgeWorkflowWindow, $focus) -and
+        [GraphCodeUiaGateState]::SendKeyInput(0x0D, 1) -eq 1) `
+        "sketch/custody submit '$label' measured-occluded Enter injection failed"
+      $method = "keyboardEnter"
+    }
+    $result = [ordered]@{
+      label = $label; method = $method; point = @($hit.ScreenX, $hit.ScreenY)
+      hitTarget = $hit.HitTarget; covered = "$($hit.CoveredPoints)/$($hit.ScannedPoints)"
+      controlRect = @($hit.Left, $hit.Top, $hit.Right, $hit.Bottom)
+      uncoveredRectangles = @($hit.UncoveredRectangles | ForEach-Object { ,@($_) })
+      chosenUncoveredRectangle = if ($hit.ChosenUncoveredRectangle) {
+        @($hit.ChosenUncoveredRectangle)
+      } else { $null }
+      coveringWindows = @($hit.CoveringWindows)
+    }
+    Write-Host ("UIA_SKETCH_CUSTODY_SUBMIT=" + ($result | ConvertTo-Json -Compress))
+    return $result
+  }
+  function Sketch-Cancel([string] $label) {
+    Require (Ensure-ShellForeground $script:edgeWorkflowWindow "$label cancel") `
+      "sketch/custody '$label' lost foreground before cancel"
+    Require ([GraphCodeUiaGateState]::SendKeyInput(0x1B, 1) -eq 1) `
+      "sketch/custody '$label' native Escape injection failed"
+    Wait-EdgeClosed $script:edgeWorkflowTitle
+    return [ordered]@{ input = "Escape"; injectedEvents = 1; modalClosed = $true }
+  }
+  function Sketch-NoMutation([string] $label, [string] $bytes, $before) {
+    Start-Sleep -Milliseconds 250
+    $after = Read-SketchStub
+    $afterBytes = Edge-LogBytes
+    $unchanged = $afterBytes -ceq $bytes
+    Require ($bytes.Length -gt 0 -and $unchanged -and
+      (Edge-GraphCount $after) -eq (Edge-GraphCount $before) -and
+      @($after.receivedGraphCommands).Count -eq @($before.receivedGraphCommands).Count -and
+      @($after.appliedPromotions).Count -eq @($before.appliedPromotions).Count -and
+      @($after.appliedCreates).Count -eq @($before.appliedCreates).Count) `
+      "sketch/custody '$label' mutated daemon command bytes or applied graph state"
+    $evidence = [ordered]@{
+      label = $label; commandLogBytesUnchanged = $unchanged
+      commandLogBytesBeforeBase64 = $bytes; commandLogBytesAfterBase64 = $afterBytes
+      commandLogByteLength = [Convert]::FromBase64String($bytes).Length
+      graphCommandsBefore = Edge-GraphCount $before; graphCommandsAfter = Edge-GraphCount $after
+    }
+    Write-Host ("UIA_SKETCH_CUSTODY_NO_MUTATION=" + ($evidence | ConvertTo-Json -Compress))
+    return $evidence
+  }
+  function Open-SketchNodeMenu([string] $title) {
+    $actual = Find-FragmentByIdWithRetry $renameRoot "actual-size" $rawWalker
+    Require ($null -ne $actual) "sketch/custody live hit test omitted Actual Size"
+    $actual.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $graph = Find-FragmentByIdWithRetry $renameRoot "graph" $rawWalker
+    Require ($null -ne $graph) "sketch/custody graph absent before node hit test"
+    $cards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -ceq $title
+    })
+    Require ($cards.Count -eq 1) "sketch/custody '$title' has $($cards.Count) rendered graph cards"
+    $rect = $cards[0].Current.BoundingRectangle
+    $graphBounds = $graph.Current.BoundingRectangle
+    $left = [Math]::Max($rect.Left, $graphBounds.Left)
+    $top = [Math]::Max($rect.Top, $graphBounds.Top)
+    $right = [Math]::Min($rect.Right, $graphBounds.Right)
+    $bottom = [Math]::Min($rect.Bottom, $graphBounds.Bottom)
+    Require ($right -gt $left -and $bottom -gt $top) `
+      "sketch/custody '$title' card has no live hit-test area inside the canvas"
+    $x = [int](($left + $right) / 2)
+    $y = [int](($top + $bottom) / 2)
+    $cx = 0; $cy = 0
+    Require (Ensure-ShellForeground $renameShellWindow "sketch/custody $title menu") `
+      "sketch/custody '$title' lost shell foreground"
+    Require ([GraphCodeUiaGateState]::ScreenToClientPoint($renameShellWindow, $x, $y, [ref]$cx, [ref]$cy) -and
+      [GraphCodeUiaGateState]::PostRightClickAt($renameShellWindow, $cx, $cy)) `
+      "sketch/custody '$title' live node hit-test right-click failed"
+    $popup = Wait-ForPopupMenu $renameProcess $renameShellWindow "sketch/custody $title"
+    Require ($popup -ne [IntPtr]::Zero) "sketch/custody '$title' returned no native popup"
+    $items = @(Get-PopupMenuItems $popup)
+    Require ($items.Count -gt 0 -and @($items | Where-Object { $_.Id -eq 5100 }).Count -eq 1) `
+      "sketch/custody '$title' right-click did not hit a node: $(Format-PopupMenuItems $items)"
+    return [ordered]@{
+      popup = $popup; items = $items; point = @($x, $y)
+      cardId = $cards[0].Current.AutomationId; cardTitle = $cards[0].Current.Name
+    }
+  }
+  function Sketch-ClickMenu($menu, [int] $id) {
+    $item = @($menu.items | Where-Object { $_.Id -eq $id -and $_.Enabled })
+    Require ($item.Count -eq 1) "sketch/custody popup missing enabled ${id}: $(Format-PopupMenuItems $menu.items)"
+    $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($menu.popup, $renameShellWindow,
+      [int]$item[0].Position, $id)
+    Require ($null -ne $click -and $click.CursorAtX -ge $click.Left -and
+      $click.CursorAtX -lt $click.Right -and $click.CursorAtY -ge $click.Top -and
+      $click.CursorAtY -lt $click.Bottom) "sketch/custody physical menu click missed $id"
+    return [ordered]@{ id = $id; point = @($click.CursorAtX, $click.CursorAtY) }
+  }
+  $sketchBaseline = Read-SketchStub
+  $sketchGraphBaseline = Edge-GraphCount $sketchBaseline
+  $sketchInitialSequence = [int]$sketchBaseline.graphSequence
+  Require ($sketchGraphBaseline -gt 0 -and @($sketchBaseline.appliedCreates).Count -eq 1 -and
+    @($sketchBaseline.appliedPromotions).Count -eq 0 -and
+    @($sketchBaseline.receivedGraphCommands).Count -eq $sketchGraphBaseline) `
+    "sketch/custody positive connected-daemon baseline absent"
+  $sketchResults = [Collections.Generic.List[object]]::new()
+  $promotionCases = @(
+    [pscustomobject]@{ Index = 1; Command = 5116; Target = "Goal"; Type = "goalBased" },
+    [pscustomobject]@{ Index = 2; Command = 5117; Target = "Turn"; Type = "turnBased" },
+    [pscustomobject]@{ Index = 3; Command = 5118; Target = "Timed"; Type = "timeBased" }
+  )
+  foreach ($case in $promotionCases) {
+    $id = "66666666-6666-4666-8666-{0:x12}" -f $case.Index
+    $title = "UIA sketch $($case.Index)"
+    $menu = Open-SketchNodeMenu $title
+    $parent = @($menu.items | Where-Object { $_.Text -eq "Promote to..." -and $_.Enabled })
+    Require ($parent.Count -eq 1) "sketch '$title' omitted native Promote to submenu"
+    $rootHandle = [GraphCodeUiaGateState]::PopupMenuHandle($menu.popup)
+    $subHandle = [GraphCodeUiaGateState]::NativeSubMenu($rootHandle, [int]$parent[0].Position)
+    $subItems = @(Get-NativeMenuItems $subHandle)
+    Require ($subHandle -ne [IntPtr]::Zero -and $subItems.Count -eq 3 -and
+      (($subItems | ForEach-Object { $_.Id }) -join ',') -ceq "5116,5117,5118" -and
+      @($subItems | Where-Object { -not $_.Enabled }).Count -eq 0) `
+      "sketch '$title' real HMENU submenu differs: $(Format-PopupMenuItems $subItems)"
+    Require ([GraphCodeUiaGateState]::HoverPopupMenuItem($renameShellWindow, $rootHandle,
+      [int]$parent[0].Position)) "sketch '$title' could not physically reveal submenu"
+    $subPopup = [IntPtr]::Zero
+    for ($retry = 0; $retry -lt 60 -and $subPopup -eq [IntPtr]::Zero; $retry++) {
+      $subPopup = [GraphCodeUiaGateState]::FindPopupForMenu([uint32]$renameProcess.Id, $subHandle)
+      if ($subPopup -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+    }
+    Require ($subPopup -ne [IntPtr]::Zero) "sketch '$title' submenu was not physically shown"
+    $subMenu = @{ popup = $subPopup; items = $subItems }
+    $menuClick = Sketch-ClickMenu $subMenu $case.Command
+    $modal = Assert-SketchModal "Promote $title to $($case.Target)"
+    $before = Read-SketchStub
+    $bytes = Edge-LogBytes
+    if ($case.Target -eq "Goal") {
+      $invalidClick = Sketch-Submit "empty Goal" 9100
+      $reason = "Say what done looks like to continue."
+      $foundReason = $false
+      for ($retry = 0; $retry -lt 40; $retry++) {
+        if (@([GraphCodeUiaGateState]::VisibleStaticTexts($script:edgeWorkflowWindow)) -contains $reason) {
+          $foundReason = $true; break
+        }
+        Start-Sleep -Milliseconds 50
+      }
+      Require ($foundReason -and [GraphCodeUiaGateState]::WindowIsVisible($script:edgeWorkflowWindow)) `
+        "blank Goal promotion did not reject while native modal remained visible"
+      $rejected = Sketch-NoMutation "blank Goal" $bytes $before
+      $null = Sketch-Type 9100 "UIA done check"
+      $submitFields = @{ goal = Sketch-Field 9100 "Goal summary" }
+    } elseif ($case.Target -eq "Turn") {
+      $pause = Sketch-Combo 9100 1 "Only before it writes files"
+      $submitFields = @{ pause = $pause }
+    } else {
+      $interval = Sketch-Combo 9100 4 "Custom..."
+      $null = Sketch-Type 9101 "2h"
+      $submitFields = @{ interval = $interval; custom = Sketch-Field 9101 "Custom interval" }
+    }
+    $cancelled = $null
+    $cancelAction = $null
+    if ($case.Target -eq "Turn") {
+      $cancelAction = Sketch-Cancel "Turn promotion"
+      $cancelled = Sketch-NoMutation "cancel Turn" $bytes $before
+      $reopen = Open-SketchNodeMenu $title
+      $parent = @($reopen.items | Where-Object { $_.Text -eq "Promote to..." -and $_.Enabled })
+      Require ($parent.Count -eq 1) "cancelled sketch promotion disappeared from menu"
+      $handle = [GraphCodeUiaGateState]::NativeSubMenu(
+        [GraphCodeUiaGateState]::PopupMenuHandle($reopen.popup), [int]$parent[0].Position)
+      Require ([GraphCodeUiaGateState]::HoverPopupMenuItem($renameShellWindow,
+        [GraphCodeUiaGateState]::PopupMenuHandle($reopen.popup), [int]$parent[0].Position)) `
+        "Turn promotion submenu did not reopen"
+      $subPopup = [IntPtr]::Zero
+      for ($retry = 0; $retry -lt 60 -and $subPopup -eq [IntPtr]::Zero; $retry++) {
+        $subPopup = [GraphCodeUiaGateState]::FindPopupForMenu([uint32]$renameProcess.Id, $handle)
+        if ($subPopup -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+      }
+      Require ($subPopup -ne [IntPtr]::Zero) "Turn promotion submenu did not reopen natively"
+      $null = Sketch-ClickMenu @{ popup = $subPopup; items = @(Get-NativeMenuItems $handle) } 5117
+      $modal = Assert-SketchModal "Promote $title to Turn"
+      $submitFields = @{ pause = Sketch-Combo 9100 1 "Only before it writes files" }
+    }
+    if ($case.Target -eq "Goal") {
+      Require ((Sketch-Field 9100 "Goal pre-submit") -ceq "UIA done check") `
+        "Goal promotion changed before submit"
+    }
+    if ($case.Target -eq "Timed") {
+      Require ((Sketch-Field 9101 "Timed pre-submit") -ceq "2h" -and
+        [GraphCodeUiaGateState]::ComboSelection($script:edgeWorkflowWindow, 9100) -ceq "4|Custom...") `
+        "Timed promotion changed before submit"
+    }
+    if ($case.Target -eq "Turn") {
+      Require ([GraphCodeUiaGateState]::ComboSelection($script:edgeWorkflowWindow, 9100) -ceq
+        "1|Only before it writes files") "Turn promotion changed before submit"
+    }
+    $submitFields = [ordered]@{}
+    switch ($case.Target) {
+      "Goal" { $submitFields.goal = Sketch-Field 9100 "Goal immediately before submit" }
+      "Turn" { $submitFields.pause = Sketch-Combo 9100 1 "Only before it writes files" }
+      "Timed" {
+        $submitFields.interval = Sketch-Combo 9100 4 "Custom..."
+        $submitFields.custom = Sketch-Field 9101 "Custom interval immediately before submit"
+      }
+    }
+    Write-Host ("UIA_SKETCH_PROMOTION_SUBMIT_FIELDS target=$($case.Target) " +
+      ($submitFields | ConvertTo-Json -Compress))
+    $submit = Sketch-Submit "$($case.Target) promotion" 9100
+    Wait-EdgeClosed $script:edgeWorkflowTitle
+    $after = $null
+    for ($retry = 0; $retry -lt 100; $retry++) {
+      $after = Read-SketchStub
+      if (@($after.appliedPromotions).Count -eq $case.Index) { break }
+      Start-Sleep -Milliseconds 100
+    }
+    $request = [string](@($after.appliedPromotionRequests)[$case.Index - 1])
+    Require (@($after.appliedPromotions).Count -eq $case.Index -and
+      @($after.appliedPromotions)[$case.Index - 1] -ceq "$id|$($case.Type)" -and
+      (Edge-GraphCount $after) -eq (Edge-GraphCount $before) + 1 -and
+      [int]$after.requestCount -eq [int]$before.requestCount + 1 -and
+      [int]$after.responseCount -eq [int]$before.responseCount + 1 -and
+      @($after.receivedGraphCommands).Count -eq @($before.receivedGraphCommands).Count + 1 -and
+      [int]$after.graphSequence -eq [int]$before.graphSequence + 1 -and
+      [bool]$after.correlatedRequests -and
+      -not [string]::IsNullOrWhiteSpace($request) -and
+      @($after.unansweredRequests) -notcontains $request) `
+      "sketch $($case.Target) request was not applied exactly once and answered: $(Read-UiaTextFile $renameStubResultPath)"
+    $logged = (Read-DaemonCommandLog $renameCommandLogPath | ConvertFrom-Json).graphCommand
+    $received = @($after.receivedGraphCommands | Where-Object { $_.requestID -ceq $request })
+    Require ($received.Count -eq 1 -and
+      ($logged | ConvertTo-Json -Depth 16 -Compress) -ceq
+      (($received[0].command | ConvertFrom-Json) | ConvertTo-Json -Depth 16 -Compress)) `
+      "sketch $($case.Target) recorder command differs from exact stub-received command"
+    $wire = $logged.command.promoteNode
+    Require ($logged.projectPath -ceq "graphcode://stub/project" -and
+      $wire._0 -ceq $id -and $null -eq $wire.promotedBy -and
+      @($wire.promotion.PSObject.Properties.Name).Count -eq 1) `
+      "sketch $($case.Target) exact promoteNode wire payload differs from native decision"
+    switch ($case.Target) {
+      "Goal" {
+        Require ($null -ne $wire.promotion.goal -and
+          $wire.promotion.goal._0.summary -ceq "UIA done check" -and
+          $wire.promotion.goal._0.pollIntervalSeconds -eq 60 -and
+          $wire.promotion.goal._0.metricDirection -ceq "maximize" -and
+          $wire.promotion.goal._0.skipsUnchangedWorkspace -ceq $false) `
+          "Goal promotion wire omitted the exact summary and cadence defaults"
+      }
+      "Turn" {
+        Require ($null -ne $wire.promotion.turn -and
+          $wire.promotion.turn.pausesBeforeWritesOnly -ceq $true) `
+          "Turn promotion wire omitted the native pause choice"
+      }
+      "Timed" {
+        Require ($null -ne $wire.promotion.timed -and
+          $wire.promotion.timed.triggerPrompt -ceq "/loop 2h Continue sketch work") `
+          "Timed promotion wire omitted the native custom cadence and seeded task"
+      }
+    }
+    $promotedGraphNode = @($after.graphNodes | Where-Object { $_.id -ceq $id })
+    Require ($promotedGraphNode.Count -eq 1 -and
+      $promotedGraphNode[0].title -ceq $title -and
+      $promotedGraphNode[0].loopType -ceq $case.Type) `
+      "republished graph state does not retain sketch identity and the selected target type"
+    $renderMenu = Open-SketchNodeMenu $title
+    Require (@($renderMenu.items | Where-Object { $_.Text -eq "Promote to..." }).Count -eq 0 -and
+      @($renderMenu.items | Where-Object { $_.Id -eq 5119 -and $_.Enabled }).Count -eq 1 -and
+      $renderMenu.cardId -ceq $menu.cardId) `
+      "republished $($case.Target) node was not hit-tested as promoted"
+    Require (Close-PopupMenu $renameProcess $renderMenu.popup $renameShellWindow "promoted $title") `
+      "promoted sketch popup did not close"
+    $sketchResults.Add([ordered]@{
+      target = $case.Target; nodeId = $id; title = $title; resultingType = $case.Type
+      initialMenuPoint = $menu.point; submenuIds = @($subItems | ForEach-Object { $_.Id })
+      menuClick = $menuClick; modal = $modal; submitFields = $submitFields
+      rejected = if ($case.Target -eq "Goal") { $rejected } else { $null }
+      cancelled = $cancelled; cancelInput = if ($case.Target -eq "Turn") { $cancelAction } else { $null }
+      submit = $submit; requestId = $request; requestAnswered = $true
+      receivedWire = ($received[0].command | ConvertFrom-Json)
+      commandLogBase64 = Edge-LogBytes
+      appliedCount = @($after.appliedPromotions).Count
+      graphSequence = [int]$after.graphSequence
+      republishedNode = $promotedGraphNode[0]
+      renderedHitTest = @{
+        point = $renderMenu.point; cardIdBefore = $menu.cardId; cardIdAfter = $renderMenu.cardId
+        sameIdentity = ($renderMenu.cardId -ceq $menu.cardId); promotedMenuGone = $true
+      }
+    })
+  }
+
+  $custodyParent = Open-SketchNodeMenu $renameFinalTitle
+  Require (@($custodyParent.items | Where-Object { $_.Id -eq 5119 -and $_.Enabled }).Count -eq 1) `
+    "unresolved parent omitted enabled New Child"
+  $custodyMenuClick = Sketch-ClickMenu $custodyParent 5119
+  $custodyModal = Assert-SketchModal "Create or edit node"
+  $custodyBefore = Read-SketchStub
+  $custodyBytes = Edge-LogBytes
+  $inheritedBackend = [GraphCodeUiaGateState]::ComboSelection($script:edgeWorkflowWindow, 9112)
+  Require ($inheritedBackend -ceq "2|GitHub Copilot CLI") `
+    "custody child did not inherit parent's editable backend: '$inheritedBackend'"
+  $custodyChangedBackend = Sketch-Combo 9112 1 "Claude Code"
+  $custodyCancel = Sketch-Cancel "New Child"
+  $custodyCancelled = Sketch-NoMutation "cancel New Child" $custodyBytes $custodyBefore
+  $custodyParent = Open-SketchNodeMenu $renameFinalTitle
+  $null = Sketch-ClickMenu $custodyParent 5119
+  $custodyModal = Assert-SketchModal "Create or edit node"
+  Require ([GraphCodeUiaGateState]::ComboSelection($script:edgeWorkflowWindow, 9112) -ceq
+    "2|GitHub Copilot CLI") "reopened custody child lost inherited backend"
+  $null = Sketch-Type 9100 "UIA custody child"
+  $null = Sketch-Type 9104 "Continue under parent"
+  $null = Sketch-Combo 9112 1 "Claude Code"
+  $custodySubmitFields = [ordered]@{
+    title = Sketch-Field 9100 "custody title immediately before submit"
+    firstInstruction = Sketch-Field 9104 "custody instruction immediately before submit"
+    backend = Sketch-Combo 9112 1 "Claude Code"
+  }
+  Require ($custodySubmitFields.title -ceq "UIA custody child" -and
+    $custodySubmitFields.firstInstruction -ceq "Continue under parent" -and
+    $custodySubmitFields.backend -ceq "1|Claude Code") `
+    "custody child native fields changed before submission"
+  Write-Host ("UIA_CUSTODY_SUBMIT_FIELDS=" + ($custodySubmitFields | ConvertTo-Json -Compress))
+  $custodySubmit = Sketch-Submit "custody child Create" 9100
+  Wait-EdgeClosed $script:edgeWorkflowTitle
+  $custodyAfter = $null
+  for ($retry = 0; $retry -lt 100; $retry++) {
+    $custodyAfter = Read-SketchStub
+    if (@($custodyAfter.appliedCreates).Count -eq 2) { break }
+    Start-Sleep -Milliseconds 100
+  }
+  Require (@($custodyAfter.appliedCreates).Count -eq 2 -and
+    (Edge-GraphCount $custodyAfter) -eq (Edge-GraphCount $custodyBefore) + 1 -and
+    [int]$custodyAfter.requestCount -eq [int]$custodyBefore.requestCount + 1 -and
+    [int]$custodyAfter.responseCount -eq [int]$custodyBefore.responseCount + 1 -and
+    @($custodyAfter.receivedGraphCommands).Count -eq @($custodyBefore.receivedGraphCommands).Count + 1 -and
+    [int]$custodyAfter.graphSequence -eq [int]$custodyBefore.graphSequence + 1 -and
+    [bool]$custodyAfter.correlatedRequests) `
+    "custody child not applied exactly once"
+  $custodyParts = ([string]$custodyAfter.appliedCreates[1]).Split("|")
+  $custodyId = $custodyParts[0]
+  $custodyRequest = [string]$custodyAfter.appliedCreateRequests[1]
+  Require ($custodyId -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' -and
+    $custodyParts[1] -ceq "UIA custody child" -and $custodyParts[2] -ceq "turnBased" -and
+    $custodyParts[3] -ceq "claudeCode" -and
+    -not [string]::IsNullOrWhiteSpace($custodyRequest) -and
+    @($custodyAfter.unansweredRequests) -notcontains $custodyRequest) `
+    "custody applied fields or correlated response differ from submitted native form"
+  $custodyLogged = (Read-DaemonCommandLog $renameCommandLogPath | ConvertFrom-Json).graphCommand
+  $custodyReceived = @($custodyAfter.receivedGraphCommands | Where-Object { $_.requestID -ceq $custodyRequest })
+  $custodyWire = $custodyLogged.command.createNode._0
+  Require ($custodyReceived.Count -eq 1 -and
+    ($custodyLogged | ConvertTo-Json -Depth 16 -Compress) -ceq
+    (($custodyReceived[0].command | ConvertFrom-Json) | ConvertTo-Json -Depth 16 -Compress) -and
+    $custodyLogged.projectPath -ceq "graphcode://stub/project" -and
+    $custodyWire.id -ceq $custodyId -and $custodyWire.title -ceq "UIA custody child" -and
+    $custodyWire.createdBy -ceq $renameNodeId -and $custodyWire.backend -ceq "claudeCode" -and
+    $custodyWire.loopType -ceq "turnBased" -and
+    $custodyWire.firstInstruction -ceq "Continue under parent" -and
+    $null -eq $custodyWire.subGraph) `
+    "custody createNode wire differs from the exact stub-received child/parent identity"
+  $custodyGraphNode = @($custodyAfter.graphNodes | Where-Object { $_.id -ceq $custodyId })
+  $custodyParentBefore = @($custodyBefore.graphNodes | Where-Object { $_.id -ceq $renameNodeId })
+  $custodyParentAfter = @($custodyAfter.graphNodes | Where-Object { $_.id -ceq $renameNodeId })
+  Require ($custodyGraphNode.Count -eq 1 -and $custodyGraphNode[0].title -ceq "UIA custody child" -and
+    $custodyGraphNode[0].createdBy -ceq $renameNodeId -and
+    $custodyParentBefore.Count -eq 1 -and $custodyParentAfter.Count -eq 1 -and
+    $custodyParentAfter[0].title -ceq $custodyParentBefore[0].title -and
+    $custodyParentAfter[0].loopType -ceq $custodyParentBefore[0].loopType -and
+    @($custodyAfter.edges).Count -eq @($custodyBefore.edges).Count) `
+    "republished custody graph state omitted the created child or exact custody parent"
+  $custodyRendered = Open-SketchNodeMenu "UIA custody child"
+  Require (@($custodyRendered.items | Where-Object { $_.Id -eq 5119 -and $_.Enabled }).Count -eq 1) `
+    "republished custody child was not hit-tested as an unresolved node"
+  Require (Close-PopupMenu $renameProcess $custodyRendered.popup $renameShellWindow "custody child") `
+    "custody child hit-test menu did not close"
+  $sketchCustodyEvidence = [ordered]@{
+    baseline = @{ graphCommands = $sketchGraphBaseline; graphSequence = $sketchInitialSequence
+      seededSketchCount = $promotionCases.Count }
+    promotions = @($sketchResults)
+    custody = @{
+      parentId = $renameNodeId; menuClick = $custodyMenuClick; modal = $custodyModal
+      inheritedBackend = $inheritedBackend; changedBackend = $custodyChangedBackend
+      cancelInput = $custodyCancel; cancelled = $custodyCancelled; submit = $custodySubmit
+      submitFields = $custodySubmitFields
+      childId = $custodyId; createdBy = [string]$custodyWire.createdBy
+      parentUnchanged = @{
+        titleBefore = [string]$custodyParentBefore[0].title
+        titleAfter = [string]$custodyParentAfter[0].title
+        loopTypeBefore = [string]$custodyParentBefore[0].loopType
+        loopTypeAfter = [string]$custodyParentAfter[0].loopType
+        edgeCountBefore = @($custodyBefore.edges).Count
+        edgeCountAfter = @($custodyAfter.edges).Count
+      }
+      backend = [string]$custodyWire.backend; requestId = $custodyRequest
+      requestAnswered = $true
+      receivedWire = ($custodyReceived[0].command | ConvertFrom-Json)
+      commandLogBase64 = Edge-LogBytes
+      appliedCount = @($custodyAfter.appliedCreates).Count
+      graphSequence = [int]$custodyAfter.graphSequence
+      republishedNode = $custodyGraphNode[0]
+      renderedHitTest = @{ point = $custodyRendered.point; cardId = $custodyRendered.cardId }
+    }
+    renderedHitTests = 4
+    limit = "Stub graphChanged and live node-card hit tests; not a production daemon session, active session preservation, glyph rendering, or macOS runtime parity."
+  }
+  Write-Host ("UIA_SKETCH_CUSTODY_EVIDENCE=" + ($sketchCustodyEvidence | ConvertTo-Json -Depth 8 -Compress))
+
   Require ([GraphCodeUiaGateState]::PostCommand($renameShellWindow, 0x5002)) `
     "connected-daemon shell rejected the tray Exit command"
   Require $renameProcess.WaitForExit(5000) "connected-daemon shell did not exit"
@@ -7146,6 +7640,7 @@ try {
     canvasContextMenu = $canvasContextMenuEvidence
     edgeWorkflow = $edgeWorkflowEvidence
     nodeCreationSheet = $nodeCreationSheetEvidence
+    sketchCustody = $sketchCustodyEvidence
     contextMenuItemCount = $projectMenuItems.Count
     contextMenuMoveProjectText = $moveProjectItem.Text
     contextMenuMoveProjectEnabled = $moveProjectItem.Enabled
