@@ -5843,7 +5843,7 @@ try {
   $nodeSheetTriggerPrompt = "Summarize new commits"
   $expectedCreateLoopType = "timeBased"
   $expectedCreateBackend = "copilotCLI"
-  $expectedModelTier = "capable"
+  $expectedModelTier = "fast"
 
   $nodeSheetProjects = Find-FragmentByIdWithRetry $renameRoot "projects" $rawWalker
   Require ($null -ne $nodeSheetProjects) "connected-daemon shell omitted its Projects fragment"
