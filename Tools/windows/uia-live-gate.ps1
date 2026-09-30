@@ -138,6 +138,8 @@ public static class GraphCodeUiaGateState {
   private static extern uint GetMenuItemID(IntPtr menu, int position);
   [DllImport("user32.dll")]
   private static extern uint GetMenuState(IntPtr menu, uint item, uint flags);
+  [DllImport("user32.dll")]
+  private static extern bool GetMenuItemRect(IntPtr window, IntPtr menu, uint position, out RECT rect);
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMenuStringW")]
   private static extern int GetMenuString(IntPtr menu, uint item, StringBuilder text, int max, uint flags);
   // The File/Loop/Terminal/Workspace/View/Help bar is a real SetMenu menu bar,
@@ -430,17 +432,35 @@ public static class GraphCodeUiaGateState {
     return PostMessage(window, 0x0204, (UIntPtr)0x0002, point) &&
       PostMessage(window, 0x0205, UIntPtr.Zero, point);
   }
-  private static bool PostPopupKey(IntPtr popup, uint key) {
-    return PostMessage(popup, 0x0100, (UIntPtr)key, IntPtr.Zero) &&
-      PostMessage(popup, 0x0101, (UIntPtr)key, IntPtr.Zero);
+  public sealed class PopupItemHit {
+    public int Position, ItemId, Left, Top, Right, Bottom;
+    public int ScreenX, ScreenY, ClientX, ClientY;
   }
-  public static bool SelectPopupMenuItem(IntPtr popup, int position) {
-    if (popup == IntPtr.Zero || position < 0) return false;
-    if (!PostPopupKey(popup, 0x0024)) return false; // VK_HOME
-    for (int index = 0; index < position; index++) {
-      if (!PostPopupKey(popup, 0x0028)) return false; // VK_DOWN
-    }
-    return PostPopupKey(popup, 0x000D); // VK_RETURN
+  public static PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position, int commandId) {
+    if (popup == IntPtr.Zero || position < 0) return null;
+    IntPtr menu = PopupMenuHandle(popup);
+    RECT item;
+    if (menu == IntPtr.Zero || !GetMenuItemRect(owner, menu, (uint)position, out item) ||
+        item.Right <= item.Left || item.Bottom <= item.Top ||
+        PopupMenuItemId(menu, position) != (uint)commandId) return null;
+    int screenX = (item.Left + item.Right) / 2;
+    int screenY = (item.Top + item.Bottom) / 2;
+    if (screenX < item.Left || screenX >= item.Right ||
+        screenY < item.Top || screenY >= item.Bottom) return null;
+    var point = new ScreenPoint {
+      X = screenX,
+      Y = screenY
+    };
+    if (!ScreenToClient(popup, ref point)) return null;
+    IntPtr coordinates = MouseLParam(point.X, point.Y);
+    if (!PostMessage(popup, 0x0200, UIntPtr.Zero, coordinates) ||
+        !PostMessage(popup, 0x0201, (UIntPtr)0x0001, coordinates) ||
+        !PostMessage(popup, 0x0202, UIntPtr.Zero, coordinates)) return null;
+    return new PopupItemHit {
+      Position = position, ItemId = commandId, Left = item.Left, Top = item.Top,
+      Right = item.Right, Bottom = item.Bottom,
+      ScreenX = screenX, ScreenY = screenY, ClientX = point.X, ClientY = point.Y
+    };
   }
   // Sidebar.updateBannerRect/updateBannerAt are pixel-only hit-test geometry with
   // no UIA identity of their own, so a genuine click requires the real live client
@@ -4738,9 +4758,20 @@ try {
   $editEdgeMenuItem = @($edgeActionItems | Where-Object { $_.Id -eq 5110 }) | Select-Object -First 1
   Require ($null -ne $editEdgeMenuItem) `
     "canvas edge action menu omitted Edit Edge: $(Format-PopupMenuItems $edgeActionItems)"
-  Require ([GraphCodeUiaGateState]::SelectPopupMenuItem(
-    $edgeActionPopup, [int]$editEdgeMenuItem.Position
-  )) "canvas edge Edit Edge item could not be invoked"
+  $editEdgeClick = [GraphCodeUiaGateState]::ClickPopupMenuItem(
+    $edgeActionPopup, $shellWindow, [int]$editEdgeMenuItem.Position, [int]$editEdgeMenuItem.Id
+  )
+  Require ($null -ne $editEdgeClick) "canvas edge Edit Edge item could not be clicked"
+  $editEdgeClickEvidence = [ordered]@{
+    position = $editEdgeClick.Position
+    id = $editEdgeClick.ItemId
+    itemRect = @($editEdgeClick.Left, $editEdgeClick.Top,
+      $editEdgeClick.Right, $editEdgeClick.Bottom)
+    screenPoint = @($editEdgeClick.ScreenX, $editEdgeClick.ScreenY)
+    clientPoint = @($editEdgeClick.ClientX, $editEdgeClick.ClientY)
+  }
+  Write-Host ("UIA_CANVAS_EDGE_ACTION_CLICK_EVIDENCE=" +
+    ($editEdgeClickEvidence | ConvertTo-Json -Compress))
   $edgeDialogCondition = New-Object System.Windows.Automation.AndCondition(
     (New-Object System.Windows.Automation.PropertyCondition(
       [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
@@ -4763,7 +4794,7 @@ try {
     -RecoverForeground
   $canvasEdgeEditDialogOpened = $null -ne $canvasEdgeDialog
   Require $canvasEdgeEditDialogOpened `
-    "invoking Edit Edge from the canvas did not open the edge editor"
+    "clicking Edit Edge from the canvas did not open the edge editor: $($editEdgeClickEvidence | ConvertTo-Json -Compress)"
   $canvasEdgeFrom = $canvasEdgeDialog.FindFirst(
     [System.Windows.Automation.TreeScope]::Descendants,
     (New-Object System.Windows.Automation.PropertyCondition(
@@ -4823,6 +4854,7 @@ try {
       screenPoint = @($edgePoint.X, $edgePoint.Y)
       items = @(ConvertTo-PopupMenuEvidence $edgeCanvasMenu.Items)
       dismissed = $edgeCanvasMenu.Dismissed
+      actionClick = $editEdgeClickEvidence
       editActionDialogOpened = $canvasEdgeEditDialogOpened
       editActionCancelled = $canvasEdgeEditCancelled
       daemonCommandUnchanged = $canvasEdgeDaemonCommandUnchanged
