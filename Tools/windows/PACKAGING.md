@@ -258,7 +258,7 @@ The current accepted public provider commits are:
 | Provider | Pinned commit | Retained branch |
 |---|---|---|
 | [coneilen/winghostty](https://github.com/coneilen/winghostty/commit/f5abc059e4ca58b376eb209313aca7784659c679) | `f5abc059e4ca58b376eb209313aca7784659c679` | `graphcode-host` |
-| [coneilen/zmx](https://github.com/coneilen/zmx/commit/dcf61203cd390d43451c25636776d7d64ecfd629) | `dcf61203cd390d43451c25636776d7d64ecfd629` | `graphcode-quickchat-hang` |
+| [coneilen/zmx](https://github.com/coneilen/zmx/commit/785b3fd15dcafd1882b495c831a10f98c201b908) | `785b3fd15dcafd1882b495c831a10f98c201b908` | `graphcode-quickchat-hang` |
 
 The annotated `graphcode-windows-baseline-2026-09-17` tags remain historical
 source-retention references:
@@ -266,8 +266,8 @@ source-retention references:
 preserves `f5abc059e4ca58b376eb209313aca7784659c679`, and
 [zmx's baseline](https://github.com/coneilen/zmx/tree/graphcode-windows-baseline-2026-09-17)
 preserves `029e11d2b19162fb3bdf90c8270237d303b8bfb4`, not the current zmx pin.
-The current zmx commit adopts the startup fix merged in
-[coneilen/zmx#2](https://github.com/coneilen/zmx/pull/2).
+The current zmx commit adopts the named-pipe accept-deadline race fix merged in
+[coneilen/zmx#4](https://github.com/coneilen/zmx/pull/4).
 
 As verified on 2026-09-17, each fork has an active ruleset forbidding updates or
 deletion of `refs/tags/graphcode-windows-*`, without bypass actors. Separate

@@ -443,21 +443,6 @@ foreach ($path in @(
     "required scaffold file is missing: $path"
 }
 
-$pins = Get-Content -LiteralPath (Join-Path $shellRoot "provider-pins.json") -Raw |
-  ConvertFrom-Json
-Assert-Contract ($pins.schemaVersion -eq 1) "provider pin schema is not 1"
-Assert-Contract ($pins.winghostty.sha -eq
-  "f5abc059e4ca58b376eb209313aca7784659c679") "Winghostty pin changed"
-Assert-Contract ($pins.zmx.sha -eq
-  "dcf61203cd390d43451c25636776d7d64ecfd629") "zmx pin changed"
-Assert-Contract ($pins.winghostty.remoteUrl -eq
-  "https://github.com/coneilen/winghostty.git") "Winghostty remote URL changed"
-Assert-Contract ($pins.zmx.remoteUrl -eq
-  "https://github.com/coneilen/zmx.git") "zmx remote URL changed"
-Assert-Contract (-not $pins.localFallback.enabled) "local provider fallback remains enabled"
-Assert-Contract (-not $pins.localFallback.remoteWorkflowBlocked) `
-  "remote provider workflow remains blocked"
-
 $metadata = Get-Content -LiteralPath (Join-Path $shellRoot "package-metadata.json") -Raw |
   ConvertFrom-Json
 Assert-Contract ($metadata.installer -eq $true) "installer metadata is not enabled"
@@ -550,6 +535,24 @@ Assert-Contract ($codespaceDialogSource -match 'IsDialogMessageW') `
   "the codespace sheet must remain keyboard navigable"
 
 $zig = Resolve-TestZig
+Invoke-Native "Provider pin contracts" {
+  $pins = Get-Content -LiteralPath (Join-Path $shellRoot "provider-pins.json") -Raw |
+    ConvertFrom-Json
+  Assert-Contract ($pins.schemaVersion -eq 1) "provider pin schema is not 1"
+  Assert-Contract ($pins.winghostty.sha -eq
+    "f5abc059e4ca58b376eb209313aca7784659c679") "Winghostty pin changed"
+  Assert-Contract ($pins.zmx.sha -eq
+    "785b3fd15dcafd1882b495c831a10f98c201b908") "zmx pin changed"
+  Assert-Contract ($pins.winghostty.remoteUrl -eq
+    "https://github.com/coneilen/winghostty.git") "Winghostty remote URL changed"
+  Assert-Contract ($pins.zmx.remoteUrl -eq
+    "https://github.com/coneilen/zmx.git") "zmx remote URL changed"
+  Assert-Contract (-not $pins.localFallback.enabled) "local provider fallback remains enabled"
+  Assert-Contract (-not $pins.localFallback.remoteWorkflowBlocked) `
+    "remote provider workflow remains blocked"
+  & $zig version | Out-Null
+}
+
 Invoke-Native "Accessibility contract executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Accessibility.zig } finally { Pop-Location }
