@@ -7291,9 +7291,23 @@ try {
     Require ($null -ne $actual) "sketch/custody live hit test omitted Actual Size"
     $actual.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   }
+  function Get-SketchCardAutomationId([string] $nodeId) {
+    $identity = "project-card:graphcode://stub/project:$nodeId"
+    $hash = [System.Numerics.BigInteger]::Parse("1469598103934665603")
+    $modulus64 = [System.Numerics.BigInteger]::Parse("18446744073709551616")
+    $payloadModulus = [System.Numerics.BigInteger]::Parse("1152921504606846976")
+    $prime = [System.Numerics.BigInteger]::Parse("1099511628211")
+    foreach ($value in [Text.Encoding]::UTF8.GetBytes($identity)) {
+      $hash = $hash -bxor [System.Numerics.BigInteger]$value
+      $hash = ($hash * $prime) % $modulus64
+    }
+    $rowKey = $payloadModulus + ($hash % $payloadModulus)
+    return "canvas-card-$rowKey"
+  }
   function Wait-SketchGraphCard(
     [string] $title, [string] $expectedNodeId, [int] $graphSequence, [int] $maximumAttempts = 50
   ) {
+    $expectedAutomationId = Get-SketchCardAutomationId $expectedNodeId
     $baselineGraph = Find-FragmentByIdWithRetry $renameRoot "graph" $rawWalker
     Require ($null -ne $baselineGraph) "sketch/custody graph absent before child-card wait"
     $baselineCards = @(Get-DirectChildren $baselineGraph $rawWalker | Where-Object {
@@ -7319,15 +7333,14 @@ try {
       })
       $titleCards = @($cards | Where-Object { $_.Current.Name -ceq $title })
       $identityCards = @($titleCards | Where-Object {
-        ([string]$_.Current.AutomationId).IndexOf(
-          $expectedNodeId, [StringComparison]::OrdinalIgnoreCase
-        ) -ge 0
+        [string]$_.Current.AutomationId -ceq $expectedAutomationId
       })
       $lastTitleCount = $titleCards.Count
       $lastIdentityCount = $identityCards.Count
       Write-Host ("UIA_SKETCH_CUSTODY_CARD_WAIT=" + ([ordered]@{
         attempt = $attempt; maximumAttempts = $maximumAttempts
         expectedChildUUID = $expectedNodeId; expectedTitle = $title
+        expectedAutomationId = $expectedAutomationId
         graphSequence = $graphSequence; positiveBaselineGraphCardCount = $baselineCount
         graphCardCount = $cards.Count; matchingTitleCount = $lastTitleCount
         matchingIdentityCount = $lastIdentityCount; graphCards = $lastSnapshot
@@ -7337,13 +7350,14 @@ try {
           attempts = $attemptsExecuted; positiveBaselineGraphCardCount = $baselineCount
           graphCardCount = $cards.Count; expectedChildUUID = $expectedNodeId
           title = $title; graphSequence = $graphSequence
+          expectedAutomationId = $expectedAutomationId
           automationId = [string]$identityCards[0].Current.AutomationId
           graphCards = $lastSnapshot
         }
       }
       if ($attempt -lt $maximumAttempts) { Start-Sleep -Milliseconds 100 }
     }
-    throw "sketch/custody child card did not converge after attempts=$attemptsExecuted/$maximumAttempts expectedChildUUID=$expectedNodeId expectedTitle='$title' graphSequence=$graphSequence positiveBaselineGraphCardCount=$baselineCount graphCardCount=$($lastSnapshot.Count) matchingTitleCount=$lastTitleCount matchingIdentityCount=$lastIdentityCount graphCards=$($lastSnapshot | ConvertTo-Json -Compress -Depth 4)"
+    throw "sketch/custody child card did not converge after attempts=$attemptsExecuted/$maximumAttempts expectedChildUUID=$expectedNodeId expectedAutomationId=$expectedAutomationId expectedTitle='$title' graphSequence=$graphSequence positiveBaselineGraphCardCount=$baselineCount graphCardCount=$($lastSnapshot.Count) matchingTitleCount=$lastTitleCount matchingIdentityCount=$lastIdentityCount graphCards=$($lastSnapshot | ConvertTo-Json -Compress -Depth 4)"
   }
   function Open-SketchNodeMenu(
     [string] $title, [switch] $SkipActualSize, [string] $ExpectedCardId = ""
@@ -7356,9 +7370,7 @@ try {
     })
     Require ($cards.Count -eq 1) "sketch/custody '$title' has $($cards.Count) rendered graph cards"
     if (-not [string]::IsNullOrWhiteSpace($ExpectedCardId)) {
-      Require (([string]$cards[0].Current.AutomationId).IndexOf(
-        $ExpectedCardId, [StringComparison]::OrdinalIgnoreCase
-      ) -ge 0) `
+      Require ([string]$cards[0].Current.AutomationId -ceq $ExpectedCardId) `
         "sketch/custody '$title' fresh card UUID identity differs: expected=$ExpectedCardId actual=$($cards[0].Current.AutomationId)"
     }
     $rect = $cards[0].Current.BoundingRectangle
@@ -7722,9 +7734,10 @@ try {
     @($custodyAfter.edges).Count -eq @($custodyBefore.edges).Count) `
     "republished custody graph state omitted the created child or exact custody parent"
   Normalize-SketchCanvas
+  $custodyExpectedAutomationId = Get-SketchCardAutomationId $custodyId
   $custodyRenderWait = Wait-SketchGraphCard "UIA custody child" $custodyId `
     ([int]$custodyAfter.graphSequence)
-  $custodyRendered = Open-SketchNodeMenu "UIA custody child" -SkipActualSize -ExpectedCardId $custodyId
+  $custodyRendered = Open-SketchNodeMenu "UIA custody child" -SkipActualSize -ExpectedCardId $custodyExpectedAutomationId
   Require (@($custodyRendered.items | Where-Object { $_.Id -eq 5119 -and $_.Enabled }).Count -eq 1) `
     "republished custody child was not hit-tested as an unresolved node"
   Require (Close-PopupMenu $renameProcess $custodyRendered.popup $renameShellWindow "custody child") `
@@ -7759,6 +7772,7 @@ try {
       graphSequence = [int]$custodyAfter.graphSequence
       republishedNode = $custodyGraphNode[0]
       renderedCardWait = $custodyRenderWait
+      expectedAutomationId = $custodyExpectedAutomationId
       renderedHitTest = @{ point = $custodyRendered.point; cardId = $custodyRendered.cardId }
     }
     renderedHitTests = 4

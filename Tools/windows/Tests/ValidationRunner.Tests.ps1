@@ -1574,6 +1574,7 @@ Start-Sleep -Seconds 60
     throw "RED: stable-wrong edge text did not exhaust and report exactly five attempts; calls=$edgeTextAttempts error=$($edgeTextExhaustion.Exception.Message)"
   }
   if ($uiaLiveGateSource -notmatch 'function Wait-SketchGraphCard\(' -or
+      $uiaLiveGateSource -notmatch 'function Get-SketchCardAutomationId\(' -or
       $uiaLiveGateSource -notmatch 'UIA_SKETCH_CUSTODY_CARD_WAIT=' -or
       $uiaLiveGateSource -notmatch 'Wait-SketchGraphCard "UIA custody child" \$custodyId' -or
       $uiaLiveGateSource -notmatch 'Open-SketchNodeMenu "UIA custody child" -SkipActualSize -ExpectedCardId') {
@@ -1591,9 +1592,39 @@ Start-Sleep -Seconds 60
   if ($custodyCardWaitSource -notmatch '\$baselineCount -gt 0' -or
       $custodyCardWaitSource -notmatch '\$lastTitleCount -eq 1 -and \$lastIdentityCount -eq 1' -or
       $custodyCardWaitSource -notmatch '\$expectedNodeId' -or
+      $custodyCardWaitSource -notmatch '\$expectedAutomationId' -or
+      $custodyCardWaitSource -notmatch '\$_.Current\.AutomationId -ceq \$expectedAutomationId' -or
       $custodyCardWaitSource -notmatch '\$graphSequence' -or
       $custodyCardWaitSource -match 'Invoke\(\)|PostRightClick|Actual Size') {
     throw "RED: custody card wait lacks a positive baseline, unique UUID-bound observation, or action-free polling"
+  }
+  $sketchCardIdAst = $edgeTextGateAst.Find({
+      param($node)
+      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Get-SketchCardAutomationId"
+    }, $true)
+  if (-not $sketchCardIdAst) {
+    throw "RED: source-derived sketch-card AutomationId helper is missing"
+  }
+  . ([scriptblock]::Create($sketchCardIdAst.Extent.Text))
+  $expectedSketchCardIds = @(
+    [pscustomobject]@{
+      NodeId = "66666666-6666-4666-8666-000000000001"
+      AutomationId = "canvas-card-1213325934034940293"
+    },
+    [pscustomobject]@{
+      NodeId = "66666666-6666-4666-8666-000000000002"
+      AutomationId = "canvas-card-1213322635500055660"
+    },
+    [pscustomobject]@{
+      NodeId = "66666666-6666-4666-8666-000000000003"
+      AutomationId = "canvas-card-1213323735011683871"
+    }
+  )
+  foreach ($expectedCard in $expectedSketchCardIds) {
+    if ((Get-SketchCardAutomationId $expectedCard.NodeId) -cne $expectedCard.AutomationId) {
+      throw "RED: source-derived UIA card identity differs for $($expectedCard.NodeId)"
+    }
   }
   $openSketchMenuAst = $edgeTextGateAst.Find({
       param($node)
@@ -1603,9 +1634,9 @@ Start-Sleep -Seconds 60
   if (-not $openSketchMenuAst -or
       $openSketchMenuAst.Extent.Text -notmatch '\$cards\.Count -eq 1' -or
       $openSketchMenuAst.Extent.Text -notmatch '\$ExpectedCardId' -or
-      $openSketchMenuAst.Extent.Text -notmatch '\$cards\[0\]\.Current\.AutomationId' -or
+      $openSketchMenuAst.Extent.Text -notmatch '\$cards\[0\]\.Current\.AutomationId -ceq \$ExpectedCardId' -or
       $openSketchMenuAst.Extent.Text -notmatch 'Get-DirectChildren \$graph \$rawWalker') {
-    throw "RED: custody right-click can bypass fresh-fragment, unique-card, or child-UUID checks"
+    throw "RED: custody right-click can bypass fresh-fragment, unique-card, or hashed child-identity checks"
   }
   if ($uiaLiveGateSource -notmatch 'Open-EdgeMenu \$false 5120' -or
       $uiaLiveGateSource -notmatch 'Open-EdgeMenu \$true 5110' -or
