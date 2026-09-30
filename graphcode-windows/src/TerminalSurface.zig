@@ -1166,7 +1166,7 @@ pub const Workspace = struct {
                         slot.cell_metrics = metrics;
                     }
                 }
-                self.syncPaneGrid(index, bounds);
+                self.syncPaneGrid(index, bounds, Workspace.resizeSurfaceGrid);
                 const focused = position == selected.focused_pane;
                 _ = c.winghostty_surface_set_focus(slot.surface, if (focused) 1 else 0);
                 if (focused) self.active_surface = index;
@@ -1253,6 +1253,11 @@ pub const Workspace = struct {
     }
 
     fn resizeSurfaceGrid(self: *Workspace, index: usize, size: GridSize) !void {
+        try self.resizeSurfaceGridState(index, size);
+        if (self.surfaces[index].surface != null) self.feedTerminalOutput(index, "");
+    }
+
+    fn resizeSurfaceGridState(self: *Workspace, index: usize, size: GridSize) !void {
         const slot = &self.surfaces[index];
         if (slot.grid.eql(size)) return;
         const cells = try resizedCellBuffer(self.allocator, slot.cells, slot.grid, size, slot.vt);
@@ -1262,10 +1267,9 @@ pub const Workspace = struct {
         slot.grid = size;
         slot.terminal_x = @min(slot.terminal_x, @as(usize, size.cols));
         slot.terminal_y = @min(slot.terminal_y, @as(usize, size.rows - 1));
-        if (slot.surface != null) self.feedTerminalOutput(index, "");
     }
 
-    fn syncPaneGrid(self: *Workspace, index: usize, bounds: c.winghostty_rect) void {
+    fn syncPaneGrid(self: *Workspace, index: usize, bounds: c.winghostty_rect, comptime resize_grid: anytype) void {
         if (bounds.width == 0 or bounds.height == 0) return;
         const slot = &self.surfaces[index];
         const requested_size = gridSizeForBounds(bounds.width, bounds.height, slot.cell_metrics) catch |err| {
@@ -1277,7 +1281,7 @@ pub const Workspace = struct {
             return;
         };
         if (!slot.grid.eql(requested_size)) {
-            self.resizeSurfaceGrid(index, requested_size) catch |err| {
+            resize_grid(self, index, requested_size) catch |err| {
                 std.debug.print("Terminal grid resize failed pane={d} error={s}\n", .{
                     index,
                     @errorName(err),
@@ -3884,7 +3888,7 @@ test "zero pane geometry leaves the grid and backend resize queue unchanged" {
     defer std.testing.allocator.free(workspace.surfaces[0].cells);
 
     const bounds = paneBounds(0, 0, 0, 0, .horizontal, 0, 1);
-    workspace.syncPaneGrid(0, bounds);
+    workspace.syncPaneGrid(0, bounds, Workspace.resizeSurfaceGridState);
 
     try std.testing.expectEqual(default_grid, workspace.surfaces[0].grid);
     try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
@@ -3896,7 +3900,7 @@ test "minimize and restore to the same pane size does not queue a resize" {
     defer std.testing.allocator.free(workspace.surfaces[0].cells);
 
     const minimized = paneBounds(0, 0, 0, 0, .horizontal, 0, 1);
-    workspace.syncPaneGrid(0, minimized);
+    workspace.syncPaneGrid(0, minimized, Workspace.resizeSurfaceGridState);
     try std.testing.expectEqual(default_grid, workspace.surfaces[0].grid);
     try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
 
@@ -3909,7 +3913,7 @@ test "minimize and restore to the same pane size does not queue a resize" {
         0,
         1,
     );
-    workspace.syncPaneGrid(0, original);
+    workspace.syncPaneGrid(0, original, Workspace.resizeSurfaceGridState);
 
     try std.testing.expectEqual(default_grid, workspace.surfaces[0].grid);
     try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
@@ -3921,7 +3925,7 @@ test "minimize and restore to a new pane size queues one resize for the new grid
     defer std.testing.allocator.free(workspace.surfaces[0].cells);
 
     const minimized = paneBounds(0, 0, 0, 0, .horizontal, 0, 1);
-    workspace.syncPaneGrid(0, minimized);
+    workspace.syncPaneGrid(0, minimized, Workspace.resizeSurfaceGridState);
     try std.testing.expectEqual(default_grid, workspace.surfaces[0].grid);
     try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
 
@@ -3934,11 +3938,11 @@ test "minimize and restore to a new pane size queues one resize for the new grid
         0,
         1,
     );
-    workspace.syncPaneGrid(0, restored);
+    workspace.syncPaneGrid(0, restored, Workspace.resizeSurfaceGridState);
     try std.testing.expectEqual(GridSize{ .cols = 100, .rows = 20 }, workspace.surfaces[0].grid);
     try std.testing.expectEqual(GridSize{ .cols = 100, .rows = 20 }, workspace.surfaces[0].pending_resize_size.?);
 
-    workspace.syncPaneGrid(0, restored);
+    workspace.syncPaneGrid(0, restored, Workspace.resizeSurfaceGridState);
     try std.testing.expectEqual(GridSize{ .cols = 100, .rows = 20 }, workspace.surfaces[0].pending_resize_size.?);
 }
 
