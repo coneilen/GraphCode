@@ -7799,7 +7799,6 @@ try {
     "rename stub daemon never applied the dispatched rename"
 
   Write-Host ("UIA_SKETCH_CUSTODY_EVIDENCE=" + ($sketchCustodyEvidence | ConvertTo-Json -Depth 8 -Compress))
-  Require $false "N3d deliberate hosted RED perturbation after completed sketch/custody evidence"
 
   [pscustomobject]@{
     name = $rootName
