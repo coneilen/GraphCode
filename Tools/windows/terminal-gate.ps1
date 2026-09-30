@@ -7,6 +7,9 @@ param(
   [string] $Zig0152 = "zig",
   [string] $Zig0160 = "zig",
   [switch] $SkipBuild,
+  # Providers were already compiled by provider-build.ps1 (validate.ps1 runs it
+  # first); still build the gate executable itself.
+  [switch] $SkipProviderBuild,
   [switch] $Stress
 )
 
@@ -36,24 +39,6 @@ function Invoke-Native([string] $description, [scriptblock] $command) {
   if ($LASTEXITCODE -ne 0) {
     throw "$description failed with exit code $LASTEXITCODE"
   }
-}
-
-function Invoke-NativeWithRetry(
-  [string] $description,
-  [scriptblock] $command,
-  [int] $Attempts = 3
-) {
-  for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-    Write-Host "==> $description (attempt $attempt/$Attempts)"
-    & $command
-    if ($LASTEXITCODE -eq 0) {
-      return
-    }
-    if ($attempt -lt $Attempts) {
-      Start-Sleep -Seconds (5 * $attempt)
-    }
-  }
-  throw "$description failed after $Attempts attempts with exit code $LASTEXITCODE"
 }
 
 function Assert-Equal([string] $actual, [string] $expected, [string] $label) {
@@ -214,13 +199,15 @@ Assert-PinnedCleanWorktree $ZmxRoot $pins.zmx.sha "zmx"
 
 try {
   if (-not $SkipBuild) {
-    Invoke-Native "Winghostty host artifact" {
-      Push-Location $WinghosttyRoot
-      try { & $Zig0152 build -Demit-win32-host=true } finally { Pop-Location }
-    }
-    Invoke-NativeWithRetry "zmx Windows provider artifact" {
-      Push-Location $ZmxRoot
-      try { & $Zig0160 build -Dtarget=x86_64-windows-gnu } finally { Pop-Location }
+    if (-not $SkipProviderBuild) {
+      Invoke-Native "Pinned provider artifacts" {
+        & (Join-Path $PSScriptRoot "provider-build.ps1") `
+          -WinghosttyRoot $WinghosttyRoot `
+          -ZmxRoot $ZmxRoot `
+          -Zig0152 $Zig0152 `
+          -Zig0160 $Zig0160 `
+          -PinsPath (Join-Path $gateRoot "provider-pins.json")
+      }
     }
     Invoke-Native "GraphCode terminal gate" {
       Push-Location $gateRoot

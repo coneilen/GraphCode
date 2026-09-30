@@ -272,7 +272,7 @@ These are the single source of truth. Never silently upgrade one.
 | Zig (shell) | 0.15.2 | `mise.toml`, `graphcode-windows/build.zig.zon` (`minimum_zig_version`) |
 | Zig (zmx only) | 0.16.0 | `graphcode-windows/provider-pins.json` |
 | Winghostty | `f5abc059e4ca58b376eb209313aca7784659c679` | `graphcode-windows/provider-pins.json` |
-| zmx | `dcf61203cd390d43451c25636776d7d64ecfd629` | `graphcode-windows/provider-pins.json` |
+| zmx | `785b3fd15dcafd1882b495c831a10f98c201b908` | `graphcode-windows/provider-pins.json` |
 
 If a build fails because a tool is missing or the wrong version, rerun
 bootstrap. Do not fall back to whatever is on `PATH`.
