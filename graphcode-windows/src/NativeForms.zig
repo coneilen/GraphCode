@@ -111,6 +111,54 @@ const form_row_height: i32 = 84;
 const tile_row_height: i32 = 204;
 const attachment_section_height: i32 = 176;
 
+const LayoutRect = struct {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+};
+
+fn rectsIntersect(first: LayoutRect, second: LayoutRect) bool {
+    return first.left < second.right and first.right > second.left and
+        first.top < second.bottom and first.bottom > second.top;
+}
+
+fn rectFitsInside(rect: LayoutRect, bounds: LayoutRect) bool {
+    return rect.left >= bounds.left and rect.top >= bounds.top and
+        rect.right <= bounds.right and rect.bottom <= bounds.bottom;
+}
+
+fn clipRectToViewport(rect: LayoutRect, viewport_height: i32) ?LayoutRect {
+    const top = @max(0, rect.top);
+    const bottom = @min(viewport_height, rect.bottom);
+    if (bottom <= top) return null;
+    return .{ .left = rect.left, .top = top, .right = rect.right, .bottom = bottom };
+}
+
+fn fitDialogRect(
+    work_area: LayoutRect,
+    desired_width: i32,
+    desired_height: i32,
+    minimum_height: i32,
+    margin: i32,
+) LayoutRect {
+    const work_width = @max(1, work_area.right - work_area.left);
+    const work_height = @max(1, work_area.bottom - work_area.top);
+    const horizontal_margin = @min(@max(0, margin), @divTrunc(work_width - 1, 2));
+    const vertical_margin = @min(@max(0, margin), @divTrunc(work_height - 1, 2));
+    const maximum_width = @max(1, work_width - horizontal_margin * 2);
+    const maximum_height = @max(1, work_height - vertical_margin * 2);
+    const width = @min(@max(1, desired_width), maximum_width);
+    const height = std.math.clamp(
+        @max(1, desired_height),
+        @min(@max(1, minimum_height), maximum_height),
+        maximum_height,
+    );
+    const left = work_area.left + @divTrunc(work_width - width, 2);
+    const top = work_area.top + @divTrunc(work_height - height, 2);
+    return .{ .left = left, .top = top, .right = left + width, .bottom = top + height };
+}
+
 fn scaled(state: *const DialogState, value: i32) i32 {
     return Dpi.scale(value, state.dpi);
 }
@@ -761,9 +809,15 @@ test "edge editing native: actual initializer and builder retain all owned field
     state.* = .{ .allocator = allocator, .kind = .edge, .parent = null };
     defer freeValues(state);
     const initial = Forms.EdgeDraft{
-        .from = "source", .to = "target", .kind = "spawn", .condition = "onFailure",
-        .transform_kind = "script", .transform_value = "  say \"\xe2\x98\x83\"  ",
-        .cycle_max_iterations = -7, .cycle_until = "", .cycle_stop_after_passes = 0,
+        .from = "source",
+        .to = "target",
+        .kind = "spawn",
+        .condition = "onFailure",
+        .transform_kind = "script",
+        .transform_value = "  say \"\xe2\x98\x83\"  ",
+        .cycle_max_iterations = -7,
+        .cycle_until = "",
+        .cycle_stop_after_passes = 0,
         .spawn_target_project_path = "C:\\quoted \"project\"\\\xe2\x98\x83",
     };
     state.edge_initial = try initial.clone(allocator);
@@ -806,9 +860,13 @@ test "edge editing native: initializer baseline and returned draft allocations u
             state.* = .{ .allocator = allocator, .kind = .edge, .parent = null };
             defer freeValues(state);
             const initial = Forms.EdgeDraft{
-                .from = "source", .to = "target", .condition = "onSuccess",
-                .transform_kind = "template", .transform_value = "payload",
-                .cycle_max_iterations = -3, .cycle_until = "  quoted \"until\"  ",
+                .from = "source",
+                .to = "target",
+                .condition = "onSuccess",
+                .transform_kind = "template",
+                .transform_value = "payload",
+                .cycle_max_iterations = -3,
+                .cycle_until = "  quoted \"until\"  ",
                 .spawn_target_project_path = "target",
             };
             state.edge_initial = try initial.clone(allocator);
@@ -1119,21 +1177,35 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
     active_state_storage.closed = false;
     active_state_storage.result = false;
     active_state_storage.dpi = Dpi.normalize(Win32.dpiForWindow(state.parent));
-    const screen_height = c.GetSystemMetrics(c.SM_CYSCREEN);
+
+    const monitor = c.MonitorFromWindow(state.parent, c.MONITOR_DEFAULTTONEAREST) orelse
+        return error.FormMonitorLookupFailed;
+    var monitor_info: c.MONITORINFO = std.mem.zeroes(c.MONITORINFO);
+    monitor_info.cbSize = @sizeOf(c.MONITORINFO);
+    if (c.GetMonitorInfoW(monitor, &monitor_info) == 0) return error.FormMonitorInfoUnavailable;
+    const work_area = LayoutRect{
+        .left = monitor_info.rcWork.left,
+        .top = monitor_info.rcWork.top,
+        .right = monitor_info.rcWork.right,
+        .bottom = monitor_info.rcWork.bottom,
+    };
     const desired_height = if (state.kind == .worktree_policy) 520 else form_max_height;
-    const dialog_height = @max(
+    const dialog_rect = fitDialogRect(
+        work_area,
+        scaled(&active_state_storage, form_width),
+        scaled(&active_state_storage, desired_height),
         Dpi.scale(form_min_height, active_state_storage.dpi),
-        @min(Dpi.scale(desired_height, active_state_storage.dpi), screen_height - Dpi.scale(64, active_state_storage.dpi)),
+        Dpi.scale(32, active_state_storage.dpi),
     );
     const hwnd = c.CreateWindowExW(
         c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
         class_name.ptr,
         wide_title.ptr,
         c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_VSCROLL,
-        c.CW_USEDEFAULT,
-        c.CW_USEDEFAULT,
-        Dpi.scale(form_width, active_state_storage.dpi),
-        dialog_height,
+        dialog_rect.left,
+        dialog_rect.top,
+        dialog_rect.right - dialog_rect.left,
+        dialog_rect.bottom - dialog_rect.top,
         state.parent,
         null,
         c.GetModuleHandleW(null),
@@ -1819,20 +1891,17 @@ fn createButtonLabelled(hwnd: c.HWND, state: *const DialogState, text: []const u
 
 fn layoutAttachmentsSection(hwnd: c.HWND, state: *DialogState, top: i32) void {
     const shown = attachmentsVisible(state);
-    const command = if (shown) c.SW_SHOW else c.SW_HIDE;
-    for ([_]c.HWND{ state.attachment_label, state.attachment_listbox, state.attachment_attach_button, state.attachment_remove_button, state.attachment_help }) |control|
-        _ = c.ShowWindow(control, command);
-    if (!shown) return;
     const margin = scaled(state, form_margin);
     const width = formContentWidth(hwnd, state);
     const button_width = scaled(state, 132);
     const gap = scaled(state, 12);
     const list_width = width - button_width - gap;
-    _ = c.MoveWindow(state.attachment_label, margin, top, width, scaled(state, form_label_height), 1);
-    _ = c.MoveWindow(state.attachment_listbox, margin, top + scaled(state, 26), list_width, scaled(state, 106), 1);
-    _ = c.MoveWindow(state.attachment_attach_button, margin + list_width + gap, top + scaled(state, 26), button_width, scaled(state, 32), 1);
-    _ = c.MoveWindow(state.attachment_remove_button, margin + list_width + gap, top + scaled(state, 66), button_width, scaled(state, 32), 1);
-    _ = c.MoveWindow(state.attachment_help, margin, top + scaled(state, 140), width, scaled(state, form_help_height), 1);
+    const viewport = formViewportHeight(hwnd, state);
+    layoutContentControl(state.attachment_label, margin, top, width, scaled(state, form_label_height), shown, viewport);
+    layoutContentControl(state.attachment_listbox, margin, top + scaled(state, 26), list_width, scaled(state, 106), shown, viewport);
+    layoutContentControl(state.attachment_attach_button, margin + list_width + gap, top + scaled(state, 26), button_width, scaled(state, 32), shown, viewport);
+    layoutContentControl(state.attachment_remove_button, margin + list_width + gap, top + scaled(state, 66), button_width, scaled(state, 32), shown, viewport);
+    layoutContentControl(state.attachment_help, margin, top + scaled(state, 140), width, scaled(state, form_help_height), shown, viewport);
 }
 
 fn refreshAttachmentListbox(state: *DialogState) void {
@@ -2229,26 +2298,34 @@ fn layoutForm(hwnd: c.HWND, state: *DialogState) void {
     var y = scaled(state, form_fields_top);
     const margin = scaled(state, form_margin);
     const width = formContentWidth(hwnd, state);
-    _ = c.MoveWindow(state.intro, margin, scaled(state, 16) - state.scroll_offset, width, scaled(state, 48), 1);
+    layoutContentControl(state.intro, margin, scaled(state, 16) - state.scroll_offset, width, scaled(state, 48), true, formViewportHeight(hwnd, state));
     for (0..state.field_count) |index| {
         const shown = state.visible[index];
-        const command = if (shown) c.SW_SHOW else c.SW_HIDE;
-        _ = c.ShowWindow(state.labels[index], command);
+        const viewport = formViewportHeight(hwnd, state);
         if (state.input_kinds[index] == .tiles) {
-            for (0..state.tile_count) |t| _ = c.ShowWindow(state.tile_buttons[t], command);
+            layoutTiles(state, index, margin, y - state.scroll_offset, width, shown, viewport);
         } else {
-            _ = c.ShowWindow(state.edits[index], command);
+            layoutContentControl(state.edits[index], margin, y - state.scroll_offset + scaled(state, 26), width, inputControlHeight(state, state.input_kinds[index]), shown, viewport);
         }
-        _ = c.ShowWindow(state.helps[index], if (state.input_kinds[index] == .tiles) c.SW_HIDE else command);
+        layoutContentControl(
+            state.labels[index],
+            margin,
+            y - state.scroll_offset,
+            width,
+            scaled(state, form_label_height),
+            shown,
+            viewport,
+        );
+        layoutContentControl(
+            state.helps[index],
+            margin,
+            y - state.scroll_offset + scaled(state, 62),
+            width,
+            scaled(state, form_help_height),
+            shown and state.input_kinds[index] != .tiles,
+            viewport,
+        );
         if (!shown) continue;
-        const top = y - state.scroll_offset;
-        _ = c.MoveWindow(state.labels[index], margin, top, width, scaled(state, form_label_height), 1);
-        if (state.input_kinds[index] == .tiles) {
-            layoutTiles(state, index, margin, top + scaled(state, 28), width);
-        } else {
-            _ = c.MoveWindow(state.edits[index], margin, top + scaled(state, 26), width, inputControlHeight(state, state.input_kinds[index]), 1);
-            _ = c.MoveWindow(state.helps[index], margin, top + scaled(state, 62), width, scaled(state, form_help_height), 1);
-        }
         y += rowHeight(state, index);
     }
     if (state.kind == .node) {
@@ -2256,26 +2333,53 @@ fn layoutForm(hwnd: c.HWND, state: *DialogState) void {
         if (attachmentsVisible(state)) y += scaled(state, attachment_section_height);
     }
     if (showsRecap(state.kind)) {
-        _ = c.ShowWindow(state.recap, c.SW_SHOW);
-        _ = c.MoveWindow(state.recap, margin, y - state.scroll_offset, width, scaled(state, 40), 1);
+        layoutContentControl(state.recap, margin, y - state.scroll_offset, width, scaled(state, 40), true, formViewportHeight(hwnd, state));
     }
     updateScrollBar(hwnd, state);
 }
 
 const tile_columns = 2;
 
-fn layoutTiles(state: *DialogState, index: usize, x: i32, y: i32, width: i32) void {
+fn layoutTiles(state: *DialogState, index: usize, x: i32, y: i32, width: i32, shown: bool, viewport: i32) void {
     _ = index;
     const gap = scaled(state, 12);
     const tile_width = @divTrunc(width - gap * (tile_columns - 1), tile_columns);
     const tile_height = scaled(state, 76);
+    const tile_y = y + scaled(state, 28);
     for (0..state.tile_count) |i| {
         const col: i32 = @intCast(i % tile_columns);
         const tile_row: i32 = @intCast(i / tile_columns);
         const tx = x + col * (tile_width + gap);
-        const ty = y + tile_row * (tile_height + gap);
-        _ = c.MoveWindow(state.tile_buttons[i], tx, ty, tile_width, tile_height, 1);
+        const ty = tile_y + tile_row * (tile_height + gap);
+        layoutContentControl(state.tile_buttons[i], tx, ty, tile_width, tile_height, shown, viewport);
     }
+}
+
+fn layoutContentControl(control: c.HWND, x: i32, y: i32, width: i32, height: i32, shown: bool, viewport: i32) void {
+    if (control == null) return;
+    const command = if (shown) c.SW_SHOW else c.SW_HIDE;
+    if (!shown) {
+        _ = c.ShowWindow(control, command);
+        return;
+    }
+    const control_rect = LayoutRect{ .left = x, .top = y, .right = x + width, .bottom = y + height };
+    const clipped = clipRectToViewport(control_rect, viewport) orelse {
+        _ = c.ShowWindow(control, c.SW_HIDE);
+        return;
+    };
+    const region = c.CreateRectRgn(0, clipped.top - y, width, clipped.bottom - y) orelse {
+        c.OutputDebugStringW(std.unicode.utf8ToUtf16LeStringLiteral("GraphCode: failed to clip a native form control; hiding it to protect the footer.\n").ptr);
+        _ = c.ShowWindow(control, c.SW_HIDE);
+        return;
+    };
+    _ = c.MoveWindow(control, x, y, width, height, 0);
+    if (c.SetWindowRgn(control, region, 1) == 0) {
+        _ = c.DeleteObject(region);
+        c.OutputDebugStringW(std.unicode.utf8ToUtf16LeStringLiteral("GraphCode: failed to apply a native form control clip; hiding it to protect the footer.\n").ptr);
+        _ = c.ShowWindow(control, c.SW_HIDE);
+        return;
+    }
+    _ = c.ShowWindow(control, command);
 }
 
 fn contentHeight(state: *const DialogState) i32 {
@@ -4238,7 +4342,6 @@ test "conditional graph fields and validation follow selected types" {
     try std.testing.expectEqual(@as(?i64, 4), edge_draft.cycle_max_iterations);
     try std.testing.expectEqual(@as(?i64, 2), edge_draft.cycle_stop_after_passes);
     try std.testing.expectEqualStrings("D:\\other-project", edge_draft.spawn_target_project_path);
-
 }
 
 test "graph form cancellation leaves draft values untouched" {
@@ -4452,6 +4555,40 @@ test "keyboard-sized guided form keeps every field reachable through bounded scr
     try std.testing.expectEqual(@as(i32, 0), boundedScrollOffset(content, viewport, 0, -48));
     const last_top: i32 = form_fields_top + 9 * form_row_height;
     try std.testing.expect(last_top + form_row_height <= max_offset + viewport);
+}
+
+test "goal-based form content does not overlap the fixed footer" {
+    const client_height: i32 = 672;
+    const viewport_height = @max(@as(i32, 120), client_height - form_footer_height);
+    const footer = LayoutRect{ .left = 641, .top = client_height - 50, .right = 737, .bottom = client_height - 14 };
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null, .scroll_offset = 1 };
+    state.values[1] = @constCast("goalBased");
+    configureFields(&state);
+    updateConditionalVisibility(&state);
+    try std.testing.expectEqual(@as(usize, 15), state.field_count);
+
+    const label_top = fieldTop(&state, 9).? - state.scroll_offset;
+    const label = LayoutRect{ .left = 58, .top = label_top, .right = 737, .bottom = label_top + form_label_height };
+    try std.testing.expect(rectsIntersect(label, footer));
+    try std.testing.expect(clipRectToViewport(label, viewport_height) == null);
+
+    const partial_label = clipRectToViewport(.{ .left = 58, .top = 598, .right = 737, .bottom = 620 }, viewport_height).?;
+    try std.testing.expect(rectFitsInside(partial_label, .{
+        .left = 0,
+        .top = 0,
+        .right = 760,
+        .bottom = viewport_height,
+    }));
+    try std.testing.expectEqual(@as(i32, viewport_height), partial_label.bottom);
+    try std.testing.expect(!rectsIntersect(partial_label, footer));
+}
+
+test "native form window fits inside the selected monitor work area" {
+    const work_area = LayoutRect{ .left = 0, .top = 0, .right = 1024, .bottom = 728 };
+    const dialog = fitDialogRect(work_area, form_width, form_max_height, form_min_height, 32);
+
+    try std.testing.expect(rectFitsInside(dialog, work_area));
+    try std.testing.expectEqual(@as(i32, 664), dialog.bottom - dialog.top);
 }
 
 test "scrollbar thumb positions seek and clamp the dialog content" {
