@@ -259,6 +259,14 @@ function Test-ProviderCacheSeeding([string] $shellWorkflow, [string] $warmerWork
   if ([int]$outerCap.Groups[1].Value -le [int]$bootstrapCap.Groups[1].Value + [int]$buildCap.Groups[1].Value) {
     throw "RED: Windows cache warmer job cap truncates a bootstrap and build-only phase that both stay within their step caps"
   }
+  # Cold integration, measured per phase: setup and Swift 1m54s (job 109703426776),
+  # bootstrap 26m34s (job 109675286607), build-only 4m01s and save 10s
+  # (job 109703426776), gate without the provider build up to 7m17s
+  # (job 109694707284), post 10s: 40m06s. The former 35m cap cancelled 109675286607.
+  $integrationCap = [regex]::Match($shellJobs["shell-integration"], '(?m)^    timeout-minutes: (\d+)\s*$')
+  if (-not $integrationCap.Success -or [int]$integrationCap.Groups[1].Value -lt 41) {
+    throw "RED: windows-shell integration job cap truncates a measured cold bootstrap, build-only, save, and gate (40m08s)"
+  }
 }
 
 function Test-ProviderCacheSeedingMutations([string] $shellWorkflow, [string] $warmerWorkflow) {
