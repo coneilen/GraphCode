@@ -39,7 +39,7 @@ conformance, and end-to-end accessibility parity remain unverified or incomplete
 
 Set `GRAPHCODE_EXPERIMENTAL_TERMINAL_VT=1` before startup to use the public
 `libghostty-vt` C API from the existing Winghostty pin
-`f5abc059e4ca58b376eb209313aca7784659c679`. An absent variable or exactly `0`
+`6286560d0aa3103e068b2b7afa81eac373d870c9`. An absent variable or exactly `0`
 keeps the existing ASCII path unchanged. Other values, including an empty value,
 fail workspace initialization with `InvalidTerminalVtFlag` and a diagnostic;
 there is no silent fallback.
