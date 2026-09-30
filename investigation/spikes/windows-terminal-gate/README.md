@@ -11,7 +11,7 @@ session/ConPTY lifetime.
 `provider-pins.json` records the accepted provider commits:
 
 - Winghostty `f5abc059e4ca58b376eb209313aca7784659c679`
-- zmx `dcf61203cd390d43451c25636776d7d64ecfd629`
+- zmx `785b3fd15dcafd1882b495c831a10f98c201b908`
 
 Both commits are published on dedicated branches in the public `coneilen`
 provider repositories. The bootstrap creates detached, exact-revision
@@ -24,12 +24,13 @@ updates/deletion and the dedicated branches against deletion/history rewrites; s
 `Tools\windows\PACKAGING.md` for the recorded ruleset IDs and retention limits.
 These are source-retention tags, not signed Windows releases.
 
-The current zmx pin is the merged SetSize control-plane commit from
-[coneilen/zmx#3](https://github.com/coneilen/zmx/pull/3), which provides the
-`zmx attach <session> --size <cols>x<rows>` and leaderless one-shot
-`zmx resize <session> <cols>x<rows>` CLI verbs. This spike does not yet
-exercise either verb; GraphCode's pane-geometry integration in
-`graphcode-windows\src\TerminalSurface.zig` is what calls them.
+The current zmx pin includes the merged Windows named-pipe accept-deadline race
+fix from [coneilen/zmx#4](https://github.com/coneilen/zmx/pull/4), following the
+SetSize control-plane commit from [coneilen/zmx#3](https://github.com/coneilen/zmx/pull/3).
+That earlier commit provides the `zmx attach <session> --size <cols>x<rows>`
+and leaderless one-shot `zmx resize <session> <cols>x<rows>` CLI verbs. This
+spike does not yet exercise either verb; GraphCode's pane-geometry integration
+in `graphcode-windows\src\TerminalSurface.zig` is what calls them.
 
 `graphcode-windows\fixtures\zmx-quick-chat-provider.json` is historical
 quick-chat provenance at the old provider SHA and recorded source/executable
