@@ -1366,6 +1366,9 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'UIA loop A|UIA loop B') {
     throw "RED: UIA live gate does not measure blank-canvas, node-card, and edge context menus from live geometry"
   }
+  if ($uiaLiveGateSource -notmatch '(?s)canvasContextMenu = \$canvasContextMenuEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
+    throw "RED: UIA final summary loses nested canvas menu items and edge action measurements"
+  }
   if ($shellTests -notmatch '(?s)Windows update feed executable tests.*?zig test src\\WindowsUpdates\.zig.*?-lwinhttp') {
     throw "RED: Windows shell validation does not run the native updater tests"
   }

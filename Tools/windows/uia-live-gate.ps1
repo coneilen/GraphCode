@@ -5764,7 +5764,7 @@ try {
     contextMenuMoveProjectState = ("0x{0:x}" -f $moveProjectItem.State)
     contextMenuDismissed = $projectMenuClosed
     remoteContextMenuItemCount = $remoteMenuItems.Count
-  } | ConvertTo-Json -Compress
+  } | ConvertTo-Json -Depth 8 -Compress
 } catch {
   $gateFailure = $_
   if ($sandboxCreated) {
