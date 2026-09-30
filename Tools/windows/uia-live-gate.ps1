@@ -2112,7 +2112,7 @@ try {
   # a pass. Evidence is captured as values now, because the elements themselves
   # are dead by the time the final summary is written.
   $needsYouRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^needs-you-rowX-'
+    $_.Current.AutomationId -match '^needs-you-row-'
   })
   $needsYouHeaders = @(Get-DirectChildren $projects $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^needs-you-header-'
@@ -4537,7 +4537,7 @@ try {
     $_.Current.AutomationId -match '^activity-control-'
   })
   Require ($activityHeaders.Count -eq 1) "Activity strip omitted its stable header (count=$($activityHeaders.Count))"
-  Require ($activityHeaders[0].Current.Name -eq "Activity") `
+  Require ($activityHeaders[0].Current.Name -eq "ActivityX") `
     "Activity header name changed: '$($activityHeaders[0].Current.Name)'"
   Require ($activityRows.Count -ge 1) `
     "Activity exposed no sidebar rows after the activity fixture recorded state changes (count=$($activityRows.Count))"
