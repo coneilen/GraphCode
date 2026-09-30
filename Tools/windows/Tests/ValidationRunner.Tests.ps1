@@ -1413,6 +1413,28 @@ Start-Sleep -Seconds 60
   if ($uiaLiveGateSource -notmatch '(?s)nodeCreationSheet = \$nodeCreationSheetEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
     throw "RED: UIA final summary omits the parsable node creation sheet evidence"
   }
+  $uiaLiveGateType = [regex]::Match(
+    $uiaLiveGateSource, '(?s)Add-Type -TypeDefinition @"\s*(?<source>.*?)\r?\n"@'
+  )
+  if (-not $uiaLiveGateType.Success) {
+    throw "RED: UIA gate embedded C# type source is missing"
+  }
+  $uiaGateSource = $uiaLiveGateType.Groups[1].Value
+  $uiaGateDefinedMembers = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach ($member in [regex]::Matches(
+      $uiaGateSource,
+      '(?m)^\s*public\s+(?:(?:static|volatile|readonly)\s+)*(?:[\w<>\[\],.?]+\s+)+(?<member>[\w]+)\s*(?:\(|[;=])')) {
+    [void]$uiaGateDefinedMembers.Add($member.Groups["member"].Value)
+  }
+  $uiaGateMissingMembers = @(
+    [regex]::Matches($uiaLiveGateSource, '\[GraphCodeUiaGateState\]::(?<member>[\w]+)') |
+      ForEach-Object { $_.Groups["member"].Value } |
+      Sort-Object -Unique |
+      Where-Object { -not $uiaGateDefinedMembers.Contains($_) }
+  )
+  if ($uiaGateMissingMembers.Count -gt 0) {
+    throw "RED: UIA gate calls undefined embedded C# member(s): $($uiaGateMissingMembers -join ', ')"
+  }
   if ($uiaLiveGateSource -notmatch 'UIA_EDGE_WORKFLOW_EVIDENCE=' -or
       $uiaLiveGateSource -notmatch '(?s)edgeWorkflow = \$edgeWorkflowEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress' -or
       $uiaLiveGateSource -notmatch 'createEdge' -or
@@ -1445,7 +1467,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'IsControlOwnedBy\(\$edgeWorkflowWindow, \$control, \$id\)' -or
       $uiaLiveGateSource -notmatch 'HasVisibleBounds\(\$control\)' -or
       $uiaLiveGateSource -notmatch 'FocusedControlInDialog\(\$edgeWorkflowWindow\)' -or
-      $uiaLiveGateSource -notmatch 'ProcessIdOf\(\$edgeWorkflowWindow\) -eq \$renameProcess\.Id' -or
+      $uiaLiveGateSource -notmatch 'WindowProcessId\(\$edgeWorkflowWindow\) -eq \$renameProcess\.Id' -or
       $uiaLiveGateSource -notmatch 'WindowTextOf\(\$edgeWorkflowWindow\) -eq \$script:edgeWorkflowTitle' -or
       $uiaLiveGateSource -notmatch 'VirtualKey = 0x2E' -or
       $uiaLiveGateSource -notmatch 'SendMessageText\(edit, 0x000D' -or

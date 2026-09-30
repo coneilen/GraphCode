@@ -6230,7 +6230,7 @@ try {
       }
       $modalValid = [GraphCodeUiaGateState]::WindowIsVisible($edgeWorkflowWindow) -and
         [GraphCodeUiaGateState]::WindowTextOf($edgeWorkflowWindow) -eq $script:edgeWorkflowTitle -and
-        [GraphCodeUiaGateState]::ProcessIdOf($edgeWorkflowWindow) -eq $renameProcess.Id
+        [GraphCodeUiaGateState]::WindowProcessId($edgeWorkflowWindow) -eq $renameProcess.Id
       $controlValid = $control -ne [IntPtr]::Zero -and
         [GraphCodeUiaGateState]::IsControlOwnedBy($edgeWorkflowWindow, $control, $id) -and
         [GraphCodeUiaGateState]::HasVisibleBounds($control)
