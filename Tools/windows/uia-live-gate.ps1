@@ -4531,7 +4531,7 @@ try {
     $_.Current.AutomationId -match '^activity-header-'
   })
   $activityRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^activity-rowX-'
+    $_.Current.AutomationId -match '^activity-row-'
   })
   $activityControls = @(Get-DirectChildren $projects $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^activity-control-'
