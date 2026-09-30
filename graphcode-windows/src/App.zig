@@ -7754,10 +7754,10 @@ fn onWindowMessage(
             const mapped = geometry.point;
             const in_canvas = gestureInCanvas(app.surface, mapped, geometry.bounds, app.workspace_controls);
             const distance: u32 = @truncate(info.ullArguments);
-            const pinch_context = app.pinchGestureContext();
+            const gesture_context = app.pinchGestureContext();
             switch (CanvasInput.classifyGesture(info.dwID, info.dwFlags, in_canvas)) {
                 // GID_BEGIN/GID_END (the generic gesture-sequence brackets) and
-                // any zoom message located outside the canvas: this window
+                // any pan/zoom message located outside the canvas: this window
                 // does not handle it, so per the documented handle-ownership
                 // contract it must be forwarded to DefWindowProc rather than
                 // closed here -- ownership of the handle transfers with the
@@ -7770,13 +7770,19 @@ fn onWindowMessage(
                     return false;
                 },
                 .begin_zoom => {
-                    app.canvas.beginPinchZoom(distance, pinch_context);
+                    app.canvas.beginPinchZoom(distance, gesture_context);
+                    _ = c.CloseGestureInfoHandle(gesture_handle);
+                    result.* = 0;
+                    return true;
+                },
+                .begin_pan => {
+                    if (mapped) |point| app.canvas.beginTouchPan(point.x, point.y, gesture_context);
                     _ = c.CloseGestureInfoHandle(gesture_handle);
                     result.* = 0;
                     return true;
                 },
                 .continue_zoom => {
-                    if (mapped) |point| app.canvas.continuePinchZoom(point.x, point.y, distance, pinch_context);
+                    if (mapped) |point| app.canvas.continuePinchZoom(point.x, point.y, distance, gesture_context);
                     // Release the owned handle before syncAccessibility()/
                     // InvalidateRect, which can pump messages -- this
                     // window's WM_GESTURE handling should never still be
@@ -7789,8 +7795,25 @@ fn onWindowMessage(
                     return true;
                 },
                 .end_zoom => {
-                    if (mapped) |point| app.canvas.continuePinchZoom(point.x, point.y, distance, pinch_context);
+                    if (mapped) |point| app.canvas.continuePinchZoom(point.x, point.y, distance, gesture_context);
                     app.canvas.endPinchZoom();
+                    _ = c.CloseGestureInfoHandle(gesture_handle);
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                    result.* = 0;
+                    return true;
+                },
+                .continue_pan => {
+                    if (mapped) |point| app.canvas.continueTouchPan(point.x, point.y, gesture_context);
+                    _ = c.CloseGestureInfoHandle(gesture_handle);
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                    result.* = 0;
+                    return true;
+                },
+                .end_pan => {
+                    if (mapped) |point| app.canvas.continueTouchPan(point.x, point.y, gesture_context);
+                    app.canvas.endTouchPan();
                     _ = c.CloseGestureInfoHandle(gesture_handle);
                     app.syncAccessibility();
                     _ = c.InvalidateRect(hwnd, null, 0);
@@ -7804,8 +7827,15 @@ fn onWindowMessage(
                     // real begin-then-end sequence would -- never treated as
                     // a continuation, which could otherwise apply whatever
                     // baseline a previous, unrelated gesture left behind.
-                    app.canvas.beginPinchZoom(distance, pinch_context);
+                    app.canvas.beginPinchZoom(distance, gesture_context);
                     app.canvas.endPinchZoom();
+                    _ = c.CloseGestureInfoHandle(gesture_handle);
+                    result.* = 0;
+                    return true;
+                },
+                .begin_and_end_pan => {
+                    if (mapped) |point| app.canvas.beginTouchPan(point.x, point.y, gesture_context);
+                    app.canvas.endTouchPan();
                     _ = c.CloseGestureInfoHandle(gesture_handle);
                     result.* = 0;
                     return true;
@@ -8889,7 +8919,7 @@ test "gesture routing requires a graph-capable surface, not only the canvas rect
     try std.testing.expect(!gestureInCanvas(.workspace, point_over_canvas_rect, bounds, hidden_controls));
 }
 
-test "pinchGestureContext changes identity across project switches on the same surface" {
+test "native gesture context changes identity across project switches on the same surface" {
     const allocator = std.testing.allocator;
     var app: App = .{
         .allocator = allocator,
@@ -8919,11 +8949,9 @@ test "pinchGestureContext changes identity across project switches on the same s
     _ = app.model.selectProject("B");
     const context_project_b = app.pinchGestureContext();
 
-    // Same graph-capable surface, different project: this identity is what
-    // WM_GESTURE's routing uses to detect a same-region destination change
-    // during an in-progress pinch. A gesture begun on project A must not be
-    // able to keep scaling project B's canvas after a mid-gesture project
-    // switch, so the two identities must differ.
+    // Same graph-capable surface, different project: WM_GESTURE uses this
+    // identity for both pinch and pan, so a gesture begun on project A cannot
+    // continue affecting project B after a mid-gesture switch.
     try std.testing.expect(context_project_a != context_project_b);
 
     // A surface switch away from the graph canvas (still on project B) is
