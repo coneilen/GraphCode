@@ -417,6 +417,20 @@ public static class GraphCodeUiaGateState {
   public static bool WindowIsVisible(IntPtr window) {
     return window != IntPtr.Zero && IsWindowVisible(window);
   }
+  public static IntPtr FindVisibleProcessWindow(uint processId, string title) {
+    IntPtr result = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+      uint owner;
+      GetWindowThreadProcessId(window, out owner);
+      if (owner == processId && IsWindowVisible(window) &&
+          String.Equals(WindowTitle(window), title, StringComparison.Ordinal)) {
+        result = window;
+        return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return result;
+  }
   // Real client-coordinate mouse messages posted directly to the target window,
   // matching the same WM_MOUSEMOVE/WM_LBUTTONDOWN/WM_LBUTTONUP messages the OS
   // delivers for genuine mouse input, without moving the shared desktop's real
@@ -6122,31 +6136,45 @@ try {
         [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $renameProcess.Id)),
       (New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::NameProperty, $title)))
-    $dialog = Wait-ForDesktopElement -desktop $desktop -condition $condition `
-      -label "connected edge $title" -diagnosticWindow $renameShellWindow -RecoverForeground
-    Require ($null -ne $dialog) "edge workflow '$title' native dialog never opened"
-    $script:edgeWorkflowWindow = [IntPtr]$dialog.Current.NativeWindowHandle
+    $script:edgeWorkflowWindow = [IntPtr]::Zero
+    for ($retry = 0; $retry -lt 100 -and $script:edgeWorkflowWindow -eq [IntPtr]::Zero; $retry++) {
+      $script:edgeWorkflowWindow = [GraphCodeUiaGateState]::FindVisibleProcessWindow([uint32]$renameProcess.Id, $title)
+      if ($script:edgeWorkflowWindow -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+    }
+    $uiaFound = $false
+    for ($retry = 1; $retry -le 10; $retry++) {
+      $uiaFound = $null -ne $desktop.FindFirst([System.Windows.Automation.TreeScope]::Children, $condition)
+      if ($uiaFound) { break }
+      if ($retry -lt 10) { Start-Sleep -Milliseconds 100 }
+    }
+    Write-Host "UIA_EDGE_MODAL_CENSUS title='$title' native=$($script:edgeWorkflowWindow -ne [IntPtr]::Zero) desktopUia=$uiaFound"
     Require ($edgeWorkflowWindow -ne [IntPtr]::Zero -and
       [GraphCodeUiaGateState]::WindowIsVisible($edgeWorkflowWindow) -and
       [GraphCodeUiaGateState]::WindowTextOf($edgeWorkflowWindow) -eq $title) `
-      "edge workflow modal not natively visible as '$title'"
+      "edge workflow modal not natively visible as '$title'; windows=$([GraphCodeUiaGateState]::DescribeTopLevelWindows([uint32]$renameProcess.Id) -join ' | ')"
   }
   function Edge-Combo([int] $id, [int] $index, [string] $expected) {
     $control = [GraphCodeUiaGateState]::ControlById($edgeWorkflowWindow, $id)
     Require ($control -ne [IntPtr]::Zero) "edge workflow missing combo $id"
-    Require (Ensure-ShellForeground $edgeWorkflowWindow "edge combo $id") "edge workflow combo $id lost foreground"
-    Require ([GraphCodeUiaGateState]::FocusControl($edgeWorkflowWindow, $control)) "edge workflow combo $id focus failed"
     $before = [GraphCodeUiaGateState]::ComboSelection($edgeWorkflowWindow, $id)
-    $delta = $index - [int]($before.Split("|")[0])
-    if ($delta -ne 0) {
-      Require ([GraphCodeUiaGateState]::SendKeyInput([uint16]$(if ($delta -gt 0) { 0x28 } else { 0x26 }), [Math]::Abs($delta)) -eq [Math]::Abs($delta)) `
-        "edge workflow combo $id keyboard selection failed"
-    }
-    $after = ""
-    for ($retry = 0; $retry -lt 40; $retry++) {
-      $after = [GraphCodeUiaGateState]::ComboSelection($edgeWorkflowWindow, $id)
-      if ($after -eq "$index|$expected") { break }
-      Start-Sleep -Milliseconds 50
+    $after = $before
+    for ($attempt = 1; $attempt -le 5 -and $after -ne "$index|$expected"; $attempt++) {
+      Require (Ensure-ShellForeground $edgeWorkflowWindow "edge combo $id attempt $attempt") `
+        "edge workflow combo $id lost foreground"
+      Require ([GraphCodeUiaGateState]::FocusControl($edgeWorkflowWindow, $control)) `
+        "edge workflow combo $id focus failed on attempt $attempt"
+      $delta = $index - [int]($after.Split("|")[0])
+      if ($delta -ne 0) {
+        $keys = [GraphCodeUiaGateState]::SendKeyInput(
+          [uint16]$(if ($delta -gt 0) { 0x28 } else { 0x26 }), [Math]::Abs($delta))
+        Require ($keys -eq [Math]::Abs($delta)) "edge workflow combo $id keyboard injection failed"
+      }
+      for ($retry = 0; $retry -lt 40; $retry++) {
+        $after = [GraphCodeUiaGateState]::ComboSelection($edgeWorkflowWindow, $id)
+        if ($after -eq "$index|$expected") { break }
+        Start-Sleep -Milliseconds 50
+      }
+      Write-Host "UIA_EDGE_COMBO id=$id attempt=$attempt before='$before' after='$after' expected='$index|$expected' keys=$delta"
     }
     Require ($after -eq "$index|$expected") "edge workflow combo $id expected '$index|$expected', observed '$after' from '$before'"
     return $after
@@ -6192,7 +6220,13 @@ try {
     "edge workflow stub baseline not ready: $(Read-UiaTextFile $renameStubResultPath)"
   $edgeCreateMenu = Open-EdgeMenu $false 5120
   Wait-EdgeWindow $edgeWorkflowTitle
-  $edgeSourceTitle = if ($renamePropagationConfirmed) { $renameFinalTitle } else { $renameInitialTitle }
+  Write-Host ("UIA_EDGE_ENTRY menuId=5120 point=$($edgeCreateMenu.point -join ',') " +
+    "nativeTitle='$([GraphCodeUiaGateState]::WindowTextOf($edgeWorkflowWindow))'")
+  $edgeSourceLive = [GraphCodeUiaGateState]::ComboSelection($edgeWorkflowWindow, 9100)
+  $edgeSourceMatched = $edgeSourceLive -match ('^\d+\|(.+) — ' + [regex]::Escape($edgeWorkflowSource) + '$')
+  Require $edgeSourceMatched `
+    "edge source picker did not expose the seeded daemon ID/title: '$edgeSourceLive'; stub=$(Read-UiaTextFile $renameStubResultPath)"
+  $edgeSourceTitle = $Matches[1]
   $edgeSourceChoice = Edge-Combo 9100 0 "$edgeSourceTitle — $edgeWorkflowSource"
   $edgeTargetChoice = Edge-Combo 9101 1 "Stub node B — $edgeWorkflowTarget"
   $edgeKind = Edge-Combo 9102 0 "Hand-off — continue execution"

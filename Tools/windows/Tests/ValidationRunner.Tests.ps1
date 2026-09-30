@@ -1428,6 +1428,15 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'graphCommandsAfter') {
     throw "RED: UIA live gate does not prove the native edge create/edit round trip and no-mutation paths"
   }
+  if ($uiaLiveGateSource -notmatch 'FindVisibleProcessWindow\(\[uint32\]\$renameProcess\.Id, \$title\)' -or
+      $uiaLiveGateSource -notmatch 'WindowIsVisible\(\$edgeWorkflowWindow\)' -or
+      $uiaLiveGateSource -notmatch 'UIA_EDGE_MODAL_CENSUS' -or
+      $uiaLiveGateSource -notmatch '\$delta = \$index - \[int\]\(\$after\.Split\("\|"\)\[0\]\)' -or
+      $uiaLiveGateSource -notmatch 'UIA_EDGE_COMBO id=\$id attempt=\$attempt' -or
+      $uiaLiveGateSource -notmatch 'Require \(\$after -eq "\$index\|\$expected"\)' -or
+      $uiaLiveGateSource -match '\$Matches\[1\] -in @\(') {
+    throw "RED: UIA edge retry/modal/identity proof regressed"
+  }
   if ($uiaLiveGateSource -notmatch 'Open-EdgeMenu \$false 5120' -or
       $uiaLiveGateSource -notmatch 'Open-EdgeMenu \$true 5110' -or
       $uiaLiveGateSource -notmatch 'Edge-Combo 9100 0' -or
