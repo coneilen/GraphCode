@@ -135,6 +135,20 @@ fn clipRectToViewport(rect: LayoutRect, viewport_height: i32) ?LayoutRect {
     return .{ .left = rect.left, .top = top, .right = rect.right, .bottom = bottom };
 }
 
+const ContentControlClip = union(enum) {
+    hidden,
+    empty,
+    visible: LayoutRect,
+};
+
+fn contentControlClip(rect: LayoutRect, shown: bool, viewport_height: i32) ContentControlClip {
+    if (!shown) return .hidden;
+    return if (clipRectToViewport(rect, viewport_height)) |clipped|
+        .{ .visible = clipped }
+    else
+        .empty;
+}
+
 fn fitDialogRect(
     work_area: LayoutRect,
     desired_width: i32,
@@ -2357,17 +2371,18 @@ fn layoutTiles(state: *DialogState, index: usize, x: i32, y: i32, width: i32, sh
 
 fn layoutContentControl(control: c.HWND, x: i32, y: i32, width: i32, height: i32, shown: bool, viewport: i32) void {
     if (control == null) return;
-    const command = if (shown) c.SW_SHOW else c.SW_HIDE;
-    if (!shown) {
-        _ = c.ShowWindow(control, command);
-        return;
-    }
     const control_rect = LayoutRect{ .left = x, .top = y, .right = x + width, .bottom = y + height };
-    const clipped = clipRectToViewport(control_rect, viewport) orelse {
+    const clip = contentControlClip(control_rect, shown, viewport);
+    if (clip == .hidden) {
         _ = c.ShowWindow(control, c.SW_HIDE);
         return;
+    }
+    const region_rect = switch (clip) {
+        .hidden => unreachable,
+        .empty => LayoutRect{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+        .visible => |clipped| LayoutRect{ .left = 0, .top = clipped.top - y, .right = width, .bottom = clipped.bottom - y },
     };
-    const region = c.CreateRectRgn(0, clipped.top - y, width, clipped.bottom - y) orelse {
+    const region = c.CreateRectRgn(region_rect.left, region_rect.top, region_rect.right, region_rect.bottom) orelse {
         c.OutputDebugStringW(std.unicode.utf8ToUtf16LeStringLiteral("GraphCode: failed to clip a native form control; hiding it to protect the footer.\n").ptr);
         _ = c.ShowWindow(control, c.SW_HIDE);
         return;
@@ -2379,7 +2394,7 @@ fn layoutContentControl(control: c.HWND, x: i32, y: i32, width: i32, height: i32
         _ = c.ShowWindow(control, c.SW_HIDE);
         return;
     }
-    _ = c.ShowWindow(control, command);
+    _ = c.ShowWindow(control, c.SW_SHOW);
 }
 
 fn contentHeight(state: *const DialogState) i32 {
@@ -4581,6 +4596,22 @@ test "goal-based form content does not overlap the fixed footer" {
     }));
     try std.testing.expectEqual(@as(i32, viewport_height), partial_label.bottom);
     try std.testing.expect(!rectsIntersect(partial_label, footer));
+}
+
+test "offscreen visible controls retain an empty clip while hidden controls remain hidden" {
+    const offscreen = LayoutRect{ .left = 10, .top = 620, .right = 90, .bottom = 640 };
+    switch (contentControlClip(offscreen, true, 608)) {
+        .empty => {},
+        else => return error.ExpectedEmptyClip,
+    }
+    switch (contentControlClip(offscreen, false, 608)) {
+        .hidden => {},
+        else => return error.ExpectedHiddenControl,
+    }
+    switch (contentControlClip(.{ .left = 10, .top = 598, .right = 90, .bottom = 620 }, true, 608)) {
+        .visible => |clipped| try std.testing.expectEqual(@as(i32, 608), clipped.bottom),
+        else => return error.ExpectedViewportClip,
+    }
 }
 
 test "native form window fits inside the selected monitor work area" {
