@@ -4939,7 +4939,7 @@ try {
     "Pick a model for each loop" = 1
     "Show the activity strip" = 1
     "Tell sessions they're part of a graph" = 0
-    "Get beta releases" = 0
+    "Get beta releases" = 1
   }
   $productSettingsToggleStates = @()
   foreach ($entry in $expectedToggles.GetEnumerator()) {
