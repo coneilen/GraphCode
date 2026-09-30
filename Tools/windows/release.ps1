@@ -19,6 +19,8 @@ param(
   [string] $Zig0160 = $env:GRAPHCODE_ZIG0160,
   [string] $PackageScript,
   [string] $GitHubCli = "gh",
+  [string] $GitCli = "git",
+  [switch] $AllowTagMismatch,
   [switch] $Publish
 )
 
@@ -49,7 +51,32 @@ function Invoke-Packaging([string[]] $arguments, [string] $activity) {
   }
 }
 
+function Resolve-GitCommit([string] $revision, [string] $description) {
+  $output = & $GitCli -C $repoRoot rev-parse --verify $revision 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "could not resolve $description '$revision'"
+  }
+  $commit = [string] (@($output) | Select-Object -Last 1)
+  $commit = $commit.Trim().ToLowerInvariant()
+  if ($commit -notmatch "^[0-9a-f]{40}$") {
+    throw "$description '$revision' resolved to invalid commit '$commit'"
+  }
+  return $commit
+}
+
 $version = Resolve-ReleaseVersion $Tag
+if ($AllowTagMismatch -and $Publish) {
+  throw "-AllowTagMismatch cannot be combined with -Publish"
+}
+$tagCommit = Resolve-GitCommit "$Tag^{commit}" "release tag"
+$sourceCommit = Resolve-GitCommit "HEAD" "source revision"
+$tagMatchesSource = $tagCommit -eq $sourceCommit
+if (-not $tagMatchesSource -and -not $AllowTagMismatch) {
+  throw "release tag '$Tag' peels to $tagCommit but HEAD is $sourceCommit; use -AllowTagMismatch only for unpublished local packaging"
+}
+if ($AllowTagMismatch) {
+  Write-Warning "Packaging unverified source provenance: tag '$Tag' peels to $tagCommit but HEAD is $sourceCommit"
+}
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
@@ -60,7 +87,16 @@ if (Test-Path -LiteralPath $publishDirectory) {
 }
 New-Item -ItemType Directory -Force -Path $packages, $publishDirectory | Out-Null
 
-$buildArguments = @("-Command", "Build", "-OutputDirectory", $packages, "-Version", $version)
+$buildArguments = @(
+  "-Command", "Build",
+  "-OutputDirectory", $packages,
+  "-Version", $version,
+  "-ReleaseTag", $Tag,
+  "-ReleaseTagCommit", $tagCommit,
+  "-SourceCommit", $sourceCommit,
+  "-ReleaseTagMatchesSource", $tagMatchesSource.ToString().ToLowerInvariant(),
+  "-TagMismatchAllowed", $AllowTagMismatch.ToString().ToLowerInvariant()
+)
 foreach ($pair in @(
     @{ name = "WinghosttyRoot"; value = $WinghosttyRoot },
     @{ name = "ZmxRoot"; value = $ZmxRoot },
@@ -88,6 +124,15 @@ if (-not $reported.StartsWith("UNSIGNED")) {
 }
 if ([string] $metadata.version -ne $version) {
   throw "package reports version '$($metadata.version)', expected '$version'"
+}
+$packageProvenance = $metadata.sourceProvenance
+if (-not $packageProvenance -or
+    [string] $packageProvenance.tag -ne $Tag -or
+    [string] $packageProvenance.tagCommit -ne $tagCommit -or
+    [string] $packageProvenance.sourceCommit -ne $sourceCommit -or
+    [bool] $packageProvenance.tagMatchesSource -ne $tagMatchesSource -or
+    [bool] $packageProvenance.tagMismatchAllowed -ne [bool] $AllowTagMismatch) {
+  throw "package source provenance contradicts the release inputs"
 }
 
 $verifyArguments = @("-Command", "Verify", "-Package", $archive)
@@ -122,6 +167,13 @@ $summary = [ordered]@{
   asset = $assetName
   sha256 = $assetHash
   published = $published
+  sourceProvenance = [ordered]@{
+    tag = $Tag
+    tagCommit = $tagCommit
+    sourceCommit = $sourceCommit
+    tagMatchesSource = $tagMatchesSource
+    tagMismatchAllowed = [bool] $AllowTagMismatch
+  }
 }
 $summary | ConvertTo-Json -Depth 5 |
   Set-Content -LiteralPath (Join-Path $publishDirectory "release-summary.json") -Encoding utf8
@@ -129,6 +181,10 @@ $summary | ConvertTo-Json -Depth 5 |
 Write-Host "GraphCode $version for Windows: $reported"
 Write-Host "Asset: $asset"
 Write-Host "SHA-256: $assetHash"
+Write-Host "Source commit: $sourceCommit"
+Write-Host "Tag commit: $tagCommit"
+Write-Host "Tag matches source: $tagMatchesSource"
+Write-Host "Tag mismatch allowed: $([bool] $AllowTagMismatch)"
 Write-Host "Published to $Tag`: $published"
 if ($env:GITHUB_STEP_SUMMARY) {
   @(
@@ -140,6 +196,10 @@ if ($env:GITHUB_STEP_SUMMARY) {
     "| Signing | ``$reported`` |",
     "| Asset | ``$assetName`` |",
     "| SHA-256 | ``$assetHash`` |",
+    "| Source commit | ``$sourceCommit`` |",
+    "| Tag commit | ``$tagCommit`` |",
+    "| Tag matches source | ``$tagMatchesSource`` |",
+    "| Tag mismatch allowed | ``$([bool] $AllowTagMismatch)`` |",
     "| Published | ``$published`` |"
   ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
 }
