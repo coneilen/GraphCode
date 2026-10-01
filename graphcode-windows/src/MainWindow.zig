@@ -13,6 +13,12 @@ pub const MessageCallback = *const fn (
 
 pub const KeyCallback = *const fn (context: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool;
 
+const MessageDispatchApi = struct {
+    const translateAccelerator = c.TranslateAcceleratorW;
+    const translateMessage = c.TranslateMessage;
+    const dispatchMessage = c.DispatchMessageW;
+};
+
 pub const Command = enum(u16) {
     open_folder = 4101,
     open_global_overview = 4102,
@@ -226,18 +232,25 @@ pub const Window = struct {
     }
 
     pub fn dispatchMessage(self: *Window, message: *c.MSG, keys: KeyContext, focused: c.HWND) void {
+        self.dispatchMessageWith(MessageDispatchApi, message, keys, focused);
+    }
+
+    pub fn dispatchMessageWith(self: *Window, comptime Api: type, message: *c.MSG, keys: KeyContext, focused: c.HWND) void {
         if (self.consumeRejectedCycleKey(message, keys)) return;
         if (self.pretranslateKey(message, keys)) {
             self.pending_native_f10 = null;
             return;
         }
-        if (self.accelerators != null and c.TranslateAcceleratorW(self.hwnd, self.accelerators, message) != 0) {
+        const ordinary_tab = message.message == c.WM_KEYDOWN and message.wParam == c.VK_TAB and !keys.ctrl and !keys.alt;
+        const accelerator_eligible = !ordinary_tab or
+            (self.hwnd != null and message.hwnd == self.hwnd and focused == self.hwnd and keys.eligible());
+        if (accelerator_eligible and self.accelerators != null and Api.translateAccelerator(self.hwnd, self.accelerators, message) != 0) {
             self.pending_native_f10 = null;
             return;
         }
         if (self.dispatchNativeF10(message, keys, focused)) return;
-        _ = c.TranslateMessage(message);
-        _ = c.DispatchMessageW(message);
+        _ = Api.translateMessage(message);
+        _ = Api.dispatchMessage(message);
     }
 
     fn consumeRejectedCycleKey(self: *Window, message: *const c.MSG, keys: KeyContext) bool {
@@ -2116,6 +2129,173 @@ test "pretranslation invokes the real header key classifier only for eligible in
     try std.testing.expect(!probe.focused);
     message.wParam = c.VK_TAB;
     try std.testing.expect(!window.pretranslateKey(&message, eligible));
+}
+
+const OrdinaryTabDispatchTest = struct {
+    const owner = Win32.opaquePointerFromInt(c.HWND, 0x1000);
+    const child = Win32.opaquePointerFromInt(c.HWND, 0x2000);
+    const foreign = Win32.opaquePointerFromInt(c.HWND, 0x3000);
+    const accelerators = Win32.opaquePointerFromInt(c.HACCEL, 0x4000);
+    const eligible = KeyContext{
+        .active = true,
+        .owner_enabled = true,
+        .target_owned = true,
+        .target_visible = true,
+        .target_enabled = true,
+    };
+
+    var keys: KeyContext = .{};
+    var accelerator_calls: usize = 0;
+    var command: ?Command = null;
+    var translation_calls: usize = 0;
+    var dispatch_calls: usize = 0;
+    var dispatched: c.MSG = undefined;
+
+    fn reset(context: KeyContext) void {
+        keys = context;
+        accelerator_calls = 0;
+        command = null;
+        translation_calls = 0;
+        dispatch_calls = 0;
+    }
+
+    pub fn translateAccelerator(_: c.HWND, _: c.HACCEL, message: *c.MSG) c_int {
+        accelerator_calls += 1;
+        if (message.message != c.WM_KEYDOWN and message.message != c.WM_SYSKEYDOWN) return 0;
+        var flags: c.BYTE = c.FVIRTKEY;
+        if (keys.ctrl) flags |= c.FCONTROL;
+        if (keys.shift) flags |= c.FSHIFT;
+        if (keys.alt) flags |= c.FALT;
+        for (accelerator_entries) |entry| {
+            if (entry.key != message.wParam or entry.fVirt != flags) continue;
+            command = commandFromId(entry.cmd).?;
+            return 1;
+        }
+        return 0;
+    }
+
+    pub fn translateMessage(_: *const c.MSG) c.BOOL {
+        translation_calls += 1;
+        return 1;
+    }
+
+    pub fn dispatchMessage(message: *const c.MSG) c.LRESULT {
+        dispatch_calls += 1;
+        dispatched = message.*;
+        return 0;
+    }
+
+    fn key(target: c.HWND, value: usize) c.MSG {
+        var message = std.mem.zeroes(c.MSG);
+        message.hwnd = target;
+        message.message = c.WM_KEYDOWN;
+        message.wParam = value;
+        return message;
+    }
+};
+
+test "ordinary Tab dispatch preserves focused child and nonterminal target messages" {
+    const Api = OrdinaryTabDispatchTest;
+    var window = Window{ .hwnd = Api.owner, .accelerators = Api.accelerators };
+    for ([_]c.HWND{ Api.child, Api.foreign }) |target| {
+        for ([_]bool{ false, true }) |shift| {
+            var keys = Api.eligible;
+            keys.shift = shift;
+            keys.target_owned = target == Api.child;
+            Api.reset(keys);
+            var message = Api.key(target, c.VK_TAB);
+            window.dispatchMessageWith(Api, &message, keys, target);
+            try std.testing.expectEqual(@as(usize, 0), Api.accelerator_calls);
+            try std.testing.expect(Api.command == null);
+            try std.testing.expectEqual(@as(usize, 1), Api.translation_calls);
+            try std.testing.expectEqual(@as(usize, 1), Api.dispatch_calls);
+            try std.testing.expectEqualDeep(message, Api.dispatched);
+        }
+    }
+}
+
+test "ordinary Tab graph acceleration requires the eligible focused owner" {
+    const Api = OrdinaryTabDispatchTest;
+    var window = Window{ .hwnd = Api.owner, .accelerators = Api.accelerators };
+    for ([_]bool{ false, true }) |shift| {
+        var keys = Api.eligible;
+        keys.shift = shift;
+        var message = Api.key(Api.owner, c.VK_TAB);
+        Api.reset(keys);
+        window.dispatchMessageWith(Api, &message, keys, Api.owner);
+        try std.testing.expectEqual(@as(?Command, if (shift) .previous_loop else .next_loop), Api.command);
+        try std.testing.expectEqual(@as(usize, 1), Api.accelerator_calls);
+        try std.testing.expectEqual(@as(usize, 0), Api.dispatch_calls);
+
+        inline for (.{ "active", "owner_enabled", "target_owned", "target_visible", "target_enabled" }) |field| {
+            var excluded = keys;
+            @field(excluded, field) = false;
+            Api.reset(excluded);
+            window.dispatchMessageWith(Api, &message, excluded, Api.owner);
+            try std.testing.expectEqual(@as(usize, 0), Api.accelerator_calls);
+            try std.testing.expectEqual(@as(usize, 1), Api.dispatch_calls);
+        }
+        for ([_]c.HWND{ null, Api.child }) |focused| {
+            Api.reset(keys);
+            window.dispatchMessageWith(Api, &message, keys, focused);
+            try std.testing.expectEqual(@as(usize, 0), Api.accelerator_calls);
+            try std.testing.expectEqual(@as(usize, 1), Api.dispatch_calls);
+        }
+    }
+}
+
+test "ordinary Tab ownership preserves F6 header navigation and modified accelerators" {
+    const Api = OrdinaryTabDispatchTest;
+    const Probe = struct {
+        header_focused: bool = false,
+        action: @import("InputRouter.zig").HeaderKey = .none,
+
+        fn callback(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.action = @import("InputRouter.zig").headerKey(key, ctrl, shift, alt, self.header_focused);
+            if (self.action == .enter) self.header_focused = true;
+            return self.action != .none;
+        }
+    };
+    var probe = Probe{};
+    var window = Window{
+        .hwnd = Api.owner,
+        .accelerators = Api.accelerators,
+        .context = &probe,
+        .key_callback = &Probe.callback,
+    };
+    Api.reset(Api.eligible);
+    var message = Api.key(Api.child, c.VK_F6);
+    window.dispatchMessageWith(Api, &message, Api.eligible, Api.child);
+    try std.testing.expectEqual(@import("InputRouter.zig").HeaderKey.enter, probe.action);
+    try std.testing.expectEqual(@as(usize, 0), Api.accelerator_calls);
+    for ([_]bool{ false, true }) |shift| {
+        var keys = Api.eligible;
+        keys.shift = shift;
+        Api.reset(keys);
+        message = Api.key(Api.owner, c.VK_TAB);
+        window.dispatchMessageWith(Api, &message, keys, Api.owner);
+        try std.testing.expectEqual(
+            @as(@import("InputRouter.zig").HeaderKey, if (shift) .previous else .next),
+            probe.action,
+        );
+        try std.testing.expectEqual(@as(usize, 0), Api.accelerator_calls);
+        try std.testing.expectEqual(@as(usize, 0), Api.dispatch_calls);
+    }
+    window.key_callback = null;
+    for (accelerator_entries) |entry| {
+        if (entry.key == c.VK_TAB and (entry.fVirt & c.FCONTROL) == 0) continue;
+        var keys = Api.eligible;
+        keys.ctrl = (entry.fVirt & c.FCONTROL) != 0;
+        keys.shift = (entry.fVirt & c.FSHIFT) != 0;
+        keys.alt = (entry.fVirt & c.FALT) != 0;
+        Api.reset(keys);
+        message = Api.key(Api.child, entry.key);
+        window.dispatchMessageWith(Api, &message, keys, Api.child);
+        try std.testing.expectEqual(commandFromId(entry.cmd), Api.command);
+        try std.testing.expectEqual(@as(usize, 1), Api.accelerator_calls);
+        try std.testing.expectEqual(@as(usize, 0), Api.dispatch_calls);
+    }
 }
 
 test "toolbar routing rejects hidden windows without changing accelerator contracts" {
