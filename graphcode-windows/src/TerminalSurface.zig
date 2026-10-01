@@ -3199,7 +3199,8 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
     const modifiers = callbackModifiers(event.modifiers);
     const ctrl = modifiers.ctrl;
     const shift = modifiers.shift;
-    if (isApplicationShortcut(event.virtual_key, ctrl, shift))
+    if (isApplicationShortcut(event.virtual_key, ctrl, shift) or
+        (event.virtual_key == c.VK_TAB and (event.modifiers & ~@as(u32, 0x03)) != 0))
     {
         if (workspace.key_callback) |callback|
             callback(workspace.key_callback_context, event.virtual_key, ctrl, shift);
@@ -3209,7 +3210,7 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
     const bytes: []const u8 = switch (event.virtual_key) {
         c.VK_RETURN => "\r",
         c.VK_BACK => "\x08",
-        c.VK_TAB => "\t",
+        c.VK_TAB => if (shift) "\x1b[Z" else "\t",
         c.VK_ESCAPE => "\x1b",
         c.VK_UP => "\x1b[A",
         c.VK_DOWN => "\x1b[B",
@@ -3223,7 +3224,7 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
 
 fn isApplicationShortcut(key: usize, ctrl: bool, shift: bool) bool {
     if (ctrl and shift and (key == 'C' or key == 'V')) return true;
-    if (key == c.VK_TAB) return true;
+    if (key == c.VK_TAB) return ctrl;
     if (!ctrl) return false;
     return switch (key) {
         'O', 'J', 'N', 'S', 'T', 'W', 'D', c.VK_PRIOR, c.VK_NEXT, 0xDB, 0xDD, 0xBC => true,
@@ -3235,11 +3236,193 @@ fn callbackModifiers(mask: u32) struct { ctrl: bool, shift: bool } {
     return .{ .ctrl = (mask & 0x02) != 0, .shift = (mask & 0x01) != 0 };
 }
 
+const OrdinaryTabKeyboardTest = struct {
+    const registered: *c.winghostty_surface = @ptrFromInt(0x1000);
+    const other: *c.winghostty_surface = @ptrFromInt(0x2000);
+    const source_index: usize = 3;
+
+    calls: usize = 0,
+    action: @import("InputRouter.zig").Action = .none,
+
+    fn applicationKey(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool) callconv(.c) void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.calls += 1;
+        self.action = @import("InputRouter.zig").keyAction(key, ctrl, shift);
+    }
+
+    fn bind(self: *@This(), workspace: *Workspace) void {
+        workspace.surfaces[0].surface = other;
+        workspace.surfaces[source_index].surface = registered;
+        workspace.key_callback = &applicationKey;
+        workspace.key_callback_context = self;
+    }
+
+    fn event(modifiers: u32, action: u32) c.winghostty_key_event {
+        var key = std.mem.zeroes(c.winghostty_key_event);
+        key.virtual_key = c.VK_TAB;
+        key.modifiers = modifiers;
+        key.action = action;
+        return key;
+    }
+
+    fn expectInput(workspace: *Workspace, bytes: []const u8) !void {
+        try std.testing.expectEqual(@as(usize, 1), workspace.input_queue.count);
+        const item = workspace.input_queue.dequeue().?;
+        defer workspace.allocator.free(item.bytes);
+        try std.testing.expectEqual(source_index, item.surface);
+        try std.testing.expectEqualStrings(bytes, item.bytes);
+        try std.testing.expect(workspace.input_queue.dequeue() == null);
+        try std.testing.expectEqual(@as(usize, 0), workspace.active_surface);
+    }
+};
+
+test "ordinary Tab and backtab enter the exact registered surface queue once" {
+    const Probe = OrdinaryTabKeyboardTest;
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = Probe{};
+    probe.bind(&workspace);
+    for ([_]u32{ 0, 0x01 }) |modifiers| {
+        const event = Probe.event(modifiers, c.WINGHOSTTY_KEY_PRESS);
+        onKey(@ptrCast(&workspace), Probe.registered, &event);
+        try Probe.expectInput(&workspace, if (modifiers == 0) "\t" else "\x1b[Z");
+        try std.testing.expectEqual(@as(usize, 0), probe.calls);
+        try std.testing.expectEqual(@import("InputRouter.zig").Action.none, probe.action);
+    }
+}
+
+test "ordinary Tab release and repeat preserve one item per accepted event" {
+    const Probe = OrdinaryTabKeyboardTest;
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = Probe{};
+    probe.bind(&workspace);
+    for ([_]u32{ 0, 0x01 }) |modifiers| {
+        var event = Probe.event(modifiers, c.WINGHOSTTY_KEY_RELEASE);
+        onKey(@ptrCast(&workspace), Probe.registered, &event);
+        try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+        for ([_]u32{ c.WINGHOSTTY_KEY_PRESS, c.WINGHOSTTY_KEY_REPEAT, c.WINGHOSTTY_KEY_REPEAT }) |action| {
+            event.action = action;
+            onKey(@ptrCast(&workspace), Probe.registered, &event);
+            try Probe.expectInput(&workspace, if (modifiers == 0) "\t" else "\x1b[Z");
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+}
+
+test "ordinary Tab changes preserve control and additional modifier shortcut routes" {
+    const Probe = OrdinaryTabKeyboardTest;
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = Probe{};
+    probe.bind(&workspace);
+    for ([_]u32{ 0x02, 0x03, 0x04, 0x05, 0x80000000 }) |modifiers| {
+        probe.calls = 0;
+        const event = Probe.event(modifiers, c.WINGHOSTTY_KEY_PRESS);
+        onKey(@ptrCast(&workspace), Probe.registered, &event);
+        try std.testing.expectEqual(@as(usize, 1), probe.calls);
+        try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+        const decoded = callbackModifiers(modifiers);
+        try std.testing.expectEqual(
+            @import("InputRouter.zig").keyAction(c.VK_TAB, decoded.ctrl, decoded.shift),
+            probe.action,
+        );
+    }
+}
+
+test "ordinary Tab rejects unregistered and retired surface callbacks" {
+    const Probe = OrdinaryTabKeyboardTest;
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = Probe{};
+    probe.bind(&workspace);
+    const unknown: *c.winghostty_surface = @ptrFromInt(0x3000);
+    for ([_]u32{ 0, 0x01, 0x02 }) |modifiers| {
+        const event = Probe.event(modifiers, c.WINGHOSTTY_KEY_PRESS);
+        onKey(@ptrCast(&workspace), unknown, &event);
+        workspace.surfaces[Probe.source_index].destroying = true;
+        onKey(@ptrCast(&workspace), Probe.registered, &event);
+        workspace.surfaces[Probe.source_index].destroying = false;
+        workspace.surfaces[Probe.source_index].destroyed = true;
+        onKey(@ptrCast(&workspace), Probe.registered, &event);
+        workspace.surfaces[Probe.source_index].destroyed = false;
+    }
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+}
+
+test "ordinary Tab production dispatch reaches the real terminal key callback" {
+    const MainWindow = @import("MainWindow.zig");
+    const Probe = OrdinaryTabKeyboardTest;
+    const Api = struct {
+        var workspace: *Workspace = undefined;
+        var event: c.winghostty_key_event = undefined;
+        var accelerator_calls: usize = 0;
+        var translation_calls: usize = 0;
+        var dispatch_calls: usize = 0;
+
+        pub fn translateAccelerator(_: c.HWND, _: c.HACCEL, _: *c.MSG) c_int {
+            accelerator_calls += 1;
+            return 1;
+        }
+
+        pub fn translateMessage(_: *const c.MSG) c.BOOL {
+            translation_calls += 1;
+            return 1;
+        }
+
+        pub fn dispatchMessage(_: *const c.MSG) c.LRESULT {
+            dispatch_calls += 1;
+            onKey(@ptrCast(workspace), Probe.registered, &event);
+            return 0;
+        }
+    };
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = Probe{};
+    probe.bind(&workspace);
+    Api.workspace = &workspace;
+    const owner: c.HWND = @ptrFromInt(0x1000);
+    const child: c.HWND = @ptrFromInt(0x2000);
+    var window = MainWindow.Window{ .hwnd = owner, .accelerators = @ptrFromInt(0x3000) };
+    var message = std.mem.zeroes(c.MSG);
+    message.hwnd = child;
+    message.message = c.WM_KEYDOWN;
+    message.wParam = c.VK_TAB;
+    for ([_]bool{ false, true }) |shift| {
+        Api.accelerator_calls = 0;
+        Api.translation_calls = 0;
+        Api.dispatch_calls = 0;
+        Api.event = Probe.event(if (shift) 0x01 else 0, c.WINGHOSTTY_KEY_PRESS);
+        const keys = MainWindow.KeyContext{
+            .active = true,
+            .owner_enabled = true,
+            .target_owned = true,
+            .target_visible = true,
+            .target_enabled = true,
+            .shift = shift,
+        };
+        window.dispatchMessageWith(Api, &message, keys, child);
+        try std.testing.expectEqual(@as(usize, 0), Api.accelerator_calls);
+        try std.testing.expectEqual(@as(usize, 1), Api.translation_calls);
+        try std.testing.expectEqual(@as(usize, 1), Api.dispatch_calls);
+        try Probe.expectInput(&workspace, if (shift) "\x1b[Z" else "\t");
+        try std.testing.expectEqual(@as(usize, 0), probe.calls);
+    }
+}
+
 test "TerminalSurface.isApplicationShortcut forwards registered terminal shortcuts" {
     try std.testing.expect(isApplicationShortcut(c.VK_PRIOR, true, false));
     try std.testing.expect(isApplicationShortcut(c.VK_NEXT, true, false));
     try std.testing.expect(isApplicationShortcut(c.VK_TAB, true, false));
-    try std.testing.expect(isApplicationShortcut(c.VK_TAB, false, true));
+    try std.testing.expect(isApplicationShortcut(c.VK_TAB, true, true));
+    try std.testing.expect(!isApplicationShortcut(c.VK_TAB, false, false));
+    try std.testing.expect(!isApplicationShortcut(c.VK_TAB, false, true));
     try std.testing.expect(isApplicationShortcut('C', true, true));
     try std.testing.expect(isApplicationShortcut('V', true, true));
     try std.testing.expect(isApplicationShortcut(0xBC, true, false));
