@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [ValidateSet("IncompleteFlight", "All")]
+  [ValidateSet("IncompleteFlight", "CoreBoundary", "All")]
   [string] $Case = "All"
 )
 
@@ -37,6 +37,108 @@ function New-ContractReference([string] $relative) {
   [pscustomobject]@{ path = $relative; sha256 = Get-PreviewCoreHash (Join-Path $root $relative) }
 }
 
+function New-ProductionCoreContract {
+  $packet = New-PreviewCorePacket (New-ContractArtifact) $root ("d" * 64) |
+    ConvertTo-Json -Depth 20 | ConvertFrom-Json
+  $packet.testOnly = $true
+  $packet.profile.os = "Windows Server (pure contract, not an executed profile)"
+  $packet.profile.build = "contract-build"
+  $packet.profile.role = "Server"
+  $packet.profile.architecture = "x64"
+  $packet.profile.shellVersion = "contract-shell"
+  $packet.profile.nativeLease = "test-only; no native lease"
+  $packet.profile.ownedAccountIsolationWitnessed = $true
+  $packet.backend.kind = "copilotCLI"
+  $packet.backend.version = "contract-version; no agent invoked"
+  $packet.backend.executableSha256 = "e" * 64
+  $packet.backend.permissions = "ask"
+  $packet.backend.model = "backend default"
+  $packet.backend.approval = "test-only; no credentials or credits granted"
+  $packet.backend.authenticationProvisionedInOwnedAccount = $true
+  $packet.runtime.daemon = "Production"
+  $packet.runtime.installation = "ScheduledTask"
+  $packet.runtime.seededModel = $false
+  $packet.runtime.testHooks = $false
+  $packet.runtime.supportDirectory = Join-Path $root "support"
+  $packet.runtime.installDirectory = Join-Path $root "install"
+  $packet.runtime.endpoint = "\\.\pipe\pure-contract-not-a-running-daemon"
+  $packet.runtime.loopId = "D1111111-1111-4111-8111-111111111111"
+  $packet.runtime.terminalSessionName = $packet.runtime.loopId
+  $packet.runtime.backendSessionId = "opaque-conversation-id-not-a-guid"
+  foreach ($name in @("shell", "daemon", "cli", "zmx")) {
+    $packet.runtime.installedHashes.$name = $packet.artifact.hashes.$name
+  }
+  $prefix = "contract-" + [guid]::NewGuid().ToString("N")
+  $png = "$prefix.png"
+  [IO.File]::WriteAllBytes((Join-Path $root $png), [Convert]::FromBase64String(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lX8AAAAASUVORK5CYII="))
+  $build = "$prefix-build.txt"
+  [IO.File]::WriteAllText((Join-Path $root $build), "Pure contract reference; NOT actual production/build evidence")
+  $packet.custody.build = New-ContractReference $build
+  $packet.custody.reviewer = "pure-contract observer, not a real approval"
+  $packet.custody.accepted = $true
+  $packet.custody.reviewedEvidenceIsOwnedAndSanitized = $true
+  # Matches LoopGraph/ProjectRef/LoopNode Codable; this is NOT a captured daemon graph.
+  $graph = @{
+    id = "E2222222-2222-4222-8222-222222222222"
+    project = @{ path = (Join-Path $root "project").Replace('\', '/'); name = "project"; lastOpenedAt = 42.5 }
+    edges = @()
+    nodes = @(@{
+      id = $packet.runtime.loopId; title = "AlphaRenamed"; loopType = "turnBased"
+      backend = $packet.backend.kind; checkDescription = "A-start-Z-end"; createdAt = 42.5
+      state = @{ idle = @{} }; pilotState = @{ notPiloted = @{} }
+      pausesBeforeWritesOnly = $false; attachments = @(); metricHistory = @(); sessionRestarts = 0
+    })
+  }
+  $coreGraph = "$prefix-core.json"
+  [IO.File]::WriteAllText((Join-Path $root $coreGraph), ($graph | ConvertTo-Json -Depth 10))
+  $graph.nodes[0].state = @{ stopped = @{} }
+  $stoppedGraph = "$prefix-stopped.json"
+  [IO.File]::WriteAllText((Join-Path $root $stoppedGraph), ($graph | ConvertTo-Json -Depth 10))
+  $session = "$prefix-session.json"
+  $binding = @{
+    loopId = $packet.runtime.loopId; terminalSessionName = $packet.runtime.terminalSessionName
+    backendKind = $packet.backend.kind; backendSessionId = $packet.runtime.backendSessionId
+    backendExecutableSha256 = $packet.backend.executableSha256
+  }
+  [IO.File]::WriteAllText((Join-Path $root $session), ($binding | ConvertTo-Json))
+  foreach ($row in $packet.observations) {
+    $row.status = "Passed"; $row.count = 1
+    $row.method = if ($row.id -in @("production-core", "actual-backend-terminal", "safe-stop-reopen")) { "NativeManual" } else { "OwnedRuntime" }
+    $row.evidence = @((New-ContractReference $png))
+    foreach ($check in (Get-PreviewCoreChecks $row.id)) { $row.facts.$check = $true }
+    switch ($row.id) {
+      "production-core" {
+        $row.facts.createdCount = 1; $row.facts.selectedLoopId = $packet.runtime.loopId
+        $row.facts.persistedLoopId = $packet.runtime.loopId
+        $row.facts.graphTitle = "AlphaRenamed"; $row.facts.sidebarTitle = "AlphaRenamed"
+        $row.facts.checkDescription = "A-start-Z-end"; $row.facts.cancelDraft = "CancelMustNotPersist"
+        $row.facts.readback = New-ContractReference $coreGraph
+        $row.facts.cancelBeforeSha256 = $row.facts.readback.sha256
+        $row.facts.cancelAfterSha256 = $row.facts.cancelBeforeSha256
+      }
+      "actual-backend-terminal" {
+        $row.facts.loopId = $packet.runtime.loopId; $row.facts.backendKind = $packet.backend.kind
+        $row.facts.backendVersion = $packet.backend.version; $row.facts.agentTurns = 2
+        $row.facts.input = "Reply with FlightOutput2."; $row.facts.output1 = "A-start-Z-end FlightOutput1"
+        $row.facts.output2 = "FlightOutput2"; $row.facts.terminalMode = "default"
+        $row.facts.sessionReadback = New-ContractReference $session
+      }
+      "safe-stop-reopen" {
+        $row.facts.stoppedLoopId = $packet.runtime.loopId; $row.facts.reopenedLoopId = $packet.runtime.loopId
+        $row.facts.stoppedSessionName = $packet.runtime.terminalSessionName
+        $row.facts.reopenedTitle = "AlphaRenamed"; $row.facts.reopenedCheckDescription = "A-start-Z-end"
+        $row.facts.readback = New-ContractReference $stoppedGraph
+      }
+    }
+  }
+  $packet | Add-Member -NotePropertyName externalReleaseEvidence -NotePropertyValue @{
+    predecessor = "NotExecuted"; upgrade = "NotExecuted"; rollback = "NotExecuted"
+    uninstall = "NotExecuted"; dpiIme = "NotExecuted"; destructiveWorkspace = "NotExecuted"
+  }
+  return $packet
+}
+
 function Test-Contract([string] $name, [scriptblock] $body) {
   & $body
   $script:executed++
@@ -59,12 +161,82 @@ try {
   New-Item -ItemType Directory -Path $root -Force | Out-Null
   $env:TEMP = $root
   $env:TMP = $root
+  if ($Case -in @("CoreBoundary", "All")) {
+    Test-Contract "five core observations do not require an upgrade predecessor or release programme" {
+      $core = @("artifact-custody", "installed-production", "production-core", "actual-backend-terminal", "safe-stop-reopen")
+      $rows = @($core | ForEach-Object { [pscustomobject]@{ id = $_ } })
+      Assert-PreviewCoreCoverage $rows
+      Assert-Equal ((Get-PreviewCoreSteps | Sort-Object) -join ',') (($core | Sort-Object) -join ',')
+    }
+    Test-Contract "production Codable CORE contract accepts unexecuted predecessor without release approval" {
+      $packet = New-ProductionCoreContract
+      Assert-PreviewCoreCoreContract $packet ("b" * 40) ("c" * 64) $root
+      Assert-Equal $packet.externalReleaseEvidence.predecessor "NotExecuted"
+      $outcome = Get-PreviewCoreOutcome $packet
+      Assert-Equal $outcome.state "CORE_CONTRACT_COMPLETE"
+      Assert-Equal $outcome.previewReleaseQualified $false
+      Assert-Equal $outcome.publicationApproved $false
+      Assert-Equal $outcome.profileRole "Server"
+      Assert-Rejected { Assert-PreviewCoreFlight $packet ("b" * 40) ("c" * 64) $root } "test-only evidence"
+    }
+    Test-Contract "saved graph must contain production Codable state, not string or missing fixture flags" {
+      $packet = New-ProductionCoreContract
+      $ref = @($packet.observations | Where-Object id -eq "production-core")[0].facts.readback
+      $path = Join-Path $root $ref.path
+      $graph = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+      $graph.nodes[0].state = "idle"
+      [IO.File]::WriteAllText($path, ($graph | ConvertTo-Json -Depth 10))
+      $ref.sha256 = Get-PreviewCoreHash $path
+      Assert-Rejected { Assert-PreviewCoreSavedGraph $ref $packet $root } "production Codable LoopState"
+      $graph.nodes[0].state = [pscustomobject]@{ idle = [pscustomobject]@{} }
+      $graph.nodes[0].PSObject.Properties.Remove("createdAt")
+      [IO.File]::WriteAllText($path, ($graph | ConvertTo-Json -Depth 10))
+      $ref.sha256 = Get-PreviewCoreHash $path
+      Assert-Rejected { Assert-PreviewCoreSavedGraph $ref $packet $root } "node timestamp"
+    }
+    Test-Contract "ordinary terminal namespace and opaque backend ID are separate and bound" {
+      $packet = New-ProductionCoreContract
+      Assert-PreviewCoreCoreContract $packet ("b" * 40) ("c" * 64) $root
+      $packet.runtime.terminalSessionName = "graphcode-" + $packet.runtime.loopId
+      Assert-Rejected { Assert-PreviewCoreCoreContract $packet ("b" * 40) ("c" * 64) $root } "ordinary Windows terminal session name"
+      $packet.runtime.terminalSessionName = $packet.runtime.loopId
+      $ref = @($packet.observations | Where-Object id -eq "actual-backend-terminal")[0].facts.sessionReadback
+      $path = Join-Path $root $ref.path
+      $session = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+      $session.backendSessionId = "unrelated-opaque-id"
+      [IO.File]::WriteAllText($path, ($session | ConvertTo-Json))
+      $ref.sha256 = Get-PreviewCoreHash $path
+      Assert-Rejected { Assert-PreviewCoreCoreContract $packet ("b" * 40) ("c" * 64) $root } "session identity mismatch"
+    }
+    Test-Contract "complete core shape still rejects missing or substituted actual backend proof" {
+      $packet = New-ProductionCoreContract
+      $terminal = @($packet.observations | Where-Object id -eq "actual-backend-terminal")[0]
+      $terminal.status = "NotExecuted"
+      Assert-Rejected { Assert-PreviewCoreCoreContract $packet ("b" * 40) ("c" * 64) $root } "actual-backend-terminal is NotExecuted"
+      $terminal.status = "Passed"; $terminal.count = 0
+      Assert-Rejected { Assert-PreviewCoreCoreContract $packet ("b" * 40) ("c" * 64) $root } "positive integer observation count"
+      $terminal.count = 1; $terminal.facts.actualAgent = $false
+      Assert-Rejected { Assert-PreviewCoreCoreContract $packet ("b" * 40) ("c" * 64) $root } "actual-backend-terminal.actualAgent"
+    }
+    Test-Contract "stopped state must survive the core reopen snapshot" {
+      $packet = New-ProductionCoreContract
+      $ref = @($packet.observations | Where-Object id -eq "safe-stop-reopen")[0].facts.readback
+      $path = Join-Path $root $ref.path
+      $graph = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+      $graph.nodes[0].state = [pscustomobject]@{ running = [pscustomobject]@{} }
+      [IO.File]::WriteAllText($path, ($graph | ConvertTo-Json -Depth 10))
+      $ref.sha256 = Get-PreviewCoreHash $path
+      Assert-Rejected { Assert-PreviewCoreCoreContract $packet ("b" * 40) ("c" * 64) $root } "persisted loop is not stopped"
+    }
+  }
+  if ($Case -ne "CoreBoundary") {
   Test-Contract "NotExecuted cannot qualify" {
     $observation = [pscustomobject]@{
       id = "production-core"; status = "NotExecuted"; count = 0
       method = ""; evidence = @(); facts = [pscustomobject]@{}
     }
     Assert-Rejected { Assert-PreviewCoreObservation $observation $root } "production-core is NotExecuted"
+  }
   }
   if ($Case -eq "All") {
     Test-Contract "Failed cannot qualify" {
@@ -93,14 +265,14 @@ try {
     }
     Test-Contract "prepared packet leaves all live observations unexecuted" {
       $packet = New-PreviewCorePacket (New-ContractArtifact) $root ("d" * 64)
-      Assert-Equal @($packet.observations).Count 9
+      Assert-Equal @($packet.observations).Count 5
       Assert-Equal @($packet.observations | Where-Object { $_.status -ne "NotExecuted" -or $_.count -ne 0 }).Count 0
       Assert-Equal $packet.backend.version ""
       Assert-Equal $packet.runtime.daemon "Unknown"
       Assert-Equal $packet.custody.accepted $false
-      Assert-Equal @($packet.profile.observations).Count 0
-      Assert-Equal @($packet.custody.sourceCI).Count 6
-      Assert-Equal @($packet.custody.sourceCI | Where-Object { $_.executed -or $_.executedCases -ne 0 }).Count 0
+      Assert-Equal $packet.scope "CoreOnly"
+      Assert-Equal ($packet.profile.PSObject.Properties.Name -contains "minimumViewportDip") $false
+      Assert-Equal ($packet.custody.PSObject.Properties.Name -contains "sourceCI") $false
       foreach ($row in $packet.observations) {
         foreach ($check in (Get-PreviewCoreChecks $row.id)) {
           Assert-Equal $row.facts[$check] $null
@@ -181,7 +353,7 @@ try {
     }
     Test-Contract "missing and duplicate flight rows cannot qualify" {
       $packet = New-PreviewCorePacket (New-ContractArtifact) $root ("d" * 64)
-      Assert-Equal @(Get-PreviewCoreSteps | Sort-Object -Unique).Count 9
+      Assert-Equal @(Get-PreviewCoreSteps | Sort-Object -Unique).Count 5
       Assert-PreviewCoreCoverage $packet.observations
       $packet.observations = @()
       Assert-Rejected { Assert-PreviewCoreCoverage $packet.observations } "missing or duplicated"

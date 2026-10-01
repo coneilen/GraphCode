@@ -4,7 +4,9 @@
 .DESCRIPTION
   Prepare verifies a caller-selected ZIP and creates only an owned synthetic
   local project and an unexecuted flight packet. VerifyEvidence checks actual,
-  reviewed evidence; it does not obtain witnesses or authorize publication.
+  reviewed CORE evidence; it does not qualify a preview release or authorize
+  publication. Upgrade/predecessor, DPI/IME, destructive, tray/recovery and
+  wider CI/release gates remain in investigation\windows-preview-release-plan.md.
   Neither command installs, launches, authenticates, drives UI, or manages
   processes/tasks. Backend/version and every live permission are chosen later.
   Keep credentials, environment/command-line dumps, foreign UI, and private
@@ -90,22 +92,17 @@ function Get-PreviewCoreHash([string] $path) {
 function Get-PreviewCoreSteps {
   @(
     "artifact-custody", "installed-production", "production-core",
-    "actual-backend-terminal", "client-reachability", "stop-exit-reopen",
-    "update-recovery-retention", "safe-mutations", "tester-handoff"
+    "actual-backend-terminal", "safe-stop-reopen"
   )
 }
 
 function Get-PreviewCoreChecks([string] $id) {
   switch ($id) {
-    "artifact-custody" { @("independentTagSourceWitness", "standalonePowerShell51", "standalonePowerShell7", "unsignedWarning") }
-    "installed-production" { @("freshScheduledInstall", "noDeveloperDependencies", "productionEndpointReachable") }
+    "artifact-custody" { @("independentTagSourceWitness", "unsignedWarning") }
+    "installed-production" { @("ordinaryScheduledInstall", "productionEndpointReachable") }
     "production-core" { @("rendered", "selected", "editorCancelUnchanged") }
-    "actual-backend-terminal" { @("actualAgent", "readableCurrentPixels", "requiredControls", "ptyResizeMatched", "wrap", "minimizeRestore", "offeredTabContinuity", "showInGraphSameLoop") }
-    "client-reachability" { @("controlsReachable", "nonAsciiInput", "deadKeyInput", "clipboardUnusedOrSeparatelyWitnessed") }
-    "stop-exit-reopen" { @("intendedLoopStopped", "closeToTray", "explicitExit", "daemonRecovery", "historyBoundaryWitnessed", "safeExit") }
-    "update-recovery-retention" { @("manualUpgrade", "lockedUpgradeRefused", "rollback", "uninstalledWithoutRemoveUserData", "recoveryLocationsReported") }
-    "safe-mutations" { @("cancelUnchanged", "confirmedCapturedTargetOnly", "partialFailureReported", "primaryFixtureRetained") }
-    "tester-handoff" { @("exactArtifactInstructions", "unsignedPolicyWarning", "checksumNotAuthenticity", "limitations", "recoveryAndBugRoute") }
+    "actual-backend-terminal" { @("actualAgent", "readableCurrentPixels", "requiredControls") }
+    "safe-stop-reopen" { @("intendedLoopStopped", "safeExit") }
   }
 }
 
@@ -115,30 +112,23 @@ function New-PreviewCoreFacts([string] $id) {
   $textFields = switch ($id) {
     "production-core" { @("selectedLoopId", "persistedLoopId", "graphTitle", "sidebarTitle", "checkDescription", "cancelDraft", "cancelBeforeSha256", "cancelAfterSha256") }
     "actual-backend-terminal" { @("loopId", "backendKind", "backendVersion", "input", "output1", "output2", "terminalMode") }
-    "stop-exit-reopen" { @("stoppedLoopId", "reopenedLoopId", "reopenedTitle", "reopenedCheckDescription") }
-    "update-recovery-retention" { @("predecessorSha256", "predecessorVersion", "userDataBeforeSha256", "userDataAfterSha256") }
-    "safe-mutations" { @("sacrificialTarget") }
+    "safe-stop-reopen" { @("stoppedLoopId", "stoppedSessionName", "reopenedLoopId", "reopenedTitle", "reopenedCheckDescription") }
   }
   foreach ($name in $textFields) { $facts[$name] = "" }
   if ($id -eq "production-core") { $facts.createdCount = 0 }
   if ($id -eq "actual-backend-terminal") { $facts.agentTurns = 0 }
-  if ($id -in @("production-core", "stop-exit-reopen")) {
+  if ($id -in @("production-core", "safe-stop-reopen")) {
     $facts.readback = [ordered]@{ path = ""; sha256 = "" }
+  }
+  if ($id -eq "actual-backend-terminal") {
+    $facts.sessionReadback = [ordered]@{ path = ""; sha256 = "" }
   }
   return $facts
 }
 
-function Get-PreviewCoreCiJobs {
-  @(
-    "windows-shell unit (shard 0 of 3)", "windows-shell unit (shard 1 of 3)",
-    "windows-shell unit (shard 2 of 3)", "windows-shell integration",
-    "windows-shell packaging contracts", "windows-shell packaging (real products)"
-  )
-}
-
 function Assert-PreviewCoreCoverage($observations) {
   $rows = @($observations)
-  Assert-PreviewCore ($rows.Count -eq 9 -and (($rows.id | Sort-Object) -join ',') -ceq
+  Assert-PreviewCore ($rows.Count -eq 5 -and (($rows.id | Sort-Object) -join ',') -ceq
     ((Get-PreviewCoreSteps | Sort-Object) -join ',')) "fixed flight observations are missing or duplicated"
 }
 
@@ -200,8 +190,9 @@ function Get-PreviewCoreArtifact([string] $packageRoot, [string] $source, [strin
 
 function New-PreviewCorePacket($artifact, [string] $root, [string] $scriptHash) {
   [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     kind = "PackagedProductionCore"
+    scope = "CoreOnly"
     flightId = [guid]::NewGuid().ToString("N")
     testOnly = $false
     preparedUtc = [DateTime]::UtcNow.ToString("o")
@@ -209,9 +200,8 @@ function New-PreviewCorePacket($artifact, [string] $root, [string] $scriptHash) 
     qualificationScriptSha256 = $scriptHash
     artifact = $artifact
     profile = [ordered]@{
-      os = ""; build = ""; role = "Unknown"; architecture = ""; graphicsAdapter = ""; shellVersion = ""
-      minimumViewportDip = [ordered]@{ width = 0; height = 0 }
-      observations = @(); nativeLease = ""; ownedAccountIsolationWitnessed = $false
+      os = ""; build = ""; role = "Unknown"; architecture = ""; shellVersion = ""
+      nativeLease = ""; ownedAccountIsolationWitnessed = $false
     }
     backend = [ordered]@{
       kind = ""; version = ""; executableSha256 = ""; permissions = ""; model = ""
@@ -219,21 +209,12 @@ function New-PreviewCorePacket($artifact, [string] $root, [string] $scriptHash) 
     }
     runtime = [ordered]@{
       daemon = "Unknown"; seededModel = $null; testHooks = $null
-      installation = "Unknown"; endpoint = ""; loopId = ""; sessionIdentity = ""
+      installation = "Unknown"; endpoint = ""; loopId = ""; terminalSessionName = ""; backendSessionId = ""
       supportDirectory = ""; installDirectory = ""
       installedHashes = [ordered]@{ shell = ""; daemon = ""; cli = ""; zmx = "" }
     }
     custody = [ordered]@{
       build = [ordered]@{ path = ""; sha256 = "" }
-      sourceCI = @(Get-PreviewCoreCiJobs | ForEach-Object {
-        [ordered]@{
-          job = $_; headSha = ""; url = ""; conclusion = "NotExecuted"; executed = $false
-          executedCases = 0; previewCoreExecutedCases = 0
-          evidence = [ordered]@{ path = ""; sha256 = "" }
-        }
-      })
-      toolchains = [ordered]@{ swift = ""; zigShell = ""; zigZmx = ""; sdk = ""; msvc = "" }
-      allRequiredSourceChecksPassed = $false
       reviewer = ""; accepted = $false; reviewedEvidenceIsOwnedAndSanitized = $false
     }
     observations = @(Get-PreviewCoreSteps | ForEach-Object {
@@ -252,10 +233,11 @@ function Write-PreviewCoreFixture([string] $root) {
   }
   [IO.File]::WriteAllText((Resolve-PreviewCoreChild $root "project\alpha.txt"), "A-start-Z-end`n", [Text.UTF8Encoding]::new($false))
   $instructions = @'
-PREPARED ONLY. No production flight has run.
+PREPARED ONLY. No production core flight has run.
 Do not create a loop until backend authentication, capability, synthetic-data
 transmission, two fixture turns/credits, and native/installation permissions
-are separately approved in an owned Windows 11 test account.
+are separately approved in an owned test account. Record the actual OS/build
+and client/server role; hosted Server evidence does not claim Windows 11 support.
 
 Use the ordinary installed package and production graphcoded, not a stub,
 gate-seeded model, copied zmx workaround, or developer-toolchain fallback.
@@ -265,24 +247,28 @@ A-start-Z-end. Change a draft to CancelMustNotPersist, then cancel unchanged.
 Opening task: read only alpha.txt; reply with its full line and FlightOutput1.
 Native follow-up: Reply with FlightOutput2. Observe real readable replies,
 not local echo or queued input. No recurrence/autopilot/additional turns.
-Witness actual emitted glyphs, declared non-ASCII/dead-key input, current
-pixels, PTY resize/wrap, minimize/restore, offered tabs and Show in Graph.
-Witness the declared viewport on Windows 11 at 100% and 150%.
-Stop only this loop; distinguish close-to-tray/Exit; recover and reopen the
-same project, title, Check description and node ID with real history semantics.
-Reuse separately approved install/manual-upgrade/locked-upgrade/rollback/
-uninstall paths. Omit RemoveUserData; retain and compare owned project/support
-bytes. Record a verified predecessor or leave upgrade evidence NotExecuted.
-Use only a sacrificial captured owned target for destructive confirmation.
-Prepare an exact-artifact unsigned tester handoff with honest limitations.
+Observe readable current pixels and the backend's required interaction.
+Stop only this loop's captured terminal session, exit safely, and reopen the
+saved project with the same title, Check description and node ID still stopped.
+Use real saved LoopGraph/LoopNode JSON (including Codable state), not UI flags.
+Record the Windows terminal's actual zmx session name and separately the opaque
+backend conversation ID in an owned, sanitized session-readback JSON manifest.
+TerminalSurface.openNode attaches the raw node UUID; Swift SurfaceRef daemon
+launches use graphcode-UUID. Do not assume those namespaces are equivalent or
+hide an actual binding failure with an override.
 
 Copy only owned, sanitized witnesses beneath evidence. Update qualification.json
 with actual facts, positive counts, file hashes, profile/backend identity and
-independent build/source-CI/reviewer references. No credentials, environment,
+independent build/reviewer references. No credentials, environment,
 foreign UI, raw command lines, private code, or synthetic session markers.
-VerifyEvidence checks evidence completeness, NOT publication permission or
-the truth of a human assertion. Coordinator review and USER release approval
-remain separate. No cleanup command deletes retained data or recovery backups.
+CORE_EVIDENCE_COMPLETE means this one observed core flow only, NOT preview
+release qualification, publication permission or independent proof of human
+assertions. Upgrade/predecessor, rollback/uninstall, DPI/IME, destructive
+workspace, tray/interruption, full CI and tester-handoff gates remain external
+in investigation\windows-preview-release-plan.md and may remain NotExecuted
+here. No missing predecessor blocks CORE; it still blocks the relevant release
+gate. Coordinator review and USER release approval remain separate. No cleanup
+command deletes retained data or recovery backups.
 '@
   [IO.File]::WriteAllText((Resolve-PreviewCoreChild $root "FLIGHT.txt"), $instructions, [Text.UTF8Encoding]::new($false))
 }
@@ -310,7 +296,7 @@ function Assert-PreviewCoreObservation($observation, [string] $evidenceRoot) {
   Assert-PreviewCore ((Test-PreviewCoreInteger $observation.count) -and
     $observation.count -gt 0) "positive integer observation count is required"
   $native = $observation.id -in @(
-    "production-core", "actual-backend-terminal", "client-reachability", "stop-exit-reopen", "safe-mutations"
+    "production-core", "actual-backend-terminal", "safe-stop-reopen"
   )
   $method = if ($native) { "NativeManual" } else { "OwnedRuntime" }
   Assert-PreviewCore ($observation.method -ceq $method) "$($observation.id) requires $method evidence"
@@ -323,17 +309,49 @@ function Assert-PreviewCoreObservation($observation, [string] $evidenceRoot) {
   Assert-PreviewCore (-not $native -or $png) "native observation requires an owned PNG pixel witness"
 }
 
-function Assert-PreviewCoreSavedGraph($reference, $packet, [string] $evidenceRoot) {
+function Test-PreviewCoreGuid($value) {
+  return $value -is [string] -and $value -cmatch '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'
+}
+
+function Test-PreviewCoreNumber($value) {
+  return (Test-PreviewCoreInteger $value) -or $value -is [decimal] -or ($value -is [double] -and
+    -not [double]::IsNaN($value) -and -not [double]::IsInfinity($value))
+}
+
+function Assert-PreviewCoreSavedGraph($reference, $packet, [string] $evidenceRoot, [string] $requiredState = "") {
   Assert-PreviewCore ([IO.Path]::GetExtension($reference.path) -eq ".json") "persisted graph JSON readback is required"
   Assert-PreviewCoreEvidence $reference $evidenceRoot
   $graph = Get-Content -LiteralPath (Resolve-PreviewCoreChild $evidenceRoot $reference.path) -Raw | ConvertFrom-Json
   $nodes = @($graph.nodes)
   $project = (Resolve-PreviewCoreChild $packet.runRoot "project").Replace('\', '/')
-  Assert-PreviewCore ($graph.project.path -ieq $project -and $nodes.Count -eq 1) "readback is not the one-loop owned project"
+  Assert-PreviewCore ((Test-PreviewCoreGuid $graph.id) -and $graph.project.path -ieq $project -and
+    $nodes.Count -eq 1 -and @($graph.edges).Count -eq 0) "readback is not the one-loop owned LoopGraph"
+  Assert-PreviewCoreText $graph.project.name "persisted project name"
+  Assert-PreviewCore (Test-PreviewCoreNumber $graph.project.lastOpenedAt) "persisted project timestamp is missing"
   $node = $nodes[0]
-  Assert-PreviewCore ($node.id -ceq $packet.runtime.loopId -and $node.title -ceq "AlphaRenamed" -and
+  Assert-PreviewCore ((Test-PreviewCoreGuid $node.id) -and $node.id -ieq $packet.runtime.loopId -and $node.title -ceq "AlphaRenamed" -and
     $node.loopType -ceq "turnBased" -and $node.checkDescription -ceq "A-start-Z-end" -and
     $node.backend -ceq $packet.backend.kind) "actual persisted graph identity/configuration mismatch"
+  Assert-PreviewCore (Test-PreviewCoreNumber $node.createdAt) "persisted node timestamp is missing"
+  # LoopState is a synthesized Codable enum; LoopType/backend are raw strings.
+  $states = @($node.state.PSObject.Properties)
+  Assert-PreviewCore ($node.state -is [pscustomobject] -and $states.Count -eq 1 -and
+    $states[0].Name -cin @("idle", "running", "awaitingInput", "blocked", "succeeded", "failed", "stalled", "waiting", "stopped") -and
+    $states[0].Value -is [pscustomobject] -and @($states[0].Value.PSObject.Properties).Count -eq 0) "invalid production Codable LoopState"
+  if ($requiredState) {
+    Assert-PreviewCore ($states[0].Name -ceq $requiredState) "persisted loop is not $requiredState"
+  }
+}
+
+function Assert-PreviewCoreSession($reference, $packet, [string] $evidenceRoot) {
+  Assert-PreviewCore ([IO.Path]::GetExtension($reference.path) -eq ".json") "owned session identity readback JSON is required"
+  Assert-PreviewCoreEvidence $reference $evidenceRoot
+  $session = Get-Content -LiteralPath (Resolve-PreviewCoreChild $evidenceRoot $reference.path) -Raw | ConvertFrom-Json
+  Assert-PreviewCore ($session.loopId -ieq $packet.runtime.loopId -and
+    $session.terminalSessionName -ceq $packet.runtime.terminalSessionName -and
+    $session.backendKind -ceq $packet.backend.kind -and
+    $session.backendExecutableSha256 -ceq $packet.backend.executableSha256 -and
+    $session.backendSessionId -ceq $packet.runtime.backendSessionId) "owned terminal/backend session identity mismatch"
 }
 
 function Assert-PreviewCoreFacts($packet, [string] $evidenceRoot) {
@@ -359,31 +377,21 @@ function Assert-PreviewCoreFacts($packet, [string] $evidenceRoot) {
           $f.output1 -cmatch 'A-start-Z-end' -and $f.output1 -cmatch 'FlightOutput1' -and
           $f.output2 -ceq "FlightOutput2" -and $f.terminalMode -ceq "default") "actual default-terminal input/output markers are missing"
         Assert-PreviewCore ((Test-PreviewCoreInteger $f.agentTurns) -and $f.agentTurns -eq 2) "exactly two approved fixture turns are required"
+        Assert-PreviewCoreSession $f.sessionReadback $packet $evidenceRoot
       }
-      "stop-exit-reopen" {
+      "safe-stop-reopen" {
         Assert-PreviewCore ($f.stoppedLoopId -ceq $loop -and $f.reopenedLoopId -ceq $loop -and
+          $f.stoppedSessionName -ceq $packet.runtime.terminalSessionName -and
           $f.reopenedTitle -ceq "AlphaRenamed" -and $f.reopenedCheckDescription -ceq "A-start-Z-end") "persisted reopen identity/configuration mismatch"
-        Assert-PreviewCoreSavedGraph $f.readback $packet $evidenceRoot
-      }
-      "update-recovery-retention" {
-        Assert-PreviewCoreHash $f.predecessorSha256 64 "verified predecessor package"
-        Assert-PreviewCore ($f.predecessorSha256 -cne $packet.artifact.sha256) "same-package upgrade is only a supporting fragment"
-        Assert-PreviewCoreText $f.predecessorVersion "predecessor version"
-        Assert-PreviewCore ($f.predecessorVersion -cne $packet.artifact.version) "version-progression upgrade is missing"
-        Assert-PreviewCoreHash $f.userDataBeforeSha256 64 "owned user-data baseline"
-        Assert-PreviewCore ($f.userDataAfterSha256 -ceq $f.userDataBeforeSha256) "owned user data was not retained"
-      }
-      "safe-mutations" {
-        Assert-PreviewCore ($f.sacrificialTarget -ceq "sacrificial-workspace") "destructive target must be the separate owned sacrificial fixture"
+        Assert-PreviewCoreSavedGraph $f.readback $packet $evidenceRoot "stopped"
       }
     }
   }
 }
 
-function Assert-PreviewCoreFlight($packet, [string] $source, [string] $hash, [string] $evidenceRoot) {
-  Assert-PreviewCore ((Test-PreviewCoreInteger $packet.schemaVersion) -and $packet.schemaVersion -eq 1 -and
-    $packet.kind -ceq "PackagedProductionCore") "unsupported fixed-flight packet"
-  Assert-PreviewCoreFalse $packet.testOnly "test-only evidence"
+function Assert-PreviewCoreCoreContract($packet, [string] $source, [string] $hash, [string] $evidenceRoot) {
+  Assert-PreviewCore ((Test-PreviewCoreInteger $packet.schemaVersion) -and $packet.schemaVersion -eq 2 -and
+    $packet.kind -ceq "PackagedProductionCore" -and $packet.scope -ceq "CoreOnly") "unsupported core-only packet"
   Assert-PreviewCoreArtifact $packet.artifact $source $hash
   Assert-PreviewCore ($packet.runtime.daemon -ceq "Production" -and
     $packet.runtime.installation -ceq "ScheduledTask") "ordinary installed production daemon is required"
@@ -395,8 +403,11 @@ function Assert-PreviewCoreFlight($packet, [string] $source, [string] $hash, [st
     Assert-PreviewCore ($packet.runtime.installedHashes.$name -ceq $packet.artifact.hashes.$name) "installed $name digest mismatch"
   }
   Assert-PreviewCoreText $packet.runtime.endpoint "owned production endpoint"
-  Assert-PreviewCore ($packet.runtime.loopId -cmatch '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$') "actual generated loop ID is missing"
-  Assert-PreviewCore ($packet.runtime.sessionIdentity -cmatch '^([0-9a-fA-F]{32}|[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$') "actual backend session ID is missing; synthetic markers cannot qualify"
+  Assert-PreviewCore (Test-PreviewCoreGuid $packet.runtime.loopId) "actual generated loop ID is missing"
+  # Windows TerminalSurface.openNode attaches the raw node ID, not SurfaceRef's daemon prefix.
+  Assert-PreviewCore ($packet.runtime.terminalSessionName -ceq $packet.runtime.loopId) "ordinary Windows terminal session name does not match the node ID"
+  # SessionIDStore persists opaque strings; a conversation ID is not a zmx session name.
+  Assert-PreviewCoreText $packet.runtime.backendSessionId "observed opaque backend conversation ID"
   Assert-PreviewCore ($packet.backend.kind -cin @("copilotCLI", "claudeCode", "codex")) "one supported actual backend is required"
   foreach ($name in @("version", "permissions", "model", "approval")) {
     Assert-PreviewCoreText $packet.backend.$name "backend $name"
@@ -405,23 +416,11 @@ function Assert-PreviewCoreFlight($packet, [string] $source, [string] $hash, [st
   $attended = if ($packet.backend.kind -ceq "claudeCode") { "manual" } else { "ask" }
   Assert-PreviewCore ($packet.backend.permissions -ceq $attended) "first flight requires attended backend permissions, not bypass/autopilot"
   Assert-PreviewCoreTrue $packet.backend.authenticationProvisionedInOwnedAccount "owned backend authentication approval"
-  Assert-PreviewCore ($packet.profile.role -ceq "Client" -and $packet.profile.os -ceq "Windows 11" -and
-    $packet.profile.architecture -ceq "x64") "hosted/server evidence cannot qualify the Windows 11 x64 client"
+  Assert-PreviewCore ($packet.profile.role -cin @("Client", "Server") -and
+    $packet.profile.architecture -ceq "x64" -and $packet.profile.os -cmatch '^Windows\b') "actual Windows x64 client/server profile is missing"
   Assert-PreviewCoreTrue $packet.profile.ownedAccountIsolationWitnessed "owned account/home/credential isolation"
-  foreach ($name in @("build", "graphicsAdapter", "shellVersion", "nativeLease")) {
-    Assert-PreviewCoreText $packet.profile.$name "client $name"
-  }
-  $minimum = $packet.profile.minimumViewportDip
-  Assert-PreviewCore ((Test-PreviewCoreInteger $minimum.width) -and $minimum.width -gt 0 -and
-    (Test-PreviewCoreInteger $minimum.height) -and $minimum.height -gt 0) "declared minimum viewport is missing"
-  $profiles = @($packet.profile.observations)
-  Assert-PreviewCore ($profiles.Count -eq 2 -and (@($profiles.scale | Sort-Object) -join ',') -ceq "100,150") "actual 100% and 150% client profiles are required"
-  foreach ($profile in $profiles) {
-    Assert-PreviewCore ((Test-PreviewCoreInteger $profile.scale) -and (Test-PreviewCoreInteger $profile.viewportWidthDip) -and
-      (Test-PreviewCoreInteger $profile.viewportHeightDip) -and $profile.viewportWidthDip -eq $minimum.width -and
-      $profile.viewportHeightDip -eq $minimum.height) "minimum viewport was not witnessed"
-    Assert-PreviewCoreText $profile.workArea "actual display work area"
-    Assert-PreviewCoreEvidence $profile.pixels $evidenceRoot -RequirePng
+  foreach ($name in @("os", "build", "shellVersion", "nativeLease")) {
+    Assert-PreviewCoreText $packet.profile.$name "observed profile $name"
   }
   $observations = @($packet.observations)
   Assert-PreviewCoreCoverage $observations
@@ -430,27 +429,22 @@ function Assert-PreviewCoreFlight($packet, [string] $source, [string] $hash, [st
   Assert-PreviewCoreText $packet.custody.reviewer "coordinator reviewer"
   Assert-PreviewCoreTrue $packet.custody.accepted "coordinator evidence acceptance"
   Assert-PreviewCoreTrue $packet.custody.reviewedEvidenceIsOwnedAndSanitized "owned sanitized evidence review"
-  Assert-PreviewCoreTrue $packet.custody.allRequiredSourceChecksPassed "all required checks at the exact source"
   Assert-PreviewCoreEvidence $packet.custody.build $evidenceRoot
-  $tools = $packet.custody.toolchains
-  Assert-PreviewCore ($tools.swift -ceq "6.3.3" -and $tools.zigShell -ceq "0.15.2" -and
-    $tools.zigZmx -ceq "0.16.0") "actual pinned build toolchain witness is missing"
-  Assert-PreviewCoreText $tools.sdk "actual pinned SDK"
-  Assert-PreviewCoreText $tools.msvc "actual MSVC"
-  $jobs = @($packet.custody.sourceCI)
-  $requiredJobs = @(Get-PreviewCoreCiJobs)
-  Assert-PreviewCore ($jobs.Count -eq $requiredJobs.Count -and
-    (($jobs.job | Sort-Object) -join ',') -ceq (($requiredJobs | Sort-Object) -join ',')) "executed required Windows CI parts are missing or duplicated"
-  foreach ($job in $jobs) {
-    Assert-PreviewCore ($job.headSha -ceq $source -and $job.conclusion -ceq "success") "source CI failed or used a different head"
-    Assert-PreviewCoreTrue $job.executed "source CI execution (not skipped)"
-    Assert-PreviewCore ((Test-PreviewCoreInteger $job.executedCases) -and $job.executedCases -gt 0) "source CI requires positive executed counts"
-    Assert-PreviewCore ($job.url -cmatch '^https://github\.com/scgopi/GraphCode/actions/runs/[0-9]+$') "source CI run identity is missing"
-    Assert-PreviewCoreText $job.job "source CI job"
-    Assert-PreviewCoreEvidence $job.evidence $evidenceRoot
-    if ($job.job -ceq "windows-shell packaging contracts") {
-      Assert-PreviewCore ((Test-PreviewCoreInteger $job.previewCoreExecutedCases) -and $job.previewCoreExecutedCases -gt 0) "new PreviewCore contracts were not actually executed in CI"
-    }
+}
+
+function Assert-PreviewCoreFlight($packet, [string] $source, [string] $hash, [string] $evidenceRoot) {
+  Assert-PreviewCoreFalse $packet.testOnly "test-only evidence"
+  Assert-PreviewCoreCoreContract $packet $source $hash $evidenceRoot
+}
+
+function Get-PreviewCoreOutcome($packet) {
+  [pscustomobject]@{
+    state = $(if ($packet.testOnly) { "CORE_CONTRACT_COMPLETE" } else { "CORE_EVIDENCE_COMPLETE" })
+    testOnly = $packet.testOnly
+    previewReleaseQualified = $false
+    publicationApproved = $false
+    profileRole = $packet.profile.role
+    releasePlan = "investigation\windows-preview-release-plan.md"
   }
 }
 
@@ -500,7 +494,7 @@ function Invoke-PreviewCorePrepare([string] $archive, [string] $source, [string]
   }
   [IO.File]::WriteAllText((Resolve-PreviewCoreChild $root "owner.json"),
     ($owner | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
-  Write-Output "PREPARED_NOT_QUALIFIED: 9 flight observations NotExecuted; no application/backend/native/installer execution"
+  Write-Output "PREPARED_NOT_QUALIFIED: 5 CORE observations NotExecuted; no application/backend/native/installer execution"
   Write-Output (Resolve-PreviewCoreChild $root "qualification.json")
 }
 
@@ -529,7 +523,8 @@ function Invoke-PreviewCoreVerify([string] $path, [string] $source, [string] $ha
   $actualArtifact = Get-PreviewCoreArtifact (Resolve-PreviewCoreChild $root "package\GraphCode") $source $hash
   Assert-PreviewCore (($actualArtifact | ConvertTo-Json -Depth 10 -Compress) -ceq
     ($prepared.artifact | ConvertTo-Json -Depth 10 -Compress)) "retained packaged payload changed"
-  Write-Output "EVIDENCE_COMPLETE: reviewed fixed-flight packet; not publication permission or independent proof of human assertions"
+  $outcome = Get-PreviewCoreOutcome $packet
+  Write-Output "$($outcome.state): previewReleaseQualified=false; publicationApproved=false; broader release gates remain external; not independent proof of human assertions"
 }
 
 if ($HelpersOnly) { return }
