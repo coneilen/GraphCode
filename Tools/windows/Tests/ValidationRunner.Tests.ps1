@@ -36,6 +36,222 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     }
     throw "RED: multi-project expected actual $prefix rejection"
   }
+  $eventStart = [DateTime]::Parse("2026-10-01T18:29:43.1462496Z").ToUniversalTime()
+  $eventEnd = $eventStart.AddSeconds(1)
+  $eventProcess = [pscustomobject]@{ Id = 5832; StartTime = $eventStart }
+  $eventExe = "D:\owned\graphcode-windows.exe"
+  function New-MultiStartupEvent([string] $mutation = "") {
+    $pidValue = "0x{0:x}" -f $eventProcess.Id
+    $generation = "0x{0:x}" -f $eventStart.ToFileTimeUtc()
+    $path = $eventExe; $provider = "Application Error"; $timestamp = $eventEnd.ToString("o")
+    $module = "kernelbase.dll"; $code = "0xc0000142"; $extra = ""
+    switch ($mutation) {
+      "foreign-pid" { $pidValue = "0x7777"; $module = "SECRET_FOREIGN_MODULE" }
+      "reused-pid" { $generation = "0x{0:x}" -f $eventStart.AddSeconds(-1).ToFileTimeUtc() }
+      "foreign-path" { $path = "D:\foreign\other.exe"; $module = "SECRET_FOREIGN_MODULE" }
+      "provider" { $provider = "Windows Error Reporting" }
+      "outside-window" { $timestamp = $eventStart.AddSeconds(-1).ToString("o") }
+      "duplicate-id" { $extra = '<Data Name="ProcessId">0x7777</Data>' }
+      "module-path" { $module = "C:\private\SECRET_FOREIGN_MODULE.dll" }
+      "code-type" { $code = "SECRET_COMMANDLINE" }
+      "unnamed" { $extra = "<Data>SECRET_MESSAGE</Data>" }
+    }
+    $xml = @"
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><Provider Name="$provider"/><EventID>1000</EventID><TimeCreated SystemTime="$timestamp"/><EventRecordID>42</EventRecordID><Execution ProcessID="9999"/></System><EventData><Data Name="ProcessId">$pidValue</Data><Data Name="ProcessCreationTime">$generation</Data><Data Name="AppPath">$path</Data><Data Name="ModuleName">$module</Data><Data Name="ExceptionCode">$code</Data><Data Name="FaultingOffset">0x1234</Data>$extra</EventData></Event>
+"@
+    if ($mutation -ceq "execution-only") { $xml = $xml.Replace('<Data Name="ProcessId">' + $pidValue + '</Data>', '') }
+    if ($mutation -ceq "missing-generation") { $xml = $xml.Replace('<Data Name="ProcessCreationTime">' + $generation + '</Data>', '') }
+    if ($mutation -ceq "oversized") { $xml += "x" * 65536 }
+    if ($mutation -ceq "bad-xml") { $xml = "<Event>broken" }
+    if ($mutation -ceq "dtd") { $xml = '<!DOCTYPE Event [<!ENTITY canary SYSTEM "file:///D:/foreign">]>' + $xml }
+    $event = [pscustomobject]@{ Xml = $xml }
+    $event | Add-Member ScriptMethod ToXml { return $this.Xml }
+    $event | Add-Member ScriptProperty Message { throw "FORBIDDEN event Message read" }
+    return $event
+  }
+  function Invoke-MultiStartupMock($records, $process = $eventProcess, $path = $eventExe, $when = $eventEnd,
+      [string] $faults = "") {
+    $script:startupQueryCalls = 0; $script:startupFileCalls = 0; $script:startupSummaryCalls = 0; $script:startupWarningCalls = 0
+    $script:startupRecord = $null
+    $original = [InvalidOperationException]::new("shell exited with code -1073741502")
+    $caught = $null
+    try {
+      Invoke-MultiProjectOwnedStartupFailure $process -1073741502 $path $scratch { throw $original } -observedUtc $when -querySource {
+        param($filterXml, $maxEvents)
+        $script:startupQueryCalls++
+        Assert-MultiCase ($maxEvents -eq 8) "startup query result bound not8"
+        $doc = [xml]$filterXml
+        $selects = @($doc.QueryList.Query.Select)
+        Assert-MultiCase ($selects.Count -eq 1 -and $selects[0].Path -ceq "Application" -and
+          $selects[0].InnerText.Contains("Provider[@Name='Application Error']") -and
+          $selects[0].InnerText.Contains("EventID=1000") -and
+          $selects[0].InnerText.Contains("Data[@Name='ProcessId']") -and
+          $selects[0].InnerText.Contains("Data[@Name='ProcessCreationTime']") -and
+          $selects[0].InnerText.Contains("Data[@Name='AppPath']") -and
+          $selects[0].InnerText.Contains("Data[@Name='ProcessId']='5832'") -and
+          $selects[0].InnerText.Contains("Data[@Name='ProcessCreationTime']='" + $eventStart.ToFileTimeUtc() + "'") -and
+          $selects[0].InnerText.Contains($eventExe) -and
+          $selects[0].InnerText.Contains($eventStart.ToString("o")) -and
+          $selects[0].InnerText.Contains($eventEnd.ToString("o")) -and
+          -not $selects[0].InnerText.Contains("Execution")) "server selector is missing held subject generation/path/time"
+        if ($faults.Contains("query")) { throw [IO.IOException]::new("SECRET_QUERY_COMMANDLINE") }
+        return $records
+      } -fileSink {
+        param($filePath, $json)
+        $script:startupFileCalls++
+        if ($faults.Contains("file")) { throw [IO.IOException]::new("SECRET_FILE_COMMANDLINE") }
+        $script:startupRecord = $json | ConvertFrom-Json
+      } -summarySink {
+        param($line)
+        $script:startupSummaryCalls++
+        if ($faults.Contains("summary")) { throw [IO.IOException]::new("SECRET_SUMMARY_COMMANDLINE") }
+        Assert-MultiCase (-not $line.Contains("SECRET") -and -not $line.Contains("<Event") -and
+          -not $line.Contains("Execution")) "startup output retained foreign/raw event fields"
+      } -warningSink {
+        param($line)
+        $script:startupWarningCalls++
+        if ($faults.Contains("warning")) { throw [IO.IOException]::new("SECRET_WARNING_COMMANDLINE") }
+        Assert-MultiCase (-not $line.Contains("SECRET")) "exception payload leaked to secondary warning"
+      }
+    } catch { $caught = $_ }
+    Assert-MultiCase ([object]::ReferenceEquals($caught.Exception, $original) -and
+      $caught.Exception.Message -ceq "shell exited with code -1073741502") "startup diagnostic replaced original exception"
+    return [ordered]@{ primary = $caught; report = $caught.Exception.Data["OwnedStartupEvents"]
+      secondary = @($caught.Exception.Data["OwnedStartupEventDiagnostics"]); queryCalls = $script:startupQueryCalls }
+  }
+  Invoke-MultiCase "canonical owned startup event retained without changing primary" {
+    $result = Invoke-MultiStartupMock @((New-MultiStartupEvent))
+    Assert-MultiCase ($result.queryCalls -eq 1 -and $result.report.events.Count -eq 1 -and
+      $result.report.events[0].module.value -ceq "kernelbase.dll" -and $result.report.events[0].subjectPID -eq 5832 -and
+      -not $result.report.rootCauseEstablished -and $result.report.providers[1].readCount -eq 0 -and
+      $result.report.providers[2].readCount -eq 0) "canonical subject data lost or unproved provider queried"
+    return "One mocked server query, exact-owned typed module observation, original startup still fails; no EventLog/native calls"
+  }
+  Invoke-MultiCase "canonical startup event absence is explicitly unknown" {
+    $result = Invoke-MultiStartupMock @()
+    Assert-MultiCase ($result.report.state -ceq "unknown-no-matching-canonical-events" -and
+      $result.report.events.Count -eq 0 -and $result.queryCalls -eq 1) "empty query mislabeled module diagnosis"
+    return "Positive query execution with zero matches is UNKNOWN, not passing startup"
+  }
+  Invoke-MultiCase "owned canonical event missing module fields retains explicit unavailability" {
+    $event = New-MultiStartupEvent
+    $event.Xml = $event.Xml.Replace('<Data Name="ModuleName">kernelbase.dll</Data>', '').Replace('<Data Name="ExceptionCode">0xc0000142</Data>', '')
+    $result = Invoke-MultiStartupMock @($event)
+    Assert-MultiCase ($result.report.events.Count -eq 1 -and $result.report.events[0].module.state -ceq "unavailable" -and
+      $result.report.events[0].exceptionCode.state -ceq "unavailable" -and $null -eq $result.report.events[0].module.value -and
+      -not $result.report.rootCauseEstablished) "missing module/code fields were manufactured from failed exit"
+    return "Owned identity observed, optional module/code unavailable, no synthesized DLL cause"
+  }
+  Invoke-MultiCase "actual query no-match error remains unknown while startup primary survives" {
+    $original = [InvalidOperationException]::new("shell exited with code -1073741502"); $caught = $null
+    $script:noMatchQueryCalls = 0
+    try {
+      Invoke-MultiProjectOwnedStartupFailure $eventProcess -1073741502 $eventExe $scratch { throw $original } -observedUtc $eventEnd `
+        -querySource {
+          param($filter,$maximum)
+          $script:noMatchQueryCalls++
+          throw [Management.Automation.ErrorRecord]::new([InvalidOperationException]::new("No events"),
+            "NoMatchingEventsFound", [Management.Automation.ErrorCategory]::ObjectNotFound, $null)
+        } -fileSink {param($path,$json)} -summarySink {param($line)} -warningSink {param($line)}
+    } catch { $caught = $_ }
+    Assert-MultiCase ($script:noMatchQueryCalls -eq 1 -and [object]::ReferenceEquals($caught.Exception,$original) -and
+      $caught.Exception.Data["OwnedStartupEvents"].state -ceq "unknown-no-matching-canonical-events") "no-match error changed primary or invented module"
+    return "Actual PowerShell no-match ErrorRecord branch, mock transport only"
+  }
+  foreach ($mutation in @("foreign-pid", "reused-pid", "foreign-path", "provider", "outside-window", "duplicate-id",
+      "module-path", "code-type", "unnamed", "execution-only", "missing-generation", "oversized", "bad-xml", "dtd")) {
+    Invoke-MultiCase ("startup event refuses " + $mutation) -Negative {
+      $result = Invoke-MultiStartupMock @((New-MultiStartupEvent $mutation))
+      Assert-MultiCase ($result.queryCalls -eq 1 -and $result.report.state -ceq "refused-or-unavailable" -and
+        $result.report.events.Count -eq 0 -and $result.secondary.Count -eq 1) "selected identity/schema/size refusal weakened"
+      return "Actual parser/held-identity guard rejects; original primary survives and no event content retained"
+    }
+  }
+  foreach ($mutation in @("missing-pid", "missing-start", "relative-path", "old-window", "future-start", "unsafe-quotes")) {
+    Invoke-MultiCase ("startup query refuses invalid held " + $mutation) -Negative {
+      $process = [pscustomobject]@{ Id = 5832; StartTime = $eventStart }; $path = $eventExe
+      switch ($mutation) {
+        "missing-pid" { $process.Id = 0 }
+        "missing-start" { $process.StartTime = $null }
+        "relative-path" { $path = "relative.exe" }
+        "old-window" { $process.StartTime = $eventStart.AddSeconds(-31) }
+        "future-start" { $process.StartTime = $eventEnd.AddSeconds(1) }
+        "unsafe-quotes" { $path = 'D:\owned\a''"b.exe' }
+      }
+      $result = Invoke-MultiStartupMock @() $process $path
+      Assert-MultiCase ($result.queryCalls -eq 0 -and $result.secondary.Count -eq 1 -and
+        $result.report.events.Count -eq 0) "invalid held identity still queried foreign event log"
+      return "No query, original failed exit retained"
+    }
+  }
+  foreach ($faults in @("query", "file", "summary", "query-file-summary-warning")) {
+    Invoke-MultiCase ("startup retains typed secondary writer failures " + $faults) -Negative {
+      $result = Invoke-MultiStartupMock @((New-MultiStartupEvent)) -faults $faults
+      $expected = if ($faults -ceq "query-file-summary-warning") { 4 } else { 1 }
+      Assert-MultiCase ($result.secondary.Count -eq $expected -and $result.queryCalls -eq 1) "startup secondary fault dropped"
+      foreach ($failure in $result.secondary) {
+        Assert-MultiCase ($failure.operation.StartsWith("startup-event") -and $failure.errorType -ceq "System.IO.IOException" -and
+          $failure.hresult -is [int] -and -not $failure.message.Contains("SECRET")) "typed privacy-sanitized error missing"
+      }
+      return "Same original exception object, all typed failures attached, no query/process/input replay"
+    }
+  }
+  Invoke-MultiCase "startup refuses event transport exceeding eight results" -Negative {
+    $event = New-MultiStartupEvent
+    $result = Invoke-MultiStartupMock @($event,$event,$event,$event,$event,$event,$event,$event,$event)
+    Assert-MultiCase ($result.report.events.Count -eq 0 -and $result.secondary.Count -eq 1) "over-count transport silently truncated"
+    return "Nine mocked records refused, no content output"
+  }
+  Invoke-MultiCase "startup refuses duplicate actual record identity" -Negative {
+    $event = New-MultiStartupEvent
+    $result = Invoke-MultiStartupMock @($event,$event)
+    Assert-MultiCase ($result.report.events.Count -eq 0 -and $result.secondary.Count -eq 1) "duplicate event inflated observed modules"
+    return "Duplicate event record refused, no repeated evidence"
+  }
+  Invoke-MultiCase "startup default transport refuses non-hosted execution without event query" -Negative {
+    $savedActions = $env:GITHUB_ACTIONS
+    $script:forbiddenLocalEventQueries = 0
+    function Get-WinEvent { $script:forbiddenLocalEventQueries++; throw "Forbidden actual event transport" }
+    $original = [InvalidOperationException]::new("shell exited with code -1073741502"); $caught = $null
+    try {
+      $env:GITHUB_ACTIONS = "false"
+      try {
+        Invoke-MultiProjectOwnedStartupFailure $eventProcess -1073741502 $eventExe $scratch { throw $original } -observedUtc $eventEnd `
+          -fileSink {param($path,$json)} -summarySink {param($line)} -warningSink {param($line)}
+      } catch { $caught = $_ }
+    } finally { $env:GITHUB_ACTIONS = $savedActions }
+    Assert-MultiCase ($script:forbiddenLocalEventQueries -eq 0 -and [object]::ReferenceEquals($caught.Exception,$original) -and
+      $caught.Exception.Data["OwnedStartupEvents"].state -ceq "refused-non-hosted-query") "default query ran outside hosted CI"
+    return "Zero mocked command invocations; actual EventLog cmdlet never called"
+  }
+  Invoke-MultiCase "startup query escapes exact executable XPath and XML" {
+    $path = "D:\owned\a'b&c.exe"
+    $identity = New-MultiProjectStartupEventQuery $eventProcess $path $eventEnd
+    $doc = [xml]$identity.filterXml
+    Assert-MultiCase ($doc.QueryList.Query.Select.InnerText.Contains('Data[@Name=''AppPath'']="D:\owned\a''b&c.exe"') -and
+      $identity.filterXml.Contains("&amp;")) "path literal escaped incorrectly"
+    return "Structured XML + quoted literal, no broad path predicate or event query"
+  }
+  Invoke-MultiCase "actual first startup failure branch invokes diagnostic once" -Negative {
+    $ast = [Management.Automation.Language.Parser]::ParseInput($gateSource,[ref]$null,[ref]$null)
+    $branch = $ast.Find({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and
+      $n.Extent.Text.StartsWith('if ($process.HasExited)') -and $n.Extent.Text.Contains("Invoke-MultiProjectOwnedStartupFailure")},$true)
+    Assert-MultiCase ($null -ne $branch) "actual first failure branch missing new wrapper"
+    $process = [pscustomobject]@{ HasExited = $true; Id = 5832; ExitCode = -1073741502; StartTime = $eventStart }
+    $Shell = $eventExe; $logDirectory = $scratch; $settingsDirectory = $scratch
+    $script:branchDiagnosticCalls = 0; $script:branchLegacyCalls = 0
+    function Write-UiaStartupFailureDiagnostic {param($held,$exit,$exe,$cwd,$logs,$support) $script:branchLegacyCalls++}
+    function Invoke-MultiProjectOwnedStartupFailure {
+      param($held,$exit,$exe,$logs,$failure)
+      $script:branchDiagnosticCalls++
+      & $failure
+    }
+    $caught = $null
+    try { . ([scriptblock]::Create($branch.Extent.Text)) } catch { $caught = $_ }
+    Assert-MultiCase ($script:branchDiagnosticCalls -eq 1 -and $script:branchLegacyCalls -eq 1 -and
+      $caught.Exception.Message -ceq "shell exited with code -1073741502") "first failure wrapper replayed or changed primary"
+    return "Actual production branch extracted; no Start-Process/native invocation, one original throw"
+  }
   Invoke-MultiCase "actual new caller streams all five records before unchanged fifth guard" -Negative {
     $ast=[Management.Automation.Language.Parser]::ParseInput($gateSource,[ref]$null,[ref]$null)
     $decision=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq "Get-EdgeTextAttemptDecision"},$true)

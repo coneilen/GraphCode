@@ -2580,6 +2580,178 @@ function Write-MultiProjectPeerReceipt([string] $actualJson, $settledPeer) {
   Write-Host ("UIA_MULTIPROJECT_PEER_RECEIPT=" + $json)
 }
 
+function ConvertTo-MultiProjectStartupXPathLiteral([string] $value) {
+  if (-not $value.Contains("'")) { return "'" + $value + "'" }
+  if (-not $value.Contains('"')) { return '"' + $value + '"' }
+  throw "MULTIPROJECT_STARTUP_EVENTS: unsupported XPath literal; no query"
+}
+
+function New-MultiProjectStartupEventQuery($heldProcess, [string] $executable, [DateTime] $observedUtc) {
+  $processId = $heldProcess.Id
+  $start = $heldProcess.StartTime
+  if (($processId -isnot [int] -and $processId -isnot [long]) -or $processId -le 0 -or $processId -gt [uint32]::MaxValue -or
+      $start -isnot [DateTime] -or $start.Kind -eq [DateTimeKind]::Unspecified -or $observedUtc.Kind -ne [DateTimeKind]::Utc -or
+      -not [IO.Path]::IsPathFullyQualified($executable) -or [IO.Path]::GetFullPath($executable) -cne $executable) {
+    throw "MULTIPROJECT_STARTUP_EVENTS: held identity/path unavailable; no query"
+  }
+  $startUtc = $start.ToUniversalTime()
+  $duration = ($observedUtc - $startUtc).TotalSeconds
+  if ($duration -lt 0 -or $duration -gt 30) { throw "MULTIPROJECT_STARTUP_EVENTS: first-startup identity time window invalid; no query" }
+  $fileTime = $startUtc.ToFileTimeUtc()
+  if ($fileTime -le 0) { throw "MULTIPROJECT_STARTUP_EVENTS: generation unavailable; no query" }
+  $pidForms = @("$processId", ("0x{0:x}" -f $processId), ("0x{0:X}" -f $processId), ("0x{0:x8}" -f $processId))
+  $timeForms = @("$fileTime", ("0x{0:x}" -f $fileTime), ("0x{0:X}" -f $fileTime), ("0x{0:x16}" -f $fileTime))
+  $pidPredicate = (@($pidForms | Sort-Object -Unique | ForEach-Object { "Data[@Name='ProcessId']=" + (ConvertTo-MultiProjectStartupXPathLiteral $_) }) -join " or ")
+  $timePredicate = (@($timeForms | Sort-Object -Unique | ForEach-Object { "Data[@Name='ProcessCreationTime']=" + (ConvertTo-MultiProjectStartupXPathLiteral $_) }) -join " or ")
+  $first = $startUtc.ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+  $last = $observedUtc.ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+  $selector = "*[System[Provider[@Name='Application Error'] and EventID=1000 and TimeCreated[@SystemTime>='$first' and @SystemTime<='$last']] and EventData[($pidPredicate) and ($timePredicate) and Data[@Name='AppPath']=" +
+    (ConvertTo-MultiProjectStartupXPathLiteral $executable) + "]]"
+  $document = New-Object System.Xml.XmlDocument
+  $queryList = $document.CreateElement("QueryList"); $null = $document.AppendChild($queryList)
+  $query = $document.CreateElement("Query"); $query.SetAttribute("Id", "0"); $query.SetAttribute("Path", "Application")
+  $null = $queryList.AppendChild($query)
+  $select = $document.CreateElement("Select"); $select.SetAttribute("Path", "Application"); $select.InnerText = $selector
+  $null = $query.AppendChild($select)
+  return [ordered]@{ processId = $processId; startUtc = $startUtc; fileTime = $fileTime; path = $executable
+    observedUtc = $observedUtc; filterXml = $document.OuterXml; maxEvents = 8 }
+}
+
+function ConvertFrom-MultiProjectEventNumber([string] $value) {
+  if ($value -cmatch '^0x[0-9a-fA-F]{1,16}$') { return [Convert]::ToUInt64($value.Substring(2), 16) }
+  if ($value -cmatch '^[0-9]{1,20}$') { return [UInt64]::Parse($value, [Globalization.CultureInfo]::InvariantCulture) }
+  throw "MULTIPROJECT_STARTUP_EVENTS: invalid structured event number"
+}
+
+function ConvertFrom-MultiProjectOwnedStartupEvent($eventRecord, $identity) {
+  $xml = $eventRecord.ToXml()
+  if ($xml -isnot [string] -or [Text.Encoding]::UTF8.GetByteCount($xml) -gt 65536) {
+    throw "MULTIPROJECT_STARTUP_EVENTS: selected event XML unavailable/oversized"
+  }
+  $settings = New-Object Xml.XmlReaderSettings
+  $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit; $settings.XmlResolver = $null
+  $settings.MaxCharactersInDocument = 65536
+  $reader = [Xml.XmlReader]::Create([IO.StringReader]::new($xml), $settings)
+  $document = New-Object Xml.XmlDocument; $document.XmlResolver = $null
+  try { $document.Load($reader) } finally { $reader.Dispose() }
+  $namespace = New-Object Xml.XmlNamespaceManager($document.NameTable)
+  $namespace.AddNamespace("e", "http://schemas.microsoft.com/win/2004/08/events/event")
+  $system = $document.SelectSingleNode("/e:Event/e:System", $namespace)
+  if ($null -eq $system -or $system.SelectSingleNode("e:Provider", $namespace).GetAttribute("Name") -cne "Application Error" -or
+      $system.SelectSingleNode("e:EventID", $namespace).InnerText -cne "1000") {
+    throw "MULTIPROJECT_STARTUP_EVENTS: selected provider/schema refused before module read"
+  }
+  $time = [DateTimeOffset]::Parse($system.SelectSingleNode("e:TimeCreated", $namespace).GetAttribute("SystemTime"),
+    [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+  if ($time -lt $identity.startUtc -or $time -gt $identity.observedUtc) {
+    throw "MULTIPROJECT_STARTUP_EVENTS: selected event time outside owned window"
+  }
+  $data = [Collections.Generic.Dictionary[string,Xml.XmlElement]]::new([StringComparer]::Ordinal)
+  foreach ($node in $document.SelectNodes("/e:Event/e:EventData/e:Data", $namespace)) {
+    $name = $node.GetAttribute("Name")
+    if ($name.Length -eq 0 -or $data.ContainsKey($name)) { throw "MULTIPROJECT_STARTUP_EVENTS: unnamed/duplicate selected data refused" }
+    $data.Add($name, $node)
+  }
+  if (-not $data.ContainsKey("ProcessId") -or -not $data.ContainsKey("ProcessCreationTime") -or -not $data.ContainsKey("AppPath") -or
+      (ConvertFrom-MultiProjectEventNumber $data["ProcessId"].InnerText) -ne $identity.processId -or
+      (ConvertFrom-MultiProjectEventNumber $data["ProcessCreationTime"].InnerText) -ne $identity.fileTime -or
+      $data["AppPath"].InnerText -cne $identity.path) {
+    throw "MULTIPROJECT_STARTUP_EVENTS: subject PID/generation/exact path refused before module read"
+  }
+  $result = [ordered]@{ provider = "Application Error"; eventId = 1000
+    recordId = ConvertFrom-MultiProjectEventNumber $system.SelectSingleNode("e:EventRecordID", $namespace).InnerText
+    utc = $time.ToString("o"); subjectPID = $identity.processId; processStartUtc = $identity.startUtc.ToString("o")
+    module = [ordered]@{ state = "unavailable"; value = $null }
+    exceptionCode = [ordered]@{ state = "unavailable"; value = $null }
+    faultingOffset = [ordered]@{ state = "unavailable"; value = $null }; rootCauseEstablished = $false }
+  if ($data.ContainsKey("ModuleName")) {
+    $module = $data["ModuleName"].InnerText
+    if ($module -cnotmatch '^[A-Za-z0-9_. -]{1,128}$' -or $module -cin @(".", "..")) {
+      throw "MULTIPROJECT_STARTUP_EVENTS: selected module basename invalid"
+    }
+    $result.module = [ordered]@{ state = "available"; value = $module }
+  }
+  foreach ($pair in @(@("ExceptionCode", "exceptionCode"), @("FaultingOffset", "faultingOffset"))) {
+    if ($data.ContainsKey($pair[0])) {
+      $number = ConvertFrom-MultiProjectEventNumber $data[$pair[0]].InnerText
+      $result[$pair[1]] = [ordered]@{ state = "available"; value = "0x{0:X}" -f $number }
+    }
+  }
+  return $result
+}
+
+function Invoke-MultiProjectOwnedStartupFailure(
+  $heldProcess, [int] $exitCode, [string] $executable, [string] $logDirectory, [scriptblock] $primaryFailure,
+  [scriptblock] $querySource = $null, [scriptblock] $fileSink = $null,
+  [scriptblock] $summarySink = $null, [scriptblock] $warningSink = $null, [DateTime] $observedUtc = [DateTime]::UtcNow
+) {
+  try { & $primaryFailure; throw "MULTIPROJECT_STARTUP_EVENTS: original failure closure did not throw" }
+  catch {
+    $primary = $_
+    $errors = [Collections.Generic.List[object]]::new()
+    $report = [ordered]@{ schemaVersion = 1; state = "unknown"; originalExitCode = $exitCode
+      events = @(); queriedCount = 0; rootCauseEstablished = $false
+      providers = @(@{ name = "Application Error"; state = "not-queried"; readCount = 0 },
+        @{ name = "Windows Error Reporting"; state = "not-queried-subject-schema-unproven"; readCount = 0 },
+        @{ name = "SideBySide"; state = "not-queried-subject-schema-unproven"; readCount = 0 })
+      limits = "Canonical subject PID/FILETIME/exact path only; absence is unknown. One query/8 records/30s window/64KiB records. EventLog RPC has no universal hardwall." }
+    try {
+      $identity = New-MultiProjectStartupEventQuery $heldProcess $executable $observedUtc
+      $report.heldIdentity = [ordered]@{ processId = $identity.processId; startUtc = $identity.startUtc.ToString("o")
+        executable = $identity.path; observationUtc = $identity.observedUtc.ToString("o") }
+      if ($querySource -or ($env:GITHUB_ACTIONS -ceq "true" -and $env:RUNNER_ENVIRONMENT -ceq "github-hosted")) {
+        $query = if ($querySource) { $querySource } else {
+          { param($filterXml, $maxEvents) Get-WinEvent -FilterXml $filterXml -MaxEvents $maxEvents -ErrorAction Stop }
+        }
+        $report.queriedCount = 1; $report.providers[0].state = "queried-canonical-subject-schema"
+        $selected = @()
+        try { $selected = @(& $query $identity.filterXml $identity.maxEvents) }
+        catch {
+          if (-not $_.FullyQualifiedErrorId.StartsWith("NoMatchingEventsFound", [StringComparison]::Ordinal)) { throw }
+        }
+        if ($selected.Count -gt 8) { throw "MULTIPROJECT_STARTUP_EVENTS: transport exceeded owned result bound" }
+        $report.providers[0].readCount = $selected.Count
+        $events = @($selected | ForEach-Object { ConvertFrom-MultiProjectOwnedStartupEvent $_ $identity })
+        $recordIds = [Collections.Generic.HashSet[UInt64]]::new()
+        foreach ($event in $events) {
+          if (-not $recordIds.Add($event.recordId)) { throw "MULTIPROJECT_STARTUP_EVENTS: duplicate selected event record" }
+        }
+        $report.events = $events
+        $report.state = if ($events.Count -gt 0) { "owned-events-observed-cause-unknown" } else { "unknown-no-matching-canonical-events" }
+      } else { $report.state = "refused-non-hosted-query"; $report.providers[0].state = "not-queried-ci-only" }
+    } catch {
+      $report.state = "refused-or-unavailable"
+      $errors.Add((Get-MultiProjectRetentionError $_ "startup-event-query-or-validation"))
+    }
+    try {
+      $json = ConvertTo-Json -InputObject $report -Depth 7 -Compress -WarningAction Stop
+      if ([Text.Encoding]::UTF8.GetByteCount($json) -gt 65536) { throw "MULTIPROJECT_STARTUP_EVENTS: emitted record exceeds bound" }
+      $writer = if ($fileSink) { $fileSink } else {
+        { param($path, $value) [IO.File]::WriteAllText($path, $value, [Text.UTF8Encoding]::new($false)) }
+      }
+      try { & $writer (Join-Path $logDirectory "owned-startup-events.json") $json | Out-Null }
+      catch { $errors.Add((Get-MultiProjectRetentionError $_ "startup-event-file")) }
+      $summary = if ($summarySink) { $summarySink } else { { param($value) Write-Host $value } }
+      try { & $summary ("UIA_OWNED_STARTUP_EVENTS=" + $json) | Out-Null }
+      catch { $errors.Add((Get-MultiProjectRetentionError $_ "startup-event-summary")) }
+    } catch { $errors.Add((Get-MultiProjectRetentionError $_ "startup-event-serialization")) }
+    if ($errors.Count -gt 0) {
+      # Query exceptions may contain arbitrary event/provider payload. Retain types, not their messages.
+      foreach ($error in $errors) { $error.message = "Owned startup diagnostic operation failed; payload withheld." }
+      $warning = if ($warningSink) { $warningSink } else { { param($value) Write-Warning $value -WarningAction Continue } }
+      try { & $warning ("UIA_OWNED_STARTUP_EVENTS_SECONDARY=" + ($errors.ToArray() | ConvertTo-Json -Depth 4 -Compress)) | Out-Null }
+      catch {
+        $error = Get-MultiProjectRetentionError $_ "startup-event-warning"
+        $error.message = "Owned startup diagnostic operation failed; payload withheld."
+        $errors.Add($error)
+      }
+      $primary.Exception.Data["OwnedStartupEventDiagnostics"] = $errors.ToArray()
+    }
+    $primary.Exception.Data["OwnedStartupEvents"] = $report
+    throw
+  }
+}
+
 function Get-MultiProjectAutomationId([string] $kind, [string] $path, [string] $nodeId = "") {
   $prefix = switch -CaseSensitive ($kind) {
     "loop" { "loop-row" }
@@ -4381,7 +4553,9 @@ try {
           try { Write-Host "UIA_STARTUP_DIAGNOSTIC_ERROR=diagnostic output failed" } catch {}
         }
       }
-      throw "shell exited with code $startupExitCode"
+      Invoke-MultiProjectOwnedStartupFailure $process $startupExitCode $Shell $logDirectory {
+        throw "shell exited with code $startupExitCode"
+      }
     }
     if ($process.MainWindowHandle -ne 0) {
       $candidate = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
