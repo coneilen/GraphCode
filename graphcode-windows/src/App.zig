@@ -212,6 +212,335 @@ const WorkspaceMutationResult = union(enum) {
 };
 const workspace_delete_confirmation_flags = c.MB_YESNO | c.MB_ICONWARNING | c.MB_DEFBUTTON2;
 
+/// Recovery ownership survives formatting failures and later transient statuses.
+const WorkspaceRecoveryState = struct {
+    report: ?WorkspaceTeardown.Report = null,
+    message: ?[]u8 = null,
+    active: bool = false,
+    formatting_error: ?anyerror = null,
+    secondary_refresh_error: ?anyerror = null,
+
+    fn take(self: *WorkspaceRecoveryState, allocator: std.mem.Allocator, report: *WorkspaceTeardown.Report) void {
+        self.deinit(allocator);
+        self.report = report.*;
+        report.staged_path = null;
+        self.active = true;
+    }
+
+    fn text(self: *const WorkspaceRecoveryState) ?[]const u8 {
+        if (!self.active) return null;
+        if (self.message) |message| return message;
+        const report = self.report.?;
+        return switch (report.outcome) {
+            .stranded => report.staged_path orelse "Workspace could not be restored; its recovery path is unavailable.",
+            .deleted => "Workspace moved to the Recycle Bin; detailed session results are unavailable.",
+            .refused => "Workspace not deleted; detailed failure information is unavailable.",
+            .rolled_back => "Workspace restored after deletion failed; detailed failure information is unavailable.",
+        };
+    }
+
+    fn deinit(self: *WorkspaceRecoveryState, allocator: std.mem.Allocator) void {
+        if (self.message) |message| allocator.free(message);
+        if (self.report) |*report| report.deinit(allocator);
+        self.* = .{};
+    }
+};
+
+fn consumeWorkspaceTeardownReportWith(
+    comptime Api: type,
+    context: anytype,
+    allocator: std.mem.Allocator,
+    recovery: *WorkspaceRecoveryState,
+    report: *WorkspaceTeardown.Report,
+) void {
+    recovery.take(allocator, report);
+    const retained = recovery.report.?;
+    Api.logPrimary(context, retained);
+    recovery.message = Api.describe(context, allocator, retained) catch |err| blk: {
+        recovery.formatting_error = err;
+        Api.logFormattingFailure(context, err, retained);
+        break :blk null;
+    };
+    Api.publish(context, recovery);
+    Api.refresh(context) catch |err| {
+        recovery.secondary_refresh_error = err;
+        Api.logRefreshFailure(context, err, retained);
+    };
+}
+
+const WorkspaceTeardownPresentationApi = struct {
+    fn refresh(app: *App) !void {
+        try app.revalidateWorkspaceIdentity();
+        try app.reloadWorkspaceList();
+    }
+
+    fn describe(_: *App, allocator: std.mem.Allocator, report: WorkspaceTeardown.Report) ![]u8 {
+        return WorkspaceTeardown.statusMessage(allocator, report);
+    }
+
+    fn logPrimary(_: *App, report: WorkspaceTeardown.Report) void {
+        const cause = if (report.cause) |err| @errorName(err) else "none";
+        const path = report.staged_path orelse "not staged";
+        if (report.outcome == .deleted) {
+            std.log.info("Workspace deletion outcome={s}, cause={s}, recovery path={s}", .{ @tagName(report.outcome), cause, path });
+        } else {
+            std.log.err("Workspace deletion outcome={s}, cause={s}, recovery path={s}", .{ @tagName(report.outcome), cause, path });
+        }
+    }
+
+    fn logFormattingFailure(_: *App, err: anyerror, report: WorkspaceTeardown.Report) void {
+        std.log.err("Workspace deletion result formatting failed: {s}; outcome={s}, recovery path={s}", .{
+            @errorName(err), @tagName(report.outcome), report.staged_path orelse "not staged",
+        });
+    }
+
+    fn logRefreshFailure(_: *App, err: anyerror, report: WorkspaceTeardown.Report) void {
+        std.log.err("Workspace list refresh failed after deletion: {s}; primary outcome={s}, recovery path={s}", .{
+            @errorName(err), @tagName(report.outcome), report.staged_path orelse "not staged",
+        });
+    }
+
+    fn publish(app: *App, recovery: *const WorkspaceRecoveryState) void {
+        const message = recovery.text().?;
+        Diagnostics.record(app.allocator, "status", message);
+        app.syncAccessibility();
+        if (app.accessibility) |*provider| {
+            provider.announce(message, if (recovery.report.?.outcome == .deleted) .status else .@"error") catch |err|
+                std.log.err("Workspace deletion result announcement failed: {s}", .{@errorName(err)});
+        }
+    }
+};
+
+const WorkspaceRecoveryStep = enum { primary, describe, publish, refresh, formatting_failure, refresh_failure };
+
+const WorkspaceRecoveryFixture = struct {
+    steps: [16]WorkspaceRecoveryStep = undefined,
+    count: usize = 0,
+    refresh_error: ?anyerror = null,
+    description_error: ?anyerror = null,
+    supplied_message: ?[]u8 = null,
+    published_text: ?[]const u8 = null,
+    logged_staged_path: ?[]const u8 = null,
+    logged_cause: ?anyerror = null,
+    logged_formatting_error: ?anyerror = null,
+    logged_refresh_error: ?anyerror = null,
+
+    fn record(self: *WorkspaceRecoveryFixture, step: WorkspaceRecoveryStep) void {
+        std.debug.assert(self.count < self.steps.len);
+        self.steps[self.count] = step;
+        self.count += 1;
+    }
+
+    fn deinit(self: *WorkspaceRecoveryFixture) void {
+        if (self.supplied_message) |message| std.testing.allocator.free(message);
+    }
+
+    fn refresh(self: *WorkspaceRecoveryFixture) !void {
+        self.record(.refresh);
+        if (self.refresh_error) |err| return err;
+    }
+
+    fn describe(self: *WorkspaceRecoveryFixture, allocator: std.mem.Allocator, report: WorkspaceTeardown.Report) ![]u8 {
+        self.record(.describe);
+        if (self.description_error) |err| return err;
+        if (self.supplied_message) |message| {
+            self.supplied_message = null;
+            return message;
+        }
+        return WorkspaceTeardown.statusMessage(allocator, report);
+    }
+
+    fn logPrimary(self: *WorkspaceRecoveryFixture, report: WorkspaceTeardown.Report) void {
+        self.record(.primary);
+        self.logged_cause = report.cause;
+        self.logged_staged_path = report.staged_path;
+    }
+
+    fn logFormattingFailure(self: *WorkspaceRecoveryFixture, err: anyerror, _: WorkspaceTeardown.Report) void {
+        self.record(.formatting_failure);
+        self.logged_formatting_error = err;
+    }
+
+    fn logRefreshFailure(self: *WorkspaceRecoveryFixture, err: anyerror, _: WorkspaceTeardown.Report) void {
+        self.record(.refresh_failure);
+        self.logged_refresh_error = err;
+    }
+
+    fn publish(self: *WorkspaceRecoveryFixture, recovery: *const WorkspaceRecoveryState) void {
+        self.record(.publish);
+        self.published_text = recovery.text();
+    }
+};
+
+test "workspace recovery report survives refresh failure" {
+    const allocator = std.testing.allocator;
+    var recovery = WorkspaceRecoveryState{};
+    defer recovery.deinit(allocator);
+    var report = WorkspaceTeardown.Report{
+        .outcome = .stranded,
+        .cause = error.OutOfMemory,
+        .staged_path = try allocator.dupe(u8, "C:\\fixture\\.gc-deleting-4242-.graphcode-alpha"),
+        .sessions_known = false,
+    };
+    defer report.deinit(allocator);
+    var fixture = WorkspaceRecoveryFixture{ .refresh_error = error.MetadataReadFailed };
+    defer fixture.deinit();
+    consumeWorkspaceTeardownReportWith(WorkspaceRecoveryFixture, &fixture, allocator, &recovery, &report);
+    report.deinit(allocator);
+    try std.testing.expect(recovery.report != null);
+    try std.testing.expectEqual(WorkspaceTeardown.Outcome.stranded, recovery.report.?.outcome);
+    try std.testing.expectEqualStrings(
+        "C:\\fixture\\.gc-deleting-4242-.graphcode-alpha",
+        recovery.report.?.staged_path.?,
+    );
+    try std.testing.expectEqual(@as(?anyerror, error.MetadataReadFailed), recovery.secondary_refresh_error);
+    try std.testing.expectEqual(@as(?anyerror, error.MetadataReadFailed), fixture.logged_refresh_error);
+    try std.testing.expectEqual(@as(?anyerror, error.OutOfMemory), fixture.logged_cause);
+    try std.testing.expectEqualStrings(recovery.report.?.staged_path.?, fixture.logged_staged_path.?);
+    try std.testing.expect(std.mem.indexOf(u8, fixture.published_text.?, recovery.report.?.staged_path.?) != null);
+    try std.testing.expectEqual(@as(?anyerror, null), recovery.formatting_error);
+    try std.testing.expect(recovery.active);
+    try std.testing.expectEqualSlices(
+        WorkspaceRecoveryStep,
+        &.{ .primary, .describe, .publish, .refresh, .refresh_failure },
+        fixture.steps[0..fixture.count],
+    );
+}
+
+test "workspace recovery report survives persistent formatting failure" {
+    const allocator = std.testing.allocator;
+    var recovery = WorkspaceRecoveryState{};
+    defer recovery.deinit(allocator);
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var fixture = WorkspaceRecoveryFixture{ .refresh_error = error.AccessDenied };
+    defer fixture.deinit();
+    for (0..2) |_| {
+        var report = WorkspaceTeardown.Report{
+            .outcome = .stranded,
+            .cause = error.OutOfMemory,
+            .staged_path = try allocator.dupe(u8, "C:\\fixture\\.gc-deleting-4242-.graphcode-alpha"),
+            .sessions_known = false,
+        };
+        defer report.deinit(allocator);
+        consumeWorkspaceTeardownReportWith(WorkspaceRecoveryFixture, &fixture, failing.allocator(), &recovery, &report);
+        report.deinit(allocator);
+        try std.testing.expect(recovery.active);
+        try std.testing.expect(recovery.message == null);
+        try std.testing.expectEqualStrings(recovery.report.?.staged_path.?, recovery.text().?);
+        try std.testing.expectEqualStrings(recovery.report.?.staged_path.?, fixture.published_text.?);
+        try std.testing.expectEqual(@as(?anyerror, error.OutOfMemory), recovery.formatting_error);
+        try std.testing.expectEqual(@as(?anyerror, error.OutOfMemory), fixture.logged_formatting_error);
+        try std.testing.expectEqual(@as(?anyerror, error.AccessDenied), recovery.secondary_refresh_error);
+        try std.testing.expectEqual(@as(?anyerror, error.AccessDenied), fixture.logged_refresh_error);
+        for ([_][]const u8{ "deleted", "restored", "finished" }) |claim|
+            try std.testing.expect(std.mem.indexOf(u8, recovery.text().?, claim) == null);
+    }
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), failing.allocations);
+    try std.testing.expectEqualSlices(
+        WorkspaceRecoveryStep,
+        &.{ .primary, .describe, .formatting_failure, .publish, .refresh, .refresh_failure },
+        fixture.steps[0..6],
+    );
+    try std.testing.expectEqualSlices(WorkspaceRecoveryStep, fixture.steps[0..6], fixture.steps[6..fixture.count]);
+}
+
+test "workspace recovery owned message needs no second status allocation" {
+    const allocator = std.testing.allocator;
+    var recovery = WorkspaceRecoveryState{};
+    defer recovery.deinit(allocator);
+    var report = WorkspaceTeardown.Report{
+        .outcome = .stranded,
+        .cause = error.WorkspaceRecycleFailed,
+        .staged_path = try allocator.dupe(u8, "C:\\fixture\\.gc-deleting-4242-.graphcode-alpha"),
+    };
+    defer report.deinit(allocator);
+    const message = try WorkspaceTeardown.statusMessage(allocator, report);
+    var fixture = WorkspaceRecoveryFixture{ .supplied_message = message };
+    defer fixture.deinit();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    consumeWorkspaceTeardownReportWith(WorkspaceRecoveryFixture, &fixture, failing.allocator(), &recovery, &report);
+    report.deinit(allocator);
+    try std.testing.expectEqual(message.ptr, recovery.message.?.ptr);
+    try std.testing.expect(message.ptr == fixture.published_text.?.ptr);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), failing.allocations);
+    try std.testing.expectEqual(@as(?anyerror, null), recovery.formatting_error);
+    try std.testing.expectEqual(@as(?anyerror, null), recovery.secondary_refresh_error);
+    try std.testing.expect(report.staged_path == null);
+}
+
+test "workspace recovery replacement and teardown free ownership once" {
+    const allocator = std.testing.allocator;
+    var recovery = WorkspaceRecoveryState{};
+    defer recovery.deinit(allocator);
+    var fixture = WorkspaceRecoveryFixture{};
+    defer fixture.deinit();
+    for ([_][]const u8{
+        "C:\\fixture\\.gc-deleting-4242-.graphcode-alpha",
+        "C:\\fixture\\.gc-deleting-4242-.graphcode-beta",
+    }) |path| {
+        var report = WorkspaceTeardown.Report{
+            .outcome = .stranded,
+            .cause = error.WorkspaceRecycleFailed,
+            .staged_path = try allocator.dupe(u8, path),
+        };
+        defer report.deinit(allocator);
+        consumeWorkspaceTeardownReportWith(WorkspaceRecoveryFixture, &fixture, allocator, &recovery, &report);
+        report.deinit(allocator);
+        try std.testing.expectEqualStrings(path, recovery.report.?.staged_path.?);
+        try std.testing.expect(std.mem.indexOf(u8, recovery.text().?, path) != null);
+    }
+    recovery.active = false;
+    try std.testing.expect(recovery.text() == null);
+    try std.testing.expectEqualStrings("C:\\fixture\\.gc-deleting-4242-.graphcode-beta", recovery.report.?.staged_path.?);
+    recovery.deinit(allocator);
+    try std.testing.expect(recovery.report == null);
+    try std.testing.expect(recovery.message == null);
+    try std.testing.expect(!recovery.active);
+    recovery.deinit(allocator);
+}
+
+test "workspace recovery retains actual nonstranded outcomes on refresh failure" {
+    const allocator = std.testing.allocator;
+    for ([_]WorkspaceTeardown.Outcome{ .deleted, .refused, .rolled_back }) |outcome| {
+        for ([_]bool{ false, true }) |known| {
+            for ([_]bool{ false, true }) |fail_description| {
+                var recovery = WorkspaceRecoveryState{};
+                defer recovery.deinit(allocator);
+                const count: usize = if (outcome == .deleted and known) 9 else 0;
+                const cause: ?anyerror = if (outcome == .deleted) null else error.WorkspaceRecycleFailed;
+                var report = WorkspaceTeardown.Report{
+                    .outcome = outcome,
+                    .cause = cause,
+                    .sessions_targeted = count,
+                    .sessions_known = known,
+                };
+                defer report.deinit(allocator);
+                const description_error: ?anyerror = if (fail_description) error.OutOfMemory else null;
+                var fixture = WorkspaceRecoveryFixture{
+                    .refresh_error = error.MetadataReadFailed,
+                    .description_error = description_error,
+                };
+                defer fixture.deinit();
+                consumeWorkspaceTeardownReportWith(WorkspaceRecoveryFixture, &fixture, allocator, &recovery, &report);
+                try std.testing.expectEqual(outcome, recovery.report.?.outcome);
+                try std.testing.expectEqual(cause, recovery.report.?.cause);
+                try std.testing.expectEqual(count, recovery.report.?.sessions_targeted);
+                try std.testing.expectEqual(known, recovery.report.?.sessions_known);
+                try std.testing.expectEqual(description_error, recovery.formatting_error);
+                try std.testing.expectEqual(@as(?anyerror, error.MetadataReadFailed), recovery.secondary_refresh_error);
+                if (outcome == .deleted and !known and !fail_description) {
+                    try std.testing.expect(std.mem.indexOf(u8, recovery.text().?, "may still be running") != null);
+                    try std.testing.expect(std.mem.indexOf(u8, recovery.text().?, "0 saved terminal") == null);
+                }
+                if (fail_description and outcome != .deleted)
+                    try std.testing.expect(std.mem.indexOf(u8, recovery.text().?, "moved to the Recycle Bin") == null);
+            }
+        }
+    }
+}
+
 const WorkspaceMutationApi = struct {
     const reserve = WorkspaceReservation.acquire;
     const windows = WorkspaceProcess.windows;
@@ -698,6 +1027,7 @@ pub const App = struct {
     accepted_subscription: []const u8 = "",
     pending_project_path: []u8 = &.{},
     status_override: []u8 = &.{},
+    workspace_recovery: WorkspaceRecoveryState = .{},
     ingress_error: []u8 = &.{},
     declared_entry_ids: std.array_list.Managed([]u8),
     kept_worktree_paths: std.array_list.Managed([]u8),
@@ -831,6 +1161,7 @@ pub const App = struct {
         if (self.pending_sent_path.len != 0) self.allocator.free(self.pending_sent_path);
         if (self.pending_previous_subscription.len != 0) self.allocator.free(self.pending_previous_subscription);
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
+        self.workspace_recovery.deinit(self.allocator);
         if (self.ingress_error.len != 0) self.allocator.free(self.ingress_error);
         if (self.sidebar_drag_project_path.len != 0) self.allocator.free(self.sidebar_drag_project_path);
         if (self.sidebar_drag_node_id.len != 0) self.allocator.free(self.sidebar_drag_node_id);
@@ -4899,6 +5230,7 @@ pub const App = struct {
     }
 
     fn status(self: *const App) []const u8 {
+        if (self.workspace_recovery.text()) |message| return message;
         if (self.workspace_identity_blocked) return workspace_restart_message;
         if (self.status_override.len != 0) return self.status_override;
         return self.client.statusText();
@@ -5099,6 +5431,7 @@ pub const App = struct {
     }
 
     fn replaceStatus(self: *App, value: []u8) void {
+        self.workspace_recovery.active = false;
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
         self.status_override = value;
         self.syncAccessibility();
@@ -6126,13 +6459,17 @@ pub const App = struct {
 
     fn refreshWorkspaceList(self: *App) bool {
         if (!self.ensureWorkspaceIdentity()) return false;
-        const refreshed = WorkspaceLifecycle.list(self.allocator) catch {
+        self.reloadWorkspaceList() catch {
             self.setStatus("Workspace list could not be loaded");
             return false;
         };
+        return true;
+    }
+
+    fn reloadWorkspaceList(self: *App) !void {
+        const refreshed = try WorkspaceLifecycle.list(self.allocator);
         if (self.workspace_list) |*list| list.deinit(self.allocator);
         self.workspace_list = refreshed;
-        return true;
     }
 
     fn showWorkspaceText(self: *App, dialog_title: []const u8, labels: []const []const u8, initial: []const []const u8) ?NativeDialogs.Result {
@@ -6403,13 +6740,7 @@ pub const App = struct {
             .torn_down => |value| {
                 var report = value;
                 defer report.deinit(self.allocator);
-                if (!self.refreshWorkspaceList()) return;
-                const message = WorkspaceTeardown.statusMessage(self.allocator, report) catch {
-                    self.setStatus("Workspace deletion finished but its result could not be described");
-                    return;
-                };
-                defer self.allocator.free(message);
-                self.setStatus(message);
+                consumeWorkspaceTeardownReportWith(WorkspaceTeardownPresentationApi, self, self.allocator, &self.workspace_recovery, &report);
             },
         }
     }
