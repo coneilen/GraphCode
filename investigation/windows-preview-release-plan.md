@@ -53,6 +53,38 @@ Mixed rows are split within their notes. Clipboard, IME, DPI, accessibility and
 font quality are not blanket polish categories. Existing code bugs blocking
 either parity or ordinary app features are legitimate functional work.
 
+## Provider work deferred for preview prioritization
+
+**2026-10-01 user-directed decision:** pause both provider workstreams rather
+than continue expanding validation before attempting the installed GraphCode
+core workflow. Preserve their open draft PRs, branches, working changes and
+evidence; pausing is not completion, abandonment or a passing check. Accepted
+GraphCode code floor is `ac44de5de71ce9f03ec16b18401855b1126c4d3b`; neither provider
+change is included in its pinned provider. No parity status changes here.
+
+| Preserved work | Classification | Preview disposition and resume condition |
+|---|---|---|
+| [coneilen/winghostty#11](https://github.com/coneilen/winghostty/pull/11), published `f31f62cf08cdf656be223766cacacd8bf74fc7cf` | Validation infrastructure and harness bug fixes, not UI polish | Deferred. It unblocks the existing provider PR checks but is not intrinsically a tester-release prerequisite if credible owned Windows client qualification is available. Resume only for a demonstrated core-validation dependency or explicit reprioritization. |
+| [coneilen/winghostty#10](https://github.com/coneilen/winghostty/pull/10), published `c4d9a0dd8ebbc710485443321071577ccc34250f` | Conditional functional rendering risk, not polish | Deferred. Unsupported glyph-capacity behavior can blank a frame; block the preview if the advertised backend/display profile reproduces that failure. No installed GraphCode reproduction establishes that dependency yet. Resume only for that evidence or explicit reprioritization. |
+
+The latest #11 source run demonstrated owned desktop/input capture, real Mesa
+GL 4.6, the snapshot-to-handle disappearance branch, and zero remaining among
+12 observed processes without secondary errors. It still failed the smoke
+app's unchanged 10-second startup deadline; the last Debug-app log was font-grid
+initialization before the expected ConPTY startup receipt. That log boundary
+does not establish a deadlock or prove packaged GraphCode has the same failure.
+A proposed hosted-only ReleaseSafe profile remains an unqualified, uncommitted change;
+no deadline, assertion, required check or provider pin is waived.
+
+**Next priority:** qualify ordinary production startup/onboarding, local-folder
+opening, one named actual backend's readable terminal input/output, persisted
+reopen and safe exit. Fix reproduced blockers in that path first. Source-derived
+startup/session risks and the clean-clone issues below still need investigation;
+stub success, package builds and provider PR counts are not that flight.
+Do not restart either paused workstream merely to clear its PR or reduce a
+Partial-row count. Exposed unsafe behavior still requires qualification or a
+real safety boundary before inviting testers.
+
 ## Proposed invitation-only scope
 
 The first audience is technical **Windows x64** testers using their own or
@@ -132,14 +164,16 @@ support directories ([#556](https://github.com/scgopi/GraphCode/issues/556),
   reliable rename/stub pass would not qualify Edit Details or richer global
   topology.
 - **Provider:** [coneilen/winghostty#10](https://github.com/coneilen/winghostty/pull/10)
-  has a queued interactive check with no available runner at this snapshot.
-  That is a provider evidence/availability gap, not proof that every current
-  terminal is unusable. The hosted Windows Server x64/Mesa CPU real-GL route is
-  actively implemented (candidate `cc0de7a9`), but not yet qualified. It must
-  pass unchanged rendering/GUI assertions and its desktop capability canary;
-  it would still not prove Windows 11 client/hardware behavior. No runner
-  provisioning or successful qualification is assumed. No GraphCode repin
-  follows without separate validation and approval.
+  originally had a queued interactive check with no available runner. The
+  separate hosted Windows Server x64/Mesa route in
+  [coneilen/winghostty#11](https://github.com/coneilen/winghostty/pull/11)
+  subsequently produced real canary/GL and partial GUI evidence, but not complete
+  nine-group/shader qualification. Both are now paused under the prioritization
+  decision above, not completed or release-qualified. Provider availability
+  and a standalone Debug-app startup failure do not prove every GraphCode
+  terminal is unusable. Neither hosted Server CPU nor offscreen provider
+  readback establishes Windows 11 client/hardware behavior. No GraphCode repin
+  follows without a demonstrated dependency and separate validation/approval.
 - **Modal and visual evidence:** bounded historical 96-DPI production drawing
   captures exist. There are zero accepted matched current Windows/macOS
   reference pairs, not zero Windows captures of any kind. The separate modal
