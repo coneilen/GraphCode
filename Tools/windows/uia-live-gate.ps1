@@ -2906,6 +2906,61 @@ function Test-MultiProjectMetadataBatch($metadata) {
   return @($metadata | Where-Object { -not $_.observationReady }).Count -eq 0
 }
 
+function Get-MultiProjectRetentionError([Management.Automation.ErrorRecord] $errorRecord, [string] $operation) {
+  $exception=$errorRecord.Exception
+  for($depth=0;$exception.InnerException -and $depth -lt 16;$depth++){ $exception=$exception.InnerException }
+  return [ordered]@{ operation=$operation; errorType=$exception.GetType().FullName; hresult=$exception.HResult; message=$exception.Message }
+}
+
+function Invoke-MultiProjectTypeText(
+  [int] $id, [string] $text, [Collections.Generic.List[string]] $inputEvidence,
+  [scriptblock] $typeSource = $null, [scriptblock] $recordSink = $null,
+  [scriptblock] $failureSink = $null, [scriptblock] $warningSink = $null
+) {
+  $source = if ($typeSource) { $typeSource } else { { param($controlId,$expected) Edge-TypeText $controlId $expected } }
+  $sink = if ($recordSink) { $recordSink } else { { param($message) Write-Host $message } }
+  $failureWriter=if($failureSink){$failureSink}else{{param($message) Write-Host $message}}
+  $warningWriter=if($warningSink){$warningSink}else{{param($message) Write-Warning $message -WarningAction Continue}}
+  $sinkErrors = [Collections.Generic.List[object]]::new()
+  $sourceInvocations = 0; $informationRecords = 0; $retainedRecords = 0
+  try {
+    $sourceInvocations++
+    & $source $id $text 6>&1 | ForEach-Object {
+      if ($_ -is [Management.Automation.InformationRecord]) {
+        $informationRecords++
+        $message = [string]$_.MessageData
+        if ($message.StartsWith("UIA_EDGE_TEXT_STABLE ",[StringComparison]::Ordinal)) { $inputEvidence.Add($message) }
+        try { & $sink $message | Out-Null; $retainedRecords++ }
+        catch { $sinkErrors.Add((Get-MultiProjectRetentionError $_ "attempt-record")) }
+      }
+    }
+  } catch {
+    $primary = $_
+    $summary="UIA_MULTIPROJECT_INPUT_FAILURE=" + ([ordered]@{
+      controlId = $id; expectedText = $text; sourceInvocations = $sourceInvocations
+      producedInformationRecords = $informationRecords; retainedInformationRecords = $retainedRecords
+      nativeAttemptRecordCount = $inputEvidence.Count; nativeAttemptRecordsAvailable = ($inputEvidence.Count -gt 0)
+      primaryErrorType = $primary.Exception.GetType().FullName; primaryMessage = $primary.Exception.Message
+      secondaryRetentionErrors = $sinkErrors.ToArray(); nativeCauseEstablished = $false
+    } | ConvertTo-Json -Depth 4 -Compress)
+    try { & $failureWriter $summary | Out-Null }
+    catch { $sinkErrors.Add((Get-MultiProjectRetentionError $_ "failure-summary")) }
+    if($sinkErrors.Count -gt 0){
+      try {
+        & $warningWriter ("MULTIPROJECT_INPUT_RETENTION_SECONDARY: " + ($sinkErrors.ToArray() | ConvertTo-Json -Depth 4 -Compress)) | Out-Null
+      } catch { $sinkErrors.Add((Get-MultiProjectRetentionError $_ "warning")) }
+      $primary.Exception.Data["MultiProjectInputRetention"]=$sinkErrors.ToArray()
+    }
+    throw
+  }
+  if ($sinkErrors.Count -gt 0) {
+    $retention=[InvalidOperationException]::new("MULTIPROJECT_INPUT_RETENTION: native helper returned but existing attempt records could not be retained")
+    $retention.Data["MultiProjectInputRetention"]=$sinkErrors.ToArray()
+    throw $retention
+  }
+  return [ordered]@{ sourceInvocations = $sourceInvocations; producedInformationRecords = $informationRecords; retainedInformationRecords = $retainedRecords }
+}
+
 function New-MultiProjectRenameNativeApi {
   if (-not ("GraphCodeMultiProjectRenameNative" -as [type])) {
     Add-Type -TypeDefinition @'
@@ -3735,15 +3790,8 @@ function Invoke-MultiProjectRenamePhase {
       "multi-project native Rename omitted its shown Title label/explanation"
     $prefill = Sketch-Field 9904 "rename prefill"
     Require ($prefill -ceq $owner.title) "multi-project Rename prefill belongs to a different loop/title"
-    $records = @(Edge-TypeText 9904 $typedTitle 6>&1)
     $inputEvidence = [Collections.Generic.List[string]]::new()
-    foreach ($record in $records) {
-      if ($record -is [System.Management.Automation.InformationRecord]) {
-        $message = [string]$record.MessageData
-        Write-Host $message
-        if ($message -like "UIA_EDGE_TEXT_STABLE*") { $inputEvidence.Add($message) }
-      }
-    }
+    $null = Invoke-MultiProjectTypeText 9904 $typedTitle $inputEvidence
     $fullInput = @($inputEvidence | Where-Object {
       $_ -match 'inputAttempted=True' -and $_ -match 'inputCountsFull=True' -and
       $_ -match ("textSent=" + (2 * $typedTitle.Length) + "/" + (2 * $typedTitle.Length) + "(?: |$)")

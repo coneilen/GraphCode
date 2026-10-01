@@ -36,6 +36,212 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     }
     throw "RED: multi-project expected actual $prefix rejection"
   }
+  Invoke-MultiCase "actual new caller streams all five records before unchanged fifth guard" -Negative {
+    $ast=[Management.Automation.Language.Parser]::ParseInput($gateSource,[ref]$null,[ref]$null)
+    $decision=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq "Get-EdgeTextAttemptDecision"},$true)
+    . ([scriptblock]::Create($decision.Extent.Text))
+    $caller=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq "Invoke-MultiProjectNativeRename"},$true)
+    $call=$caller.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and
+      $n.Extent.Text -ceq '$null = Invoke-MultiProjectTypeText 9904 $typedTitle $inputEvidence'},$true)
+    Assert-MultiCase ($null -ne $call) "actual new streaming caller binding missing"
+    function Edge-TypeText {
+      param($id,$text)
+      $script:actualStreamCalls++
+      for($i=1;$i -le 5;$i++){
+        Write-Host "UIA_EDGE_TEXT_STABLE id=$id attempt=$i after='' expected='$text' inputAttempted=False textSent=0/0"
+        $null=Get-EdgeTextAttemptDecision $true "" $text $i 5
+      }
+    }
+    $script:actualStreamCalls=0; $script:actualStreamPrimary=$null
+    $typedTitle="   "; $inputEvidence=[Collections.Generic.List[string]]::new()
+    $records=@(& { try { . ([scriptblock]::Create($call.Extent.Text)) } catch { $script:actualStreamPrimary=$_ } } 6>&1)
+    $retained=@($records | Where-Object {$_ -is [Management.Automation.InformationRecord] -and
+      ([string]$_.MessageData).StartsWith("UIA_EDGE_TEXT_STABLE ",[StringComparison]::Ordinal)})
+    Assert-MultiCase ($script:actualStreamCalls -eq 1 -and $retained.Count -eq 5 -and $inputEvidence.Count -eq 5 -and
+      $script:actualStreamPrimary.Exception.Message -ceq "edge text mismatch attempts=5/5 expected='   ' observed=''") "actual streaming caller changed guard/lost records/replayed"
+    return [ordered]@{sourceCalls=1;retainedRecords=5;primary=$script:actualStreamPrimary.Exception.Message;compiledProxy=$false;nativeCauseEstablished=$false}
+  }
+  foreach ($scenario in @("focus-not-acquired","native-false-clear-only","native-false-full-six-empty",
+      "partial-counts","stale-control","native-error","exact-three-spaces")) {
+    Invoke-MultiCase ("streamed actual Edge-TypeText transport " + $scenario) -Negative:($scenario -cne "exact-three-spaces") {
+      $gateAst = [Management.Automation.Language.Parser]::ParseInput($gateSource,[ref]$null,[ref]$null)
+      foreach ($name in @("Require","Edge-TypeText","Get-EdgeTextAttemptDecision")) {
+        $definition = $gateAst.Find({ param($n)
+          $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name
+        },$true)
+        Assert-MultiCase ($null -ne $definition) "actual old edge transport definition missing"
+        . ([scriptblock]::Create($definition.Extent.Text.Replace('[GraphCodeUiaGateState]::','$nativeTransport.')))
+      }
+      $nativeTransport = [pscustomobject]@{ scenario=$scenario; buffer=""; focus=[IntPtr]::Zero; typeCalls=0
+        LastEditClearExpected=[uint32]0; LastEditClearSent=[uint32]0; LastEditTextExpected=[uint32]0; LastEditTextSent=[uint32]0 }
+      $nativeTransport | Add-Member ScriptMethod EditTextById { param($window,$id) return $this.buffer }
+      $nativeTransport | Add-Member ScriptMethod ControlById {
+        param($window,$id)
+        if ($this.scenario -ceq "stale-control") { return [IntPtr]::Zero }
+        return [IntPtr]$id
+      }
+      $nativeTransport | Add-Member ScriptMethod WindowBounds { param($window) return @(10,20,510,44) }
+      $nativeTransport | Add-Member ScriptMethod IsControlOwnedBy { param($window,$control,$id) return $control -eq [IntPtr]$id }
+      $nativeTransport | Add-Member ScriptMethod HasVisibleBounds { param($control) return $control -ne [IntPtr]::Zero }
+      $nativeTransport | Add-Member ScriptMethod WindowIsVisible { param($window) return $true }
+      $nativeTransport | Add-Member ScriptMethod WindowTextOf { param($window) return "Rename Loop" }
+      $nativeTransport | Add-Member ScriptMethod WindowProcessId { param($window) return 4242 }
+      $nativeTransport | Add-Member ScriptMethod ControlIdOf { param($window) return [int]$window.ToInt64() }
+      $nativeTransport | Add-Member ScriptMethod FocusedControlInDialog { param($window) return $this.focus }
+      $nativeTransport | Add-Member ScriptMethod FocusControl { param($window,$control) $this.focus=$control; return $true }
+      $nativeTransport | Add-Member ScriptMethod TypeEditTextById {
+        param($window,$id,$text)
+        $this.typeCalls++
+        if ($this.scenario -ceq "native-error") { throw "controlled original native adapter error" }
+        $this.LastEditClearExpected=[uint32]2; $this.LastEditClearSent=[uint32]2
+        $this.LastEditTextExpected=[uint32]0; $this.LastEditTextSent=[uint32]0
+        if ($this.scenario -ceq "partial-counts") { $this.LastEditClearSent=[uint32]1; return $false }
+        if ($this.scenario -cin @("native-false-full-six-empty","exact-three-spaces")) {
+          $this.LastEditTextExpected=[uint32]6; $this.LastEditTextSent=[uint32]6
+        }
+        if ($this.scenario -ceq "exact-three-spaces") { $this.buffer=$text; return $true }
+        return $false
+      }
+      function Ensure-ShellForeground { param($window,$label) return $scenario -cne "focus-not-acquired" }
+      function Start-Sleep { param($Milliseconds) }
+      $renameProcess=[pscustomobject]@{Id=4242}
+      $renameProcess | Add-Member ScriptMethod WaitForInputIdle { param($timeout) return $true }
+      $script:edgeWorkflowWindow=[IntPtr]42; $script:edgeWorkflowTitle="Rename Loop"
+      $evidence=[Collections.Generic.List[string]]::new()
+      $script:streamSourceCalls=0; $script:streamPrimary=$null; $primary=$null
+      $records=@(& {
+        try {
+          $null=Invoke-MultiProjectTypeText 9904 "   " $evidence -typeSource {
+            param($id,$text) $script:streamSourceCalls++; Edge-TypeText $id $text
+          }
+        } catch { $script:streamPrimary=$_ }
+      } 6>&1)
+      $primary=$script:streamPrimary
+      $attempts=@($records | Where-Object { $_ -is [Management.Automation.InformationRecord] -and
+          ([string]$_.MessageData).StartsWith("UIA_EDGE_TEXT_STABLE ",[StringComparison]::Ordinal) })
+      Assert-MultiCase ($script:streamSourceCalls -eq 1) "stream collector replayed native helper"
+      switch ($scenario) {
+        "exact-three-spaces" {
+          Assert-MultiCase ($attempts.Count -eq 1 -and $evidence.Count -eq 1 -and $nativeTransport.typeCalls -eq 1 -and
+            $null -eq $primary -and $nativeTransport.buffer -ceq "   ") "exact spaces changed/coerced or native adapter repeated"
+        }
+        { $_ -cin @("focus-not-acquired","native-false-clear-only","native-false-full-six-empty") } {
+          Assert-MultiCase ($attempts.Count -eq 5 -and $evidence.Count -eq 5 -and
+            $primary.Exception.Message -ceq "edge text mismatch attempts=5/5 expected='   ' observed=''") "fifth guard/5 produced records not retained"
+          $expectedTypeCalls=if($scenario -ceq "focus-not-acquired"){0}else{5}
+          Assert-MultiCase ($nativeTransport.typeCalls -eq $expectedTypeCalls) "source/native transport counts differ"
+          if($scenario -ceq "native-false-clear-only"){
+            Assert-MultiCase (([string]$attempts[-1].MessageData).Contains("textSent=0/0") -and
+              ([string]$attempts[-1].MessageData).Contains("inputCountsFull=True")) "clear-only typing availability mislabeled"
+          }
+        }
+        "partial-counts" { Assert-MultiCase ($attempts.Count -eq 0 -and $nativeTransport.typeCalls -eq 1 -and
+          $primary.Exception.Message.Contains("SendInput count mismatch")) "partial count primary weakened" }
+        "stale-control" { Assert-MultiCase ($attempts.Count -eq 0 -and $nativeTransport.typeCalls -eq 0 -and
+          $primary.Exception.Message.Contains("unavailable after layout wait")) "stale guard bypassed" }
+        "native-error" { Assert-MultiCase ($attempts.Count -eq 0 -and $nativeTransport.typeCalls -eq 1 -and
+          $primary.Exception.ToString().Contains("controlled original native adapter error")) "native error replaced/replayed" }
+      }
+      return [ordered]@{ sourceInvocations=1; retainedActualAttemptRecords=$attempts.Count; mockTypeCalls=$nativeTransport.typeCalls
+        oldHelperBodyExtracted=$true; compiledProxy=$false; nativeCalls=0; actualHostedBlankCauseEstablished=$false }
+    }
+  }
+  foreach($failureMode in @("source-primary","source-plus-sink","sink-only")) {
+    Invoke-MultiCase ("stream preserves primary and explicit sink diagnostics " + $failureMode) -Negative {
+      $script:streamCalls=0; $script:streamProduced=0; $script:streamSinks=0
+      $evidence=[Collections.Generic.List[string]]::new()
+      $script:streamFailure=$null; $primary=$null
+      $records=@(& {
+        try {
+          $null=Invoke-MultiProjectTypeText 9904 "   " $evidence -typeSource {
+            param($id,$text)
+            $script:streamCalls++
+            for($i=1;$i -le 5;$i++){
+              $script:streamProduced++
+              Write-Host "UIA_EDGE_TEXT_STABLE id=$id attempt=$i textSent=0/0"
+              Assert-MultiCase ($script:streamSinks -eq $script:streamProduced) "record was not forwarded AS produced before next source step"
+            }
+            if($failureMode -cne "sink-only"){throw "controlled unchanged primary"}
+          } -recordSink {
+            param($message)
+            $script:streamSinks++
+            if($failureMode -cne "source-primary"){throw "controlled retention sink failure"}
+            Write-Host $message
+          }
+        } catch { $script:streamFailure=$_ }
+      } 6>&1)
+      $primary=$script:streamFailure
+      Assert-MultiCase ($script:streamCalls -eq 1 -and $script:streamProduced -eq 5 -and $script:streamSinks -eq 5 -and
+        $evidence.Count -eq 5 -and $null -ne $primary) "sink/source error replayed or lost actual produced records"
+      if($failureMode -ceq "sink-only"){
+        Assert-MultiCase ($primary.Exception.Message.StartsWith("MULTIPROJECT_INPUT_RETENTION:")) "sink failure silently returned success"
+      }else{
+        Assert-MultiCase ($primary.Exception.Message -ceq "controlled unchanged primary") "original primary replaced"
+        if($failureMode -ceq "source-plus-sink"){
+          Assert-MultiCase (@($primary.Exception.Data["MultiProjectInputRetention"]).Count -eq 5) "secondary retention errors hidden"
+        }
+      }
+      return [ordered]@{ sourceInvocations=1; produced=5; sinkInvocations=5; mockNativeCalls=0; primary=$primary.Exception.Message }
+    }
+  }
+  Invoke-MultiCase "stream rethrows identical primary exception object" -Negative {
+    $original=[InvalidOperationException]::new("exact original exception")
+    $script:exceptionIdentityCalls=0; $caught=$null
+    $evidence=[Collections.Generic.List[string]]::new()
+    try {
+      $null=Invoke-MultiProjectTypeText 9904 "   " $evidence -typeSource {
+        param($id,$text)
+        $script:exceptionIdentityCalls++
+        Write-Host "UIA_EDGE_TEXT_STABLE id=9904 attempt=1 textSent=0/0"
+        throw $original
+      }
+    } catch { $caught=$_ }
+    Assert-MultiCase ($script:exceptionIdentityCalls -eq 1 -and
+      [object]::ReferenceEquals($caught.Exception,$original) -and $evidence.Count -eq 1) "primary object identity changed"
+    return "Same exception instance, one source invocation, one produced native-attempt record"
+  }
+  foreach($faults in @("attempt","summary","attempt-summary","attempt-warning","summary-warning","attempt-summary-warning")) {
+    Invoke-MultiCase ("production stream catch preserves primary through " + $faults) -Negative {
+      $original=[InvalidOperationException]::new("original fifth/native primary")
+      $script:catchSourceCalls=0; $script:catchRecordCalls=0; $script:catchSummaryCalls=0; $script:catchWarningCalls=0
+      $evidence=[Collections.Generic.List[string]]::new();$caught=$null
+      try{
+        $null=Invoke-MultiProjectTypeText 9904 "   " $evidence -typeSource {
+          param($id,$text)
+          $script:catchSourceCalls++
+          for($i=1;$i -le 5;$i++){ Write-Host "UIA_EDGE_TEXT_STABLE id=9904 attempt=$i textSent=0/0" }
+          throw $original
+        } -recordSink {
+          param($message)
+          $script:catchRecordCalls++
+          if($faults.Contains("attempt")){throw [IO.IOException]::new("attempt writer IO")}
+          Write-Host $message
+        } -failureSink {
+          param($message)
+          $script:catchSummaryCalls++
+          if($faults.Contains("summary")){throw [IO.IOException]::new("summary writer IO")}
+          Write-Host $message
+        } -warningSink {
+          param($message)
+          $script:catchWarningCalls++
+          if($faults.Contains("warning")){throw [IO.IOException]::new("warning writer IO")}
+        }
+      }catch{$caught=$_}
+      $secondary=@($caught.Exception.Data["MultiProjectInputRetention"])
+      $expectedErrors=$(if($faults.Contains("attempt")){5}else{0})+$(if($faults.Contains("summary")){1}else{0})+$(if($faults.Contains("warning")){1}else{0})
+      Assert-MultiCase ([object]::ReferenceEquals($caught.Exception,$original) -and
+        $caught.Exception.Message -ceq "original fifth/native primary" -and $script:catchSourceCalls -eq 1 -and
+        $script:catchRecordCalls -eq 5 -and $script:catchSummaryCalls -eq 1 -and $script:catchWarningCalls -eq 1 -and
+        $evidence.Count -eq 5 -and $secondary.Count -eq $expectedErrors) "production catch replaced primary/lost diagnostic error/replayed"
+      foreach($error in $secondary){
+        Assert-MultiCase ($error.operation -cin @("attempt-record","failure-summary","warning") -and
+          $error.errorType -ceq "System.IO.IOException" -and $error.hresult -is [int] -and
+          $error.message.Contains("writer IO")) "secondary native writer error lost exact type/HResult/message/operation"
+      }
+      return [ordered]@{sourceInvocations=1;retainedActualEvidence=5;typedSecondaryErrors=$secondary.Count
+        sameExceptionObject=$true;mockNativeCalls=0}
+    }
+  }
   # Exact whole synthetic peer file from accepted 91dc PR run 36837690691, not the unavailable 95e success file.
   $receiptFixtureGzip = "H4sIAAAAAAACCu1b3W+jOBD/VyqeE4kQkkDe2uzpdNLpttfuPV2qypih5Uoxa0x2qyj/+9nGxKZNLiQlTW4XP1jxBzOe33wYj8nSyihhBJNkRtIUMIPQmjJaQM/ChFJIEO+5ga8F5CzXI3JqTNIZKVJmTZ2eRcs5qmMwED15RtIcjK4iRWn+DahJ8u87s39Gnp9RGqp+rFtWEufsBjCk7JqSfzj73OrJzj+LGD/NHtG6Y/csvjRGKHzOIDWmEd18J6UHirJHJcrrJhcLKCXUmqZFkvSsvAhyTONMwHkLkFYgU1Awfw5yoAutF0ntFgSmZUdQ5C96UoSSnHeiLEtigXOKnkHBqfpmFLhWN/XVtaKGfgkfYNMjov+vLNzYv4Nc+djGYY7iMxFYbOmuP8RBgpiL/auBsBhaVvb42ydratmq9GXlisoT1SgIxngCtj9xwFpbG39gORduIbR5jdjj3JrOrU/TOS9IVPcMnjPx46HoO8PAnoxDd+K4A9ezkT+2YQxoEPm+Zwdgi2nl5Mske0Rzqzev+HCynA+VCvqDhFC2723JbqBKX1auqLyqWRVJjMUsAfmIZHBR0uPEV6uVteo1BsILJqEXDiH6MYG4U34j6JcGEgv5mlDngEjafPotK4KLlJO4uBTBgJDsy0smBlhB0yuUg/B2LG0/vHopPVzoQPJyVOnLyhWVVzWrspHXVXNeIrhw/1LeoSIF13+K+ZM8AD8XCYtVoLoG4EFoufahWuhuEMyryLHeArIiSGKMjH1h8mYNE+2z+7ipGwZ47AbY5zJHlOtVLHwBNOe8JO+nWNqrImf1DiG8NvvlpuA/XXJD4vB+z+QueaMA2boQNXzQSmAhw3upG72G3/mqFG4Zd0dOTzgjWjtiIzcUE6WHcD6pRNKqmhR4jAW1hQi7fR+XK2AGE9Wq87gTmO5hBSFy/IHvtG8FmvArKzB2+60WULl5U24wGGEUhVHrYhiET2zMxko6Y94C0XCI7IHvtW8FmvBHGLOPfdsL24/MBmFDjE0v3G3JMrIHjj2e2OO2ZTEJG7KYB45pO27QFhCe7zr2KGofCE34tBHKXEkXobZAFIxRMHC89q1AEz5+hBrZkTNEMBq1L4Ym/EERyjyutirLxnPwsp65ECFKHwbf7w41zKrDn2jd2/sfzWqHPhEGjxo9TLjyAmPIVXJsdeCRu1VlbjzLd8psAtcrZeoE1KFJpVZBFukAybwhngFEPBJ9qaEapwxoAmghEwhbED/MiM9O1kqerXIK/arM86HpCNolAk6aCDgC/pr4Gv+v6/cSA3uZ1huq0peVKyqvalbldVpPUrvAnJwwXISfQK4VJ6gIYSYC5zq1d8nZ29xKMYsXMXsRa8nNjB6D70yKicIX6YKQl2NL4zdfaVLu7GkUh6qPQkYoK+NrlaN0Venryqt+VcUQ5gYWMXy7SIm4A6hJQrI4IawuxsAUo0xX7nli1kkF2mUsTpqxOAL+mnjndWfldToPcwSta+IHv0eb2RXafp5AE3/HCnWygXaZjJNmMo6AvybeRa4zilxmfuYIWtfED44L5kGRnn2Ogn7swdu4Ti5v7DEqcmmcacxilFj6EyU+pa0b5NKDe3WnWbt1mUJ5ROkDyFSHdAKkyo4DatZupn9XEJYH6MM/dSgPyuKzg+1fH+QMMSNaaGflI0VwcHQxP2JYlR5/ItU7u1QfqLLjm47WVN9gZ3yj+D2/OxFEfwy9N73Feqv3YefyP6vq3c7lz0Pv/BFGySa9Y892J25o9xFXdN+dBLjvIxT1kTNGEE38CDzYW++jn9jl61cCZ2MBZZZ+P8dvekH61gDGP7EB6HuS/7Xym16ovlX+pFP+yZUv/+8hY34pESNP4t8QTcP92V0+qg31v0JtDkn5P5rWruOrt4Vq/Q3fBHJSUKmfJF5Av4hRqR/pCoZ9dV5wXC/ode+YR0b4btuf0FarfwHVcnXmCzcAAA=="
   $compressed = [IO.MemoryStream]::new([Convert]::FromBase64String($receiptFixtureGzip))
@@ -2634,7 +2840,7 @@ Start-Sleep -Seconds 60
   }
   foreach ($required in @("Test-MultiProjectRenameReceipt", "Get-MultiProjectClippedRectangle", "ClickOwnedScreenRectangle",
       "Wait-MultiProjectPeerSettled", 'Sketch-Field 9904 "rename stable immediately before submit"',
-      'Edge-TypeText 9904 $typedTitle 6>&1', 'source = "live-uia"', "beforeSelection", "afterSelection",
+      'Invoke-MultiProjectTypeText 9904 $typedTitle $inputEvidence', 'source = "live-uia"', "beforeSelection", "afterSelection",
       "Windows unchanged-title rename was incorrectly treated as a no-op", "observedOwnerCount", "observedCardCount",
       "projectBounds", "sidebarBounds", "source-derived, not a UIA caption")) {
     if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: multi-project live evidence lacks $required" }
