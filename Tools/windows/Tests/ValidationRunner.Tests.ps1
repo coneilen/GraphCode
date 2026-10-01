@@ -82,6 +82,194 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     }
     return [pscustomobject]@{ Current = $current }
   }
+  Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, WindowsBase
+  function New-MultiCaptureState($processIdValue = 4242, $identity = "canvas-card-1983941480823304696") {
+    return @{ pid = $processIdValue; id = $identity; runtime = @(3,42,17)
+      name = "Alpha loop"; rect = [System.Windows.Rect]::new(248,118,220,86); error = $null }
+  }
+  function New-MultiCaptureMock($states) {
+    $element = [pscustomobject]@{ states = $states; calls = 0; order = [Collections.Generic.List[string]]::new() }
+    $element | Add-Member ScriptMethod Capture {
+      param([bool] $includeContent)
+      $state = $this.states[$this.calls]; $this.calls++
+      $this.order.Add($(if ($includeContent) { "CONTENT_CACHE" } else { "OWNERSHIP_CACHE" }))
+      if ($state.error) { throw $state.error }
+      $cache = [pscustomobject]@{ state = $state; order = $this.order; content = $includeContent }
+      $cache | Add-Member ScriptMethod GetCachedPropertyValue {
+        param($property, [bool] $ignoreDefault)
+        if (-not $ignoreDefault) { throw "controlled cache requires ignoreDefaultValue=true" }
+        if ($property -eq [System.Windows.Automation.AutomationElement]::ProcessIdProperty) {
+          $this.order.Add("PID"); return $this.state.pid
+        }
+        if ($property -eq [System.Windows.Automation.AutomationElement]::AutomationIdProperty) {
+          $this.order.Add("ID"); return $this.state.id
+        }
+        if (-not $this.content) { throw "controlled ownership cache forbids content" }
+        if ($property -eq [System.Windows.Automation.AutomationElement]::BoundingRectangleProperty) {
+          $this.order.Add("BOUNDS"); return $this.state.rect
+        }
+        if ($property -eq [System.Windows.Automation.AutomationElement]::NameProperty) {
+          $this.order.Add("NAME"); return $this.state.name
+        }
+        throw "controlled cache received unexpected property"
+      }
+      $cache | Add-Member ScriptMethod GetRuntimeId { $this.order.Add("RUNTIME"); return ,$this.state.runtime }
+      return $cache
+    }
+    return $element
+  }
+  $captureReader = { param($element, [bool] $includeContent) $element.Capture($includeContent) }
+  $capturePrior = @{ ownership = "owned"; finalPID = @{ value = 4242 }
+    automationID = @{ value = "canvas-card-1983941480823304696" } }
+  Invoke-MultiCase "fresh cached capture verifies owned metadata before and after content" {
+    $mock = New-MultiCaptureMock @((New-MultiCaptureState),(New-MultiCaptureState),(New-MultiCaptureState))
+    $evidence = Get-MultiProjectElementEvidence $mock 4242 $capturePrior "functional/owned" $captureReader
+    Assert-MultiCase ($evidence.processId -eq 4242 -and $evidence.automationId -ceq $capturePrior.automationID.value -and
+      $evidence.name -ceq "Alpha loop" -and ($evidence.bounds -join ",") -ceq "248,118,468,204" -and
+      ($mock.order -join "|") -ceq "OWNERSHIP_CACHE|PID|ID|RUNTIME|CONTENT_CACHE|PID|ID|RUNTIME|BOUNDS|NAME|OWNERSHIP_CACHE|PID|ID|RUNTIME") `
+      "actual extracted cache capture read-order/shape differs"
+    return "Functional cache transport only; no live UIA. Content cache requested after owned preflight; cached ownership checked before extraction."
+  }
+  Invoke-MultiCase "fresh snapshot distinguishes unsupported property from zero default" {
+    $unsupported = New-MultiCaptureState ([System.Windows.Automation.AutomationElement]::NotSupported)
+    $zero = New-MultiCaptureState 0
+    $first = Read-MultiProjectOwnershipSnapshot (New-MultiCaptureMock @($unsupported)) $captureReader
+    $second = Read-MultiProjectOwnershipSnapshot (New-MultiCaptureMock @($zero)) $captureReader
+    Assert-MultiCase ($first.pidState.state -ceq "unsupported" -and $null -eq $first.processId -and
+      $second.pidState.state -ceq "zero" -and $second.processId -eq 0 -and
+      $first.state -ceq "unavailable" -and $second.state -ceq "unavailable") "unsupported/default states conflated"
+    return "ignoreDefaultValue=true sentinel typed separately; neither proves ownership"
+  }
+  foreach ($mutation in @("fresh-zero", "fresh-null-pid", "fresh-unsupported-pid", "fresh-pid-type", "fresh-foreign",
+      "fresh-null-id", "fresh-empty-id", "fresh-id-type", "fresh-id-drift", "fresh-null-runtime", "fresh-runtime-type",
+      "fresh-retired", "prior-owner-changed", "prior-pid-changed",
+      "content-foreign", "content-zero", "content-unsupported", "content-id-drift", "content-runtime-drift",
+      "after-foreign", "after-zero", "after-id-drift", "after-runtime-drift", "after-retired", "name-type",
+      "name-unsupported", "bounds-null", "bounds-zero", "bounds-empty")) {
+    Invoke-MultiCase ("fresh capture rejects " + $mutation) -Negative {
+      $states = @((New-MultiCaptureState),(New-MultiCaptureState),(New-MultiCaptureState))
+      $prior = @{ ownership = "owned"; finalPID = @{ value = 4242 }; automationID = @{ value = $capturePrior.automationID.value } }
+      switch ($mutation) {
+        "fresh-zero" { $states[0].pid = 0 }
+        "fresh-null-pid" { $states[0].pid = $null }
+        "fresh-unsupported-pid" { $states[0].pid = [System.Windows.Automation.AutomationElement]::NotSupported }
+        "fresh-pid-type" { $states[0].pid = "4242" }
+        "fresh-foreign" { $states[0].pid = 7777 }
+        "fresh-null-id" { $states[0].id = $null }
+        "fresh-empty-id" { $states[0].id = "" }
+        "fresh-id-type" { $states[0].id = 7 }
+        "fresh-id-drift" { $states[0].id = "canvas-card-unknown" }
+        "fresh-null-runtime" { $states[0].runtime = @() }
+        "fresh-runtime-type" { $states[0].runtime = @("3",42,17) }
+        "fresh-retired" { $states[0].error = [Runtime.InteropServices.COMException]::new("controlled retirement", [int]0x80040201) }
+        "prior-owner-changed" { $prior.ownership = "changed" }
+        "prior-pid-changed" { $prior.finalPID.value = 7777 }
+        "content-foreign" { $states[1].pid = 7777 }
+        "content-zero" { $states[1].pid = 0 }
+        "content-unsupported" { $states[1].pid = [System.Windows.Automation.AutomationElement]::NotSupported }
+        "content-id-drift" { $states[1].id = "canvas-card-unknown" }
+        "content-runtime-drift" { $states[1].runtime = @(3,42,99) }
+        "after-foreign" { $states[2].pid = 7777 }
+        "after-zero" { $states[2].pid = 0 }
+        "after-id-drift" { $states[2].id = "canvas-card-unknown" }
+        "after-runtime-drift" { $states[2].runtime = @(3,42,99) }
+        "after-retired" { $states[2].error = [Runtime.InteropServices.COMException]::new("controlled retirement", [int]0x80040201) }
+        "name-type" { $states[1].name = 7 }
+        "name-unsupported" { $states[1].name = [System.Windows.Automation.AutomationElement]::NotSupported }
+        "bounds-null" { $states[1].rect = $null }
+        "bounds-zero" { $states[1].rect = [System.Windows.Rect]::new(248,118,0,86) }
+        "bounds-empty" { $states[1].rect = [System.Windows.Rect]::Empty }
+      }
+      $mock = New-MultiCaptureMock $states
+      $prefix = if ($mutation -cin @("fresh-foreign", "content-foreign", "after-foreign")) { "MULTIPROJECT_PRIVACY:" } else { "MULTIPROJECT_METADATA:" }
+      $rejection = Reject-MultiCase { Get-MultiProjectElementEvidence $mock 4242 $prior "functional/$mutation" $captureReader } $prefix
+      $mayHaveReadContent = $mutation.StartsWith("after-", [StringComparison]::Ordinal) -or
+        $mutation.StartsWith("name-", [StringComparison]::Ordinal) -or $mutation.StartsWith("bounds-", [StringComparison]::Ordinal)
+      Assert-MultiCase (($mock.order -contains "NAME") -eq $mayHaveReadContent -and
+        ($mock.order -contains "BOUNDS") -eq $mayHaveReadContent) "content read before fresh/cached ownership or runtime guard: $mutation"
+      if ($mutation.StartsWith("fresh-", [StringComparison]::Ordinal) -or $mutation.StartsWith("prior-", [StringComparison]::Ordinal)) {
+        Assert-MultiCase (-not ($mock.order -contains "CONTENT_CACHE")) "content cache requested before fresh owned proof"
+      }
+      return [ordered]@{ rejection = $rejection; accessOrder = $mock.order.ToArray(); discardedWholeCapture = $true
+        nativeCauseEstablished = $false }
+    }
+  }
+  Invoke-MultiCase "unknown cache error is not converted to retryable metadata" -Negative {
+    $state = New-MultiCaptureState
+    $state.error = [InvalidOperationException]::new("controlled unexpected cache error")
+    $mock = New-MultiCaptureMock @($state)
+    try { Read-MultiProjectOwnershipSnapshot $mock $captureReader | Out-Null }
+    catch {
+      Assert-MultiCase ($_.Exception.ToString().Contains("controlled unexpected cache error") -and
+        -not ($mock.order -contains "NAME")) "unknown error swallowed or content read"
+      return "Actual unexpected cache error retained, not a successful/unavailable fallback"
+    }
+    throw "RED: unexpected cache failure was silently accepted"
+  }
+  Invoke-MultiCase "retired snapshot retains typed availability error before content" {
+    $state = New-MultiCaptureState
+    $state.error = [Runtime.InteropServices.COMException]::new("controlled retirement", [int]0x80040201)
+    $mock = New-MultiCaptureMock @($state)
+    $snapshot = Read-MultiProjectOwnershipSnapshot $mock $captureReader
+    Assert-MultiCase ($snapshot.state -ceq "unavailable" -and $snapshot.pidState.state -ceq "unavailable" -and
+      $snapshot.errorType -ceq "System.Runtime.InteropServices.COMException" -and $snapshot.hresult -eq [int]0x80040201 -and
+      ($mock.order -join "|") -ceq "OWNERSHIP_CACHE") "known retirement swallowed its exact typed diagnostic"
+    return $snapshot
+  }
+  Invoke-MultiCase "other COM failure is not a retirement-shaped fallback" -Negative {
+    $state = New-MultiCaptureState
+    $state.error = [Runtime.InteropServices.COMException]::new("controlled unexpected COM", [int]0x80004005)
+    $mock = New-MultiCaptureMock @($state)
+    try { Read-MultiProjectOwnershipSnapshot $mock $captureReader | Out-Null }
+    catch {
+      Assert-MultiCase ($_.Exception.ToString().Contains("controlled unexpected COM") -and $mock.calls -eq 1 -and
+        -not ($mock.order -contains "NAME")) "unknown COM error weakened to unavailable/success"
+      return "Unexpected HRESULT remains a real exception"
+    }
+    throw "RED: unrelated COM failure was silently accepted"
+  }
+  foreach ($scenario in @("transient", "persistent", "positive-foreign")) {
+    Invoke-MultiCase ("whole observation reacquisition " + $scenario) -Negative:($scenario -cne "transient") {
+      $multiProcess = [pscustomobject]@{ Id = 4242 }
+      $script:multiCaptureObservationAttempts = 0
+      $script:multiCaptureSleeps = 0
+      $script:multiCaptureObservationScenario = $scenario
+      function Start-Sleep { param([int] $Milliseconds) $script:multiCaptureSleeps++ }
+      function Get-MultiProjectObservation {
+        param([string] $surface, $selectedOwner)
+        $script:multiCaptureObservationAttempts++
+        $state = New-MultiCaptureState
+        if ($script:multiCaptureObservationScenario -ceq "positive-foreign") { $state.pid = 7777 }
+        elseif ($script:multiCaptureObservationScenario -ceq "persistent" -or $script:multiCaptureObservationAttempts -eq 1) { $state.pid = 0 }
+        $mock = New-MultiCaptureMock @($state,(New-MultiCaptureState),(New-MultiCaptureState))
+        $evidence = Get-MultiProjectElementEvidence $mock 4242 $capturePrior "functional/whole-observation" $captureReader
+        return @{ matched = $true; requestedSurface = $surface; evidence = $evidence }
+      }
+      if ($scenario -ceq "transient") {
+        $observation = Wait-MultiProjectObservation "overview"
+        Assert-MultiCase ($observation.matched -and $script:multiCaptureObservationAttempts -eq 2 -and
+          $script:multiCaptureSleeps -eq 1) "transient whole snapshot not reacquired exactly once"
+      } else {
+        $prefix = if ($scenario -ceq "positive-foreign") { "MULTIPROJECT_PRIVACY:" } else { "MULTIPROJECT_METADATA:" }
+        $null = Reject-MultiCase { Wait-MultiProjectObservation "overview" } $prefix
+        $expectedAttempts = if ($scenario -ceq "positive-foreign") { 1 } else { 100 }
+        Assert-MultiCase ($script:multiCaptureObservationAttempts -eq $expectedAttempts -and
+          $script:multiCaptureSleeps -eq ($expectedAttempts - 1)) "foreign guard retried or persistent ambiguity escaped its exact bound"
+      }
+      return [ordered]@{ attempts = $script:multiCaptureObservationAttempts; maximum = 100
+        commandOrInputCalls = 0; scope = "extracted observation helper with synthetic cache transport, not native selection" }
+    }
+  }
+  Invoke-MultiCase "whole capture collection rejects later provider runtime replacement" -Negative {
+    $snapshots = [Collections.Generic.List[object]]::new()
+    $mock = New-MultiCaptureMock @((New-MultiCaptureState),(New-MultiCaptureState),(New-MultiCaptureState))
+    $null = Get-MultiProjectElementEvidence $mock 4242 $capturePrior "functional/collection" $captureReader $snapshots
+    Assert-MultiCase ($snapshots.Count -eq 1) "verified capture not registered for collection verification"
+    $changed = New-MultiCaptureState
+    $changed.runtime = @(3,42,99)
+    $after = Read-MultiProjectOwnershipSnapshot (New-MultiCaptureMock @($changed)) $captureReader
+    return Reject-MultiCase { Confirm-MultiProjectOwnedSnapshot $snapshots[0].snapshot $after 4242 "functional/whole-observation" } "MULTIPROJECT_METADATA:"
+  }
   Invoke-MultiCase "guarded prefix handles null without pretending metadata is ready" {
     Assert-MultiCase (-not (Test-MultiProjectAutomationPrefix $null "workspace-loop-bar-") -and
       -not (Test-MultiProjectAutomationPrefix 7 "canvas-card-")) "guarded prefix coerced unavailable/invalid IDs"
@@ -302,6 +490,16 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     Assert-MultiCase (Test-MultiProjectObservedRoster "overview" (New-MultiRosterProjection) $rosterOwners $null 4242) `
       "literal two-owner/two-node plus two-summary whole roster rejected"
     return "Historical two-card case counts NODE cards: complete owned canvas roster is four (two nodes plus two summaries); no live app claim"
+  }
+  Invoke-MultiCase "fresh owned content cannot bless an overview missing its peer card" -Negative {
+    $mock = New-MultiCaptureMock @((New-MultiCaptureState),(New-MultiCaptureState),(New-MultiCaptureState))
+    $evidence = Get-MultiProjectElementEvidence $mock 4242 $capturePrior "functional/missing-peer" $captureReader
+    $projection = New-MultiRosterProjection
+    $projection.cards = @($projection.cards[0], $projection.cards[1], $projection.cards[2])
+    Assert-MultiCase ($evidence.processId -eq 4242 -and
+      -not (Test-MultiProjectObservedRoster "overview" $projection $rosterOwners $null 4242)) `
+      "fresh ownership bypassed mandatory full four-fragment peer roster"
+    return "Positive fresh capture plus three-of-four projection is still rejected; no hidden peer fragment"
   }
   Invoke-MultiCase "project roster retains two owners and exactly one selected project card" {
     $projection = New-MultiRosterProjection
@@ -715,6 +913,32 @@ if ($mode -eq "abrupt") { [Environment]::Exit(23) }
     executed = $results.Count; positive = $positive; negative = $negative; artifacts = $scratch
     liveAppSelectionProved = $false
   } | ConvertTo-Json -Compress))
+}
+
+function Assert-MultiProjectFreshCaptureContract([string] $source) {
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$errors)
+  if ($errors.Count) { throw "RED: fresh capture source does not parse" }
+  foreach ($required in @("function Read-MultiProjectElementCache", "function Read-MultiProjectOwnershipSnapshot",
+      "function ConvertTo-MultiProjectPropertyState", "function Confirm-MultiProjectOwnedSnapshot",
+      "UIA_MULTIPROJECT_FRESH_OWNERSHIP=", "UIA_MULTIPROJECT_CACHED_OWNERSHIP=", "UIA_MULTIPROJECT_CAPTURE_VERIFY=",
+      "UIA_MULTIPROJECT_CONTAINER_OWNERSHIP=", "UIA_MULTIPROJECT_SNAPSHOT_DRIFT=",
+      "priorStablePID", "priorIdentity", "semanticCauseEstablished", "wholeObservationDiscarded",
+      "::ProcessIdProperty, `$true", "::AutomationIdProperty, `$true", "::NotSupported",
+      "row identity, not a graph publication generation")) {
+    if (-not $source.Contains($required)) { throw "RED: source-backed fresh ownership capture lacks $required" }
+  }
+  $observer = $ast.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq "Get-MultiProjectObservation"
+  },$true)
+  if (-not $observer -or $observer.Extent.Text -match '\.Current\.(Name|BoundingRectangle|AutomationId)' -or
+      -not $observer.Extent.Text.Contains("verifiedOwnedSnapshotCount") -or
+      -not $observer.Extent.Text.Contains("Confirm-MultiProjectOwnedSnapshot") -or
+      -not $observer.Extent.Text.Contains("graph container ownership unavailable before child capture") -or
+      -not $observer.Extent.Text.Contains("projects container ownership unavailable before child capture")) {
+    throw "RED: observer bypasses fresh/cached ownership or whole-observation/container verification"
+  }
 }
 
 function Assert-ShellHostPrerequisite([string] $source) {
@@ -2018,6 +2242,7 @@ Start-Sleep -Seconds 60
       "MultiProjectTeardown:", "WaitAll", "ownedJobEmpty", '$null = Complete-MultiProjectCapture $child $logDirectory 5000 $primaryError')) {
     if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: bounded multi-project capture lacks $required" }
   }
+  Assert-MultiProjectFreshCaptureContract $uiaLiveGateSource
   Test-MultiProjectProtocolContracts $stubDaemonSource $uiaLiveGateSource `
     (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") $pwsh
   if ($stubDaemonSource -notmatch '\$ApplyGraphCommands' -or
