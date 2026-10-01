@@ -1,5 +1,348 @@
 $ErrorActionPreference = "Stop"
 
+function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gateSource, [string] $stubPath, [string] $pwsh) {
+  foreach ($source in @($stubSource, $gateSource)) {
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$null, [ref]$errors)
+    if ($errors.Count -ne 0) { throw "RED: multi-project source does not parse" }
+    foreach ($definition in $ast.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+          ($node.Name -like "*-MultiProject*" -or $node.Name -eq "ConvertTo-SketchCanonicalJson")
+      }, $true)) { . ([scriptblock]::Create($definition.Extent.Text)) }
+  }
+  $scratch = Join-Path ([IO.Path]::GetTempPath()) ("gc-mp-" + [guid]::NewGuid().ToString("N"))
+  $alpha = Join-Path $scratch "Alpha"
+  $beta = Join-Path $scratch "Beta"
+  $null = New-Item -ItemType Directory -Path $alpha, $beta
+  $a = "11111111-1111-4111-8111-111111111111"
+  $b = "22222222-2222-4222-8222-222222222222"
+  $listId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  $renameId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+  $token = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+  $results = [Collections.Generic.List[object]]::new()
+
+  function Assert-MultiCase([bool] $condition, [string] $message) {
+    if (-not $condition) { throw "RED: multi-project $message" }
+  }
+  function Invoke-MultiCase([string] $name, [scriptblock] $body, [switch] $Negative) {
+    $detail = & $body
+    $results.Add([ordered]@{ name = $name; negative = [bool]$Negative; detail = $detail })
+  }
+  function Reject-MultiCase([scriptblock] $body, [string] $prefix) {
+    try { & $body | Out-Null } catch {
+      Assert-MultiCase ($_.Exception.Message.StartsWith($prefix, [StringComparison]::Ordinal)) "wrong rejection: $($_.Exception.Message)"
+      return $_.Exception.Message
+    }
+    throw "RED: multi-project expected actual $prefix rejection"
+  }
+  function New-MultiRequest([string] $id = $renameId, [string] $title = "Alpha renamed") {
+    return [ordered]@{ version = 2; kind = "request"; requestID = $id
+      command = [ordered]@{ graphCommand = [ordered]@{ projectPath = $alpha
+        command = [ordered]@{ renameNode = [ordered]@{ _0 = $a; title = $title } } } } }
+  }
+  function New-MultiBaseline {
+    $peer = New-MultiProjectPeer $alpha $beta
+    $pending = Invoke-MultiProjectRequest $peer ([ordered]@{ version = 2; kind = "request"; requestID = $listId
+      command = [ordered]@{ listRecentProjects = [ordered]@{} } })
+    Complete-MultiProjectResponse $peer $pending.response
+    foreach ($path in @($alpha, $beta)) {
+      Complete-MultiProjectPublication $peer (New-MultiProjectPublication $peer $path) "initial" $listId
+    }
+    return $peer
+  }
+  function New-MultiControl {
+    return [ordered]@{ token = $token; projectPath = $alpha; nodeID = $a; title = "Alpha interleaved"
+      selection = [ordered]@{ projectPath = $beta; nodeID = $b; source = "synthetic-client" } }
+  }
+  Invoke-MultiCase "two exact positive owner publications" {
+    $peer = Get-MultiProjectPeerSnapshot (New-MultiBaseline)
+    Assert-MultiCase ($peer.requestCount -eq 1 -and $peer.responseCount -eq 1 -and
+      $peer.graphSequence -eq 2 -and $peer.graphs.Count -eq 2 -and
+      $peer.graphs[0].project.path -ceq $alpha -and $peer.graphs[1].project.path -ceq $beta -and
+      $peer.graphs[0].nodes[0].id -ceq $a -and $peer.graphs[1].nodes[0].id -ceq $b) "positive fixture/counts differ"
+    return "2 distinct ordinary owners, 2 distinct graph/node UUIDs, sequences 1/2"
+  }
+  $peer = New-MultiBaseline
+  $before = Get-MultiProjectPeerSnapshot $peer
+  $request = New-MultiRequest
+  $pending = Invoke-MultiProjectRequest $peer $request
+  Complete-MultiProjectResponse $peer $pending.response
+  Complete-MultiProjectPublication $peer (New-MultiProjectPublication $peer $alpha) "rename" $renameId
+  $after = Get-MultiProjectPeerSnapshot $peer
+  Invoke-MultiCase "whole typed correlated rename receipt" {
+    Assert-MultiCase (Test-MultiProjectRenameReceipt $before $after $alpha $a "Alpha renamed") "canonical rename rejected"
+    Assert-MultiCase ($after.graphs[1].nodes[0].title -ceq "Beta loop") "rename mutated Beta"
+    return "request/reply/applied/publication all correlated, Beta unchanged"
+  }
+  Invoke-MultiCase "one-shot interleaved event with synthetic selection" {
+    $state = New-MultiBaseline
+    $frame = Invoke-MultiProjectPublicationControl $state (New-MultiControl)
+    Complete-MultiProjectPublication $state $frame "control" $token
+    $snapshot = Get-MultiProjectPeerSnapshot $state
+    Assert-MultiCase ($snapshot.requestCount -eq 1 -and $snapshot.responseCount -eq 1 -and
+      $snapshot.appliedCount -eq 0 -and $snapshot.graphSequence -eq 3 -and
+      $snapshot.graphs[1].nodes[0].title -ceq "Beta loop") "control invented requests or changed Beta"
+    return "synthetic identity only; no live app selection claim"
+  }
+  Invoke-MultiCase "unchanged title still dispatches" {
+    $state = New-MultiBaseline
+    $baseline = Get-MultiProjectPeerSnapshot $state
+    $pending = Invoke-MultiProjectRequest $state (New-MultiRequest $renameId "Alpha loop")
+    Complete-MultiProjectResponse $state $pending.response
+    Complete-MultiProjectPublication $state (New-MultiProjectPublication $state $alpha) "rename" $renameId
+    Assert-MultiCase (Test-MultiProjectRenameReceipt $baseline (Get-MultiProjectPeerSnapshot $state) $alpha $a "Alpha loop") "unchanged dispatch was suppressed"
+    return "Windows unchanged-title dispatch preserved"
+  }
+  Invoke-MultiCase "hash identity is owner and surface scoped" {
+    $ids = @(
+      (Get-MultiProjectAutomationId "loop" $alpha $a),
+      (Get-MultiProjectAutomationId "project-card" $alpha $a),
+      (Get-MultiProjectAutomationId "overview-card" $alpha $a),
+      (Get-MultiProjectAutomationId "overview-card" $beta $b)
+    )
+    Assert-MultiCase (@($ids | Sort-Object -Unique).Count -eq 4) "surface/owner IDs collapsed"
+    Assert-MultiCase ((Get-MultiProjectAutomationId "project-card" "graphcode://stub/project" $a) -ceq "canvas-card-1510499067760483540") "provider FNV row-key golden differs"
+    return $ids
+  }
+  Invoke-MultiCase "literal lane geometry and DPI scaling" {
+    $geometry = Get-MultiProjectLaneGeometry @(220,34,1200,900) @(262,118,482,204)
+    Assert-MultiCase (($geometry.band -join ",") -ceq "244,72,1176,248" -and
+      ($geometry.open -join ",") -ceq "1044,82,1100,102") "96-DPI literal source-derived bounds differ"
+    $scaled = Get-MultiProjectLaneGeometry @(330,51,1800,1350) @(393,177,723,306)
+    Assert-MultiCase (($scaled.open -join ",") -ceq "1566,123,1650,153") "144-DPI source-derived bounds differ"
+    return "literal band/Open bounds; not UIA caption evidence"
+  }
+  Invoke-MultiCase "live target clipped to viewport" {
+    $clipped = Get-MultiProjectClippedRectangle @(100,100,400,400) @(220,34,1200,250)
+    Assert-MultiCase (($clipped -join ",") -ceq "220,100,400,250") "visible target clipping differs"
+    return "literal clipped intersection"
+  }
+  Invoke-MultiCase "offscreen target rejected" -Negative {
+    return Reject-MultiCase { Get-MultiProjectClippedRectangle @(0,0,50,50) @(220,34,1200,900) } "MULTIPROJECT_BOUNDS"
+  }
+  $requestMutations = [ordered]@{
+    owner = @{ prefix = "MULTIPROJECT_OWNER"; change = { param($f) $f.command.graphCommand.projectPath = $beta } }
+    node = @{ prefix = "MULTIPROJECT_OWNER"; change = { param($f) $f.command.graphCommand.command.renameNode._0 = $b } }
+    missing = @{ prefix = "MULTIPROJECT_SCHEMA"; change = { param($f) $f.command.graphCommand.command.renameNode.Remove("title") } }
+    extra = @{ prefix = "MULTIPROJECT_SCHEMA"; change = { param($f) $f.command.graphCommand.command.renameNode.extra = 1 } }
+    type = @{ prefix = "MULTIPROJECT_TYPE"; change = { param($f) $f.command.graphCommand.command.renameNode.title = 7 } }
+    version = @{ prefix = "MULTIPROJECT_TYPE"; change = { param($f) $f.version = "2" } }
+    boolean = @{ prefix = "MULTIPROJECT_TYPE"; change = { param($f) $f.version = $true } }
+    requestID = @{ prefix = "MULTIPROJECT_UUID"; change = { param($f) $f.requestID = "bad" } }
+    blank = @{ prefix = "MULTIPROJECT_TITLE"; change = { param($f) $f.command.graphCommand.command.renameNode.title = "  " } }
+  }
+  foreach ($entry in $requestMutations.GetEnumerator()) {
+    Invoke-MultiCase ("request " + $entry.Key) -Negative {
+      $state = New-MultiBaseline
+      $original = ConvertTo-MultiProjectCanonicalJson (Get-MultiProjectPeerSnapshot $state)
+      $bad = Copy-MultiProjectValue (New-MultiRequest)
+      & $entry.Value.change $bad | Out-Null
+      $errorText = Reject-MultiCase { Invoke-MultiProjectRequest $state $bad } $entry.Value.prefix
+      Assert-MultiCase ((ConvertTo-MultiProjectCanonicalJson (Get-MultiProjectPeerSnapshot $state)) -ceq $original) "rejected request mutated state"
+      return $errorText
+    }
+  }
+  foreach ($json in @("{", '{"x":1,"x":2}', '[]')) {
+    Invoke-MultiCase ("JSON " + $json) -Negative { Reject-MultiCase { ConvertFrom-MultiProjectJson $json } "MULTIPROJECT_JSON" }
+  }
+  Invoke-MultiCase "duplicate request" -Negative {
+    $state = New-MultiBaseline
+    Invoke-MultiProjectRequest $state (New-MultiRequest) | Out-Null
+    return Reject-MultiCase { Invoke-MultiProjectRequest $state (New-MultiRequest) } "MULTIPROJECT_DUPLICATE"
+  }
+  Invoke-MultiCase "unanswered publication" -Negative {
+    $state = New-MultiBaseline
+    Invoke-MultiProjectRequest $state (New-MultiRequest) | Out-Null
+    return Reject-MultiCase { Complete-MultiProjectPublication $state (New-MultiProjectPublication $state $alpha) "rename" $renameId } "MULTIPROJECT_UNANSWERED"
+  }
+  foreach ($mutation in @("owner", "selection", "extra", "type", "duplicate", "second")) {
+    Invoke-MultiCase ("control " + $mutation) -Negative {
+      $state = New-MultiBaseline
+      $control = New-MultiControl
+      $prefix = "MULTIPROJECT_OWNER"
+      switch ($mutation) {
+        "owner" { $control.projectPath = $beta; $control.nodeID = $b }
+        "selection" { $control.selection.nodeID = $a; $prefix = "MULTIPROJECT_SELECTION" }
+        "extra" { $control.extra = 1; $prefix = "MULTIPROJECT_SCHEMA" }
+        "type" { $control.title = 7; $prefix = "MULTIPROJECT_TYPE" }
+        "duplicate" { Invoke-MultiProjectPublicationControl $state $control | Out-Null; $prefix = "MULTIPROJECT_DUPLICATE" }
+        "second" { Invoke-MultiProjectPublicationControl $state $control | Out-Null; $control.token = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"; $prefix = "MULTIPROJECT_ONE_SHOT" }
+      }
+      $original = ConvertTo-MultiProjectCanonicalJson (Get-MultiProjectPeerSnapshot $state)
+      $errorText = Reject-MultiCase { Invoke-MultiProjectPublicationControl $state $control } $prefix
+      Assert-MultiCase ((ConvertTo-MultiProjectCanonicalJson (Get-MultiProjectPeerSnapshot $state)) -ceq $original) "rejected control mutated state"
+      return $errorText
+    }
+  }
+  foreach ($mutation in @("unknown", "extra", "type", "duplicate")) {
+    Invoke-MultiCase ("response " + $mutation) -Negative {
+      $state = New-MultiBaseline
+      $pending = Invoke-MultiProjectRequest $state (New-MultiRequest)
+      $response = Copy-MultiProjectValue $pending.response
+      $prefix = "MULTIPROJECT_CORRELATION"
+      switch ($mutation) {
+        "unknown" { $response.requestID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }
+        "extra" { $response.extra = 1; $prefix = "MULTIPROJECT_SCHEMA" }
+        "type" { $response.success = "true"; $prefix = "MULTIPROJECT_TYPE" }
+        "duplicate" { Complete-MultiProjectResponse $state $response; $prefix = "MULTIPROJECT_DUPLICATE" }
+      }
+      return Reject-MultiCase { Complete-MultiProjectResponse $state $response } $prefix
+    }
+  }
+  foreach ($mutation in @("value", "missing", "type", "extra", "requestID", "unanswered", "sequence", "publicationExtra", "answerType", "zero")) {
+    Invoke-MultiCase ("receipt rejects " + $mutation) -Negative {
+      $bad = Copy-MultiProjectValue $after
+      switch ($mutation) {
+        "value" { $bad.received[-1].frame.command.graphCommand.command.renameNode.title = "wrong" }
+        "missing" { $bad.received[-1].frame.command.graphCommand.command.renameNode.Remove("title") | Out-Null }
+        "type" { $bad.appliedCount = "1" }
+        "extra" { $bad.received[-1].frame.command.graphCommand.extra = 1 }
+        "requestID" { $bad.answered[-1].requestID = $listId }
+        "unanswered" { $bad.unansweredRequests = @($renameId) }
+        "sequence" { $bad.publications[-1].frame.sequence = "3" }
+        "publicationExtra" { $bad.publications[-1].frame.extra = 1 }
+        "answerType" { $bad.answered[-1].response.success = 1 }
+        "zero" { $bad.publicationCount = 0 }
+      }
+      Assert-MultiCase (-not (Test-MultiProjectRenameReceipt $before $bad $alpha $a "Alpha renamed")) "canonical negative $mutation accepted"
+      return "actual receipt predicate rejected $mutation"
+    }
+  }
+  $helper = $null
+  $client = $null
+  $resultPath = Join-Path $scratch "peer.json"
+  $controlPath = Join-Path $scratch "publish.json"
+  $pipeName = "graphcode-contract-mp-" + [guid]::NewGuid().ToString("N")
+  function Send-MultiTestFrame($frame) {
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($frame | ConvertTo-Json -Depth 16 -Compress))
+    $size = $bytes.Length
+    $header = [byte[]]@((($size -shr 24) -band 255), (($size -shr 16) -band 255), (($size -shr 8) -band 255), ($size -band 255))
+    $client.Write($header, 0, 4)
+    for ($offset = 0; $offset -lt $size; $offset += 7) {
+      $count = [Math]::Min(7, $size - $offset)
+      $client.Write($bytes, $offset, $count)
+    }
+    $client.Flush()
+  }
+  function Read-MultiTestBytes([int] $length) {
+    $bytes = [byte[]]::new($length)
+    $offset = 0
+    while ($offset -lt $length) {
+      $task = $client.ReadAsync($bytes, $offset, $length - $offset)
+      Assert-MultiCase ($task.Wait(5000)) "owned pipe read timeout"
+      $count = $task.GetAwaiter().GetResult()
+      Assert-MultiCase ($count -gt 0) "owned pipe ended"
+      $offset += $count
+    }
+    return ,$bytes
+  }
+  function Read-MultiTestFrame {
+    $header = Read-MultiTestBytes 4
+    $length = ([int]$header[0] -shl 24) -bor ([int]$header[1] -shl 16) -bor ([int]$header[2] -shl 8) -bor [int]$header[3]
+    Assert-MultiCase ($length -gt 0 -and $length -le 2097152) "owned pipe invalid frame length"
+    return ConvertFrom-MultiProjectJson ([Text.Encoding]::UTF8.GetString((Read-MultiTestBytes $length)))
+  }
+  try {
+    $start = [Diagnostics.ProcessStartInfo]::new($pwsh)
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    $start.Environment.Clear()
+    foreach ($name in @("SystemRoot", "WINDIR", "PATH", "PSModulePath", "USERPROFILE", "SystemDrive", "ComSpec")) {
+      $value = [Environment]::GetEnvironmentVariable($name)
+      if ($null -ne $value) { $start.Environment[$name] = $value }
+    }
+    $start.Environment["TEMP"] = $scratch; $start.Environment["TMP"] = $scratch
+    foreach ($argument in @("-NoProfile", "-File", $stubPath, "-PipeName", $pipeName, "-ResultPath", $resultPath,
+        "-SeedMultiProjects", "-ProjectAPath", $alpha, "-ProjectBPath", $beta, "-PublicationControlPath", $controlPath)) {
+      $start.ArgumentList.Add($argument)
+    }
+    $helper = [Diagnostics.Process]::Start($start)
+    $stdout = $helper.StandardOutput.ReadToEndAsync(); $stderr = $helper.StandardError.ReadToEndAsync()
+    $client = [IO.Pipes.NamedPipeClientStream]::new(".", $pipeName, [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
+    $client.Connect(5000)
+    Send-MultiTestFrame ([ordered]@{ version = 2; kind = "hello"; supportedVersions = @(1,2) })
+    $hello = Read-MultiTestFrame
+    Invoke-MultiCase "owned real pipe hello" { Assert-MultiCase ($hello.selectedVersion -eq 2) "v2 hello missing"; return "owned pipe ready" }
+    Send-MultiTestFrame ([ordered]@{ version = 2; kind = "request"; requestID = $listId; command = [ordered]@{ listRecentProjects = [ordered]@{} } })
+    $response = Read-MultiTestFrame; $first = Read-MultiTestFrame; $second = Read-MultiTestFrame
+    Invoke-MultiCase "fragmented real two-owner frames" {
+      Assert-MultiCase ($response.requestID -ceq $listId -and $first.sequence -eq 1 -and $second.sequence -eq 2 -and
+        $first.event.graphChanged.project.path -ceq $alpha -and $second.event.graphChanged.project.path -ceq $beta) "wire owners/sequence differ"
+      return "2 graph frames actually read"
+    }
+    Send-MultiTestFrame (New-MultiRequest)
+    $response = Read-MultiTestFrame; $event = Read-MultiTestFrame
+    Invoke-MultiCase "real rename application response publication" {
+      Assert-MultiCase ($response.requestID -ceq $renameId -and $event.sequence -eq 3 -and
+        $event.event.graphChanged.nodes[0].title -ceq "Alpha renamed") "real rename reply differs"
+      return "actual request/reply/frame"
+    }
+    $temporary = $controlPath + ".pending"
+    New-MultiControl | ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath $temporary -NoNewline
+    Move-Item -LiteralPath $temporary -Destination $controlPath
+    $event = Read-MultiTestFrame
+    Invoke-MultiCase "idle real pipe publication control" {
+      Assert-MultiCase ($event.sequence -eq 4 -and $event.event.graphChanged.project.path -ceq $alpha -and
+        $event.event.graphChanged.nodes[0].title -ceq "Alpha interleaved") "idle Alpha publication missing"
+      return "synthetic selection token; not live app proof"
+    }
+    $client.Dispose()
+    $client = $null
+    $null = $helper.WaitForExit(100)
+    if (-not $helper.HasExited) { Stop-Process -Id $helper.Id -Force }
+    $null = $helper.WaitForExit(5000)
+    $stdout.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $scratch "multiproject-stdout.log")
+    $stderr.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $scratch "multiproject-stderr.log")
+    $helper.Dispose()
+    $helper = $null
+    $defaultResult = Join-Path $scratch "default-peer.json"
+    $defaultPipe = "graphcode-contract-default-" + [guid]::NewGuid().ToString("N")
+    $start.ArgumentList.Clear()
+    foreach ($argument in @("-NoProfile", "-File", $stubPath, "-PipeName", $defaultPipe, "-ResultPath", $defaultResult)) {
+      $start.ArgumentList.Add($argument)
+    }
+    $helper = [Diagnostics.Process]::Start($start)
+    $stdout = $helper.StandardOutput.ReadToEndAsync(); $stderr = $helper.StandardError.ReadToEndAsync()
+    $client = [IO.Pipes.NamedPipeClientStream]::new(".", $defaultPipe, [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
+    $client.Connect(5000)
+    Send-MultiTestFrame ([ordered]@{ version = 2; kind = "hello"; supportedVersions = @(1,2) })
+    $hello = Read-MultiTestFrame
+    Send-MultiTestFrame ([ordered]@{ version = 2; kind = "request"; requestID = $listId; command = [ordered]@{ listRecentProjects = [ordered]@{} } })
+    $response = Read-MultiTestFrame; $event = Read-MultiTestFrame
+    Invoke-MultiCase "default fixture unchanged over real pipe" {
+      Assert-MultiCase ($hello.selectedVersion -eq 2 -and $response.requestID -ceq $listId -and
+        $response.event.recentProjectsListed.Count -eq 1 -and $event.sequence -eq 1 -and
+        $event.event.graphChanged.project.path -ceq "graphcode://stub/project" -and
+        $event.event.graphChanged.nodes.Count -eq 2 -and
+        $event.event.graphChanged.nodes[0].id -ceq $a -and $event.event.graphChanged.nodes[0].title -ceq "Stub node A" -and
+        $event.event.graphChanged.nodes[1].id -ceq $b -and $event.event.graphChanged.nodes[1].title -ceq "Stub node B") "legacy default fixture changed"
+      return "default one-project/two-node fixture read through unchanged protocol"
+    }
+  } finally {
+    if ($client) { $client.Dispose() }
+    if ($helper) {
+      if (-not $helper.HasExited) { Stop-Process -Id $helper.Id -Force }
+      $null = $helper.WaitForExit(5000)
+      $stdout.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $scratch "stdout.log")
+      $stderr.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $scratch "stderr.log")
+      $helper.Dispose()
+    }
+    $results.ToArray() | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath (Join-Path $scratch "cases.json")
+  }
+  $positive = @($results | Where-Object { -not $_.negative }).Count
+  $negative = @($results | Where-Object { $_.negative }).Count
+  Assert-MultiCase ($positive -gt 0 -and $negative -gt 0) "empty protocol controls"
+  $caseNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach ($result in $results) {
+    Assert-MultiCase ($caseNames.Add($result.name)) "duplicate case labels inflate executed counts"
+  }
+  Write-Host ("MULTIPROJECT_PROTOCOL_CONTRACTS=" + ([ordered]@{
+    executed = $results.Count; positive = $positive; negative = $negative; artifacts = $scratch
+    liveAppSelectionProved = $false
+  } | ConvertTo-Json -Compress))
+}
+
 function Assert-ShellHostPrerequisite([string] $source) {
   $tokens = $null
   $errors = $null
@@ -1254,6 +1597,24 @@ Start-Sleep -Seconds 60
     throw "RED: UIA gate no longer exercises the forced disconnected connection-failure path or reports the banner it observed"
   }
   $stubDaemonSource = Get-Content (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") -Raw
+  if ($stubDaemonSource -notmatch '\[switch\] \$SeedMultiProjects' -or
+      $stubDaemonSource -notmatch 'function New-MultiProjectPeer' -or
+      $stubDaemonSource -notmatch 'function Invoke-MultiProjectRequest' -or
+      $stubDaemonSource -notmatch 'function Invoke-MultiProjectPublicationControl' -or
+      $uiaLiveGateSource -notmatch 'UIA_MULTIPROJECT_RENAME_EVIDENCE=' -or
+      $uiaLiveGateSource -notmatch 'function Get-MultiProjectAutomationId' -or
+      $uiaLiveGateSource -notmatch '(?s)multiProjectRename = \$multiProjectRenameEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
+    throw "RED: N3e lacks opt-in independent owner/receipt/publication state and the simultaneous live multi-project rename evidence"
+  }
+  foreach ($required in @("Test-MultiProjectRenameReceipt", "Get-MultiProjectClippedRectangle", "ClickOwnedScreenRectangle",
+      "Wait-MultiProjectPeerSettled", 'Sketch-Field 9904 "rename stable immediately before submit"',
+      'Edge-TypeText 9904 $typedTitle 6>&1', 'source = "live-uia"', "beforeSelection", "afterSelection",
+      "Windows unchanged-title rename was incorrectly treated as a no-op", "observedOwnerCount", "observedCardCount",
+      "projectBounds", "sidebarBounds", "source-derived, not a UIA caption")) {
+    if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: multi-project live evidence lacks $required" }
+  }
+  Test-MultiProjectProtocolContracts $stubDaemonSource $uiaLiveGateSource `
+    (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") $pwsh
   if ($stubDaemonSource -notmatch '\$ApplyGraphCommands' -or
       $stubDaemonSource -notmatch '\$frame\.command\.graphCommand\.command\.renameNode' -or
       $stubDaemonSource -notmatch 'appliedRenames' -or

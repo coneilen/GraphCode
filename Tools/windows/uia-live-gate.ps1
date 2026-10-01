@@ -518,6 +518,27 @@ public static class GraphCodeUiaGateState {
     return PostMessage(window, 0x0204, (UIntPtr)0x0002, point) &&
       PostMessage(window, 0x0205, UIntPtr.Zero, point);
   }
+  public static int[] ClickOwnedScreenRectangle(IntPtr owner, int left, int top, int right, int bottom, bool rightClick) {
+    if (!WindowIsVisible(owner) || right <= left || bottom <= top)
+      throw new InvalidOperationException("Owned rectangle is not visibly hittable");
+    var point = new ScreenPoint { X = (left + right) / 2, Y = (top + bottom) / 2 };
+    IntPtr hit = WindowFromPoint(point);
+    if (hit == IntPtr.Zero || GetAncestor(hit, 2) != owner)
+      throw new InvalidOperationException("Live rectangle is covered by another top-level window");
+    if (!SetCursorPos(point.X, point.Y))
+      throw new InvalidOperationException("Unable to move cursor into owned live rectangle");
+    ScreenPoint actual;
+    if (!GetCursorPos(out actual) || actual.X != point.X || actual.Y != point.Y)
+      throw new InvalidOperationException("Owned live-rectangle cursor position differs");
+    var inputs = new Input[] {
+      new Input { Type = 0, Mouse = new MouseInput { Flags = rightClick ? 0x0008u : 0x0002u } },
+      new Input { Type = 0, Mouse = new MouseInput { Flags = rightClick ? 0x0010u : 0x0004u } }
+    };
+    uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
+    if (sent != inputs.Length)
+      throw new InvalidOperationException(String.Format("Owned rectangle SendInput sent {0}/{1}", sent, inputs.Length));
+    return new int[] { left, top, right, bottom, actual.X, actual.Y, (int)sent, inputs.Length };
+  }
   public sealed class PopupItemHit {
     public int Position, ItemId, Left, Top, Right, Bottom;
     public int ScreenX, ScreenY, ClientX, ClientY, CursorBeforeX, CursorBeforeY;
@@ -2234,6 +2255,467 @@ function Assert-UiaProviderPathBudget(
     assumedSidUtf16 = $sidLengthAssumption
     identityAssumption = "ordinary account SID or shorter; no actual SID measurement"
     leaseBudget = 232
+  }
+}
+
+function Get-MultiProjectAutomationId([string] $kind, [string] $path, [string] $nodeId = "") {
+  $identity = if ($nodeId) { "${kind}:${path}:$nodeId" } else { "${kind}:$path" }
+  $hash = [System.Numerics.BigInteger]::Parse("1469598103934665603")
+  $modulus64 = [System.Numerics.BigInteger]::Parse("18446744073709551616")
+  $payloadModulus = [System.Numerics.BigInteger]::Parse("1152921504606846976")
+  foreach ($value in [Text.Encoding]::UTF8.GetBytes($identity)) {
+    $hash = (($hash -bxor [System.Numerics.BigInteger]$value) * 1099511628211) % $modulus64
+  }
+  $rowKey = $payloadModulus + ($hash % $payloadModulus)
+  $prefix = if ($kind -ceq "loop") { "loop-row" } elseif ($kind -ceq "open-project") { "open-project" } else { "canvas-card" }
+  return "$prefix-$rowKey"
+}
+
+function Get-MultiProjectLaneGeometry([double[]] $canvas, [double[]] $card) {
+  if ($canvas.Count -ne 4 -or $card.Count -ne 4 -or $canvas[2] -le $canvas[0] -or
+      $canvas[3] -le $canvas[1] -or $card[2] -le $card[0] -or $card[3] -le $card[1]) {
+    throw "MULTIPROJECT_BOUNDS: positive live canvas/card rectangles required"
+  }
+  $scale = ($card[2] - $card[0]) / 220
+  if ([Math]::Abs(($card[3] - $card[1]) / $scale - 86) -gt 1) {
+    throw "MULTIPROJECT_BOUNDS: overview-card scale differs from source geometry"
+  }
+  $laneLeft = $canvas[0] + 24 * $scale
+  $laneTop = $card[1] - 46 * $scale
+  $laneRight = $laneLeft + [Math]::Max(760, ($canvas[2] - $canvas[0]) / $scale - 48) * $scale
+  return [ordered]@{
+    provenance = "GraphCanvas source-derived one-root lane; not a native UIA caption fragment"
+    scale = $scale
+    band = @($laneLeft, $laneTop, $laneRight, ($laneTop + 176 * $scale))
+    open = @(($laneRight - 132 * $scale), ($laneTop + 10 * $scale), ($laneRight - 76 * $scale), ($laneTop + 30 * $scale))
+  }
+}
+
+function Get-MultiProjectClippedRectangle([double[]] $rect, [double[]] $canvas) {
+  if ($rect.Count -ne 4 -or $canvas.Count -ne 4) { throw "MULTIPROJECT_BOUNDS: require two measured rectangles" }
+  $clipped = @([Math]::Max($rect[0], $canvas[0]), [Math]::Max($rect[1], $canvas[1]),
+    [Math]::Min($rect[2], $canvas[2]), [Math]::Min($rect[3], $canvas[3]))
+  if ($clipped[2] -le $clipped[0] -or $clipped[3] -le $clipped[1]) {
+    throw "MULTIPROJECT_BOUNDS: source target is outside the visible canvas"
+  }
+  return ,$clipped
+}
+
+function Get-MultiProjectPeerCounts($peer) {
+  return [ordered]@{
+    receivedCount = $peer.receivedCount; requestCount = $peer.requestCount
+    responseCount = $peer.responseCount; appliedCount = $peer.appliedCount
+    publicationCount = $peer.publicationCount; graphSequence = $peer.graphSequence
+  }
+}
+
+function Test-MultiProjectRenameReceipt($before, $after, [string] $path, [string] $nodeId, [string] $title) {
+  foreach ($key in @("receivedCount", "requestCount", "responseCount", "appliedCount", "publicationCount", "graphSequence")) {
+    if (($before.$key -isnot [int] -and $before.$key -isnot [long]) -or
+        ($after.$key -isnot [int] -and $after.$key -isnot [long]) -or $after.$key -ne $before.$key + 1) {
+      return $false
+    }
+  }
+  if ($before.requestCount -le 0 -or $before.publicationCount -lt 2 -or
+      $before.requestCount -ne $before.responseCount -or @($after.unansweredRequests).Count -ne 0) { return $false }
+  $applied = @($after.applied)
+  $received = @($after.received)
+  $answered = @($after.answered)
+  $publications = @($after.publications)
+  if ($applied.Count -ne $after.appliedCount -or $received.Count -ne $after.receivedCount -or
+      $answered.Count -ne $after.responseCount -or $publications.Count -ne $after.publicationCount) { return $false }
+  $requestId = $applied[-1].requestID
+  if ($requestId -isnot [string] -or $requestId -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') { return $false }
+  $receipt = @($received | Where-Object { $_.requestID -ceq $requestId })
+  $answer = @($answered | Where-Object { $_.requestID -ceq $requestId })
+  $publication = @($publications | Where-Object { $_.correlationID -ceq $requestId -and $_.cause -ceq "rename" })
+  if ($receipt.Count -ne 1 -or $answer.Count -ne 1 -or $publication.Count -ne 1) { return $false }
+  $expected = [ordered]@{ version = 2; kind = "request"; requestID = $requestId
+    command = [ordered]@{ graphCommand = [ordered]@{ projectPath = $path
+      command = [ordered]@{ renameNode = [ordered]@{ _0 = $nodeId; title = $title } } } } }
+  $expectedResponse = [ordered]@{ version = 2; kind = "response"; requestID = $requestId; success = $true }
+  if ((ConvertTo-SketchCanonicalJson $receipt[0].frame) -cne (ConvertTo-SketchCanonicalJson $expected) -or
+      (ConvertTo-SketchCanonicalJson $answer[0].response) -cne (ConvertTo-SketchCanonicalJson $expectedResponse)) { return $false }
+  $graph = $publication[0].frame.event.graphChanged
+  $owners = @($after.graphs | Where-Object { $_.project.path -ceq $path })
+  $beforeOwners = @($before.graphs | Where-Object { $_.project.path -ceq $path })
+  if ($owners.Count -ne 1 -or $beforeOwners.Count -ne 1) { return $false }
+  $expectedApplication = [ordered]@{ requestID = $requestId; projectPath = $path; nodeID = $nodeId
+    beforeTitle = $beforeOwners[0].nodes[0].title; title = $title }
+  $expectedPublication = [ordered]@{ cause = "rename"; correlationID = $requestId
+    frame = [ordered]@{ version = 2; kind = "event"; sequence = $after.graphSequence
+      event = [ordered]@{ graphChanged = $owners[0] } } }
+  if ((ConvertTo-SketchCanonicalJson $applied[-1]) -cne (ConvertTo-SketchCanonicalJson $expectedApplication) -or
+      (ConvertTo-SketchCanonicalJson $publication[0]) -cne (ConvertTo-SketchCanonicalJson $expectedPublication)) { return $false }
+  return $graph.project.path -ceq $path -and
+    $graph.nodes.Count -eq 1 -and $graph.nodes[0].id -ceq $nodeId -and $graph.nodes[0].title -ceq $title -and
+    $applied[-1].projectPath -ceq $path -and $applied[-1].nodeID -ceq $nodeId -and $applied[-1].title -ceq $title -and
+    $publication[0].frame.sequence -eq $after.graphSequence -and
+    (ConvertTo-SketchCanonicalJson $graph) -ceq (ConvertTo-SketchCanonicalJson $owners[0])
+}
+
+function Start-MultiProjectOwnedProcess([string] $file, [string[]] $arguments, [hashtable] $environment, [string] $stem) {
+  $start = [Diagnostics.ProcessStartInfo]::new($file)
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $file -cne $Shell
+  $start.RedirectStandardOutput = $true
+  $start.RedirectStandardError = $true
+  $start.WorkingDirectory = $environment.TEMP
+  $start.Environment.Clear()
+  foreach ($name in @("SystemRoot", "WINDIR", "PATH", "PSModulePath", "USERPROFILE", "APPDATA", "SystemDrive", "ComSpec", "USERNAME", "HOMEDRIVE", "HOMEPATH")) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if ($null -ne $value) { $start.Environment[$name] = $value }
+  }
+  foreach ($name in $environment.Keys) { $start.Environment[$name] = [string]$environment[$name] }
+  foreach ($argument in $arguments) { $start.ArgumentList.Add($argument) }
+  $child = [Diagnostics.Process]::Start($start)
+  return [ordered]@{ process = $child; stdout = $child.StandardOutput.ReadToEndAsync()
+    stderr = $child.StandardError.ReadToEndAsync(); stem = $stem }
+}
+
+function Invoke-MultiProjectRenamePhase {
+  $directory = Assert-UiaSandboxPath $sandboxPath (Join-Path $sandboxPath "mp")
+  $null = New-Item -ItemType Directory -Path $directory
+  $alphaPath = Join-Path $directory "Alpha"
+  $betaPath = Join-Path $directory "Beta"
+  $support = Join-Path $directory "support"
+  $local = Join-Path $directory "local"
+  $temp = Join-Path $directory "temp"
+  $null = New-Item -ItemType Directory -Path $alphaPath, $betaPath, $support, $local, $temp
+  $owners = @(
+    @{ path = $alphaPath; name = "Alpha"; graph = "aaaaaaaa-1111-4111-8111-111111111111"; node = "11111111-1111-4111-8111-111111111111"; title = "Alpha loop" },
+    @{ path = $betaPath; name = "Beta"; graph = "bbbbbbbb-2222-4222-8222-222222222222"; node = "22222222-2222-4222-8222-222222222222"; title = "Beta loop" }
+  )
+  $pipe = "graphcode-uia-mp-$PID"
+  $peerPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "multiproject-peer.json")
+  $controlPath = Join-Path $directory "publish.json"
+  $recorderPath = Join-Path $directory "commands.json"
+  $peerChild = $null
+  $shellChild = $null
+  $multiProcess = $null
+  $multiWindow = [IntPtr]::Zero
+  $multiRoot = $null
+  $navigation = [Collections.Generic.List[object]]::new()
+  $ownedChildren = [Collections.Generic.List[Diagnostics.Process]]::new()
+
+  function Read-MultiProjectPeer {
+    for ($retry = 0; $retry -lt 40; $retry++) {
+      if (Test-Path -LiteralPath $peerPath) {
+        $json = Read-DaemonCommandLog $peerPath
+        try {
+          $snapshot = ($json | ConvertFrom-Json -ErrorAction Stop).multiProjectPeer
+          Require ($null -ne $snapshot) "multi-project result omitted its opt-in peer state"
+          return $snapshot
+        }
+        catch {
+          if ($_.FullyQualifiedErrorId -notlike "*ConvertFromJsonCommand*") { throw }
+          Write-Host "UIA_MULTIPROJECT_PEER_READ_RETRY attempt=$($retry + 1)/40 reason=$($_.Exception.Message)"
+        }
+      }
+      Start-Sleep -Milliseconds 50
+    }
+    throw "MULTIPROJECT_PEER: no readable owner/receipt snapshot"
+  }
+  function Wait-MultiProjectPeerSettled {
+    $last = ""
+    $streak = 0
+    for ($retry = 0; $retry -lt 100; $retry++) {
+      $peer = Read-MultiProjectPeer
+      $current = ConvertTo-SketchCanonicalJson (Get-MultiProjectPeerCounts $peer)
+      if ($current -ceq $last) { $streak++ } else { $streak = 0; $last = $current }
+      if ($streak -ge 4 -and $peer.requestCount -gt 0 -and $peer.publicationCount -ge 2 -and
+          $peer.requestCount -eq $peer.responseCount -and @($peer.unansweredRequests).Count -eq 0) { return $peer }
+      Start-Sleep -Milliseconds 100
+    }
+    throw "MULTIPROJECT_PEER: positive counters never settled"
+  }
+  function Invoke-MultiProjectControl([string] $id) {
+    $element = Find-FragmentByIdWithRetry $multiRoot $id $rawWalker
+    Require ($null -ne $element -and $element.Current.ProcessId -eq $multiProcess.Id) "multi-project shown control $id missing"
+    $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  }
+  function Get-MultiProjectObservation([string] $surface, $selectedOwner = $null) {
+    $multiProcess.Refresh()
+    Require (-not $multiProcess.HasExited) "multi-project shell exited during observation"
+    $multiRoot = [System.Windows.Automation.AutomationElement]::FromHandle($multiWindow)
+    $graph = Find-FragmentByIdWithRetry $multiRoot "graph" $rawWalker
+    $allCards = if ($null -ne $graph) { @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.AutomationId -match '^canvas-card-' }) } else { @() }
+    $nodeCardKind = if ($surface -ceq "overview") { "overview-card" } else { "project-card" }
+    $expectedNodeCardIds = @($owners | ForEach-Object { Get-MultiProjectAutomationId $nodeCardKind $_.path $_.node })
+    $cards = @($allCards | Where-Object { $expectedNodeCardIds -ccontains $_.Current.AutomationId })
+    $observed = [Collections.Generic.List[object]]::new()
+    $matches = $cards.Count -eq $(if ($surface -ceq "overview") { 2 } else { 1 })
+    foreach ($owner in $owners) {
+      $projectId = Get-MultiProjectAutomationId "open-project" $owner.path
+      $loopId = Get-MultiProjectAutomationId "loop" $owner.path $owner.node
+      $project = Find-FragmentById $multiRoot $projectId $rawWalker
+      $loop = Find-FragmentById $multiRoot $loopId $rawWalker
+      $kind = if ($surface -ceq "overview") { "overview-card" } else { "project-card" }
+      $cardId = Get-MultiProjectAutomationId $kind $owner.path $owner.node
+      $card = @($cards | Where-Object { $_.Current.AutomationId -ceq $cardId })
+      $cardRequired = $surface -ceq "overview" -or ($null -ne $selectedOwner -and $selectedOwner.path -ceq $owner.path)
+      $selected = $null -ne $selectedOwner -and $selectedOwner.path -ceq $owner.path
+      $projectSelected = $false; $loopSelected = $false
+      if ($null -ne $project) { $projectSelected = $project.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected }
+      if ($null -ne $loop) { $loopSelected = $loop.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected }
+      $matches = $matches -and $null -ne $project -and $null -ne $loop
+      if ($null -ne $project -and $null -ne $loop) {
+        $projectBounds = $project.Current.BoundingRectangle
+        $loopBounds = $loop.Current.BoundingRectangle
+        $matches = $matches -and $project.Current.ProcessId -eq $multiProcess.Id -and $loop.Current.ProcessId -eq $multiProcess.Id -and
+          $project.Current.Name -ceq $owner.name -and $loop.Current.Name -ceq $owner.title
+        $matches = $matches -and $projectBounds.Width -gt 0 -and $projectBounds.Height -gt 0 -and
+          $loopBounds.Width -gt 0 -and $loopBounds.Height -gt 0
+        if ($null -ne $selectedOwner) { $matches = $matches -and $projectSelected -eq $selected -and $loopSelected -eq $selected }
+      }
+      $cardEvidence = $null
+      if ($cardRequired) {
+        $matches = $matches -and $card.Count -eq 1
+        if ($card.Count -eq 1) {
+          $rect = $card[0].Current.BoundingRectangle
+          $matches = $matches -and $card[0].Current.ProcessId -eq $multiProcess.Id -and
+            $card[0].Current.Name -ceq $owner.title -and $rect.Width -gt 0 -and $rect.Height -gt 0
+          if ($surface -cne "overview") {
+            $matches = $matches -and $card[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected
+          }
+          $cardEvidence = [ordered]@{ automationId = $cardId; name = [string]$card[0].Current.Name
+            bounds = @($rect.Left, $rect.Top, $rect.Right, $rect.Bottom) }
+        }
+      }
+      $observed.Add([ordered]@{ projectPath = $owner.path; nodeID = $owner.node
+        projectAutomationId = $projectId; sidebarAutomationId = $loopId
+        projectName = if ($project) { [string]$project.Current.Name } else { $null }
+        sidebarName = if ($loop) { [string]$loop.Current.Name } else { $null }
+        projectBounds = if ($project) { $r = $project.Current.BoundingRectangle; @($r.Left, $r.Top, $r.Right, $r.Bottom) } else { @() }
+        sidebarBounds = if ($loop) { $r = $loop.Current.BoundingRectangle; @($r.Left, $r.Top, $r.Right, $r.Bottom) } else { @() }
+        projectSelected = $projectSelected; loopSelected = $loopSelected; card = $cardEvidence })
+    }
+    $canvas = if ($graph) { $graph.Current.BoundingRectangle } else { $null }
+    $loopBar = if ($surface -ceq "workspace" -and $null -ne $selectedOwner) {
+      Find-FragmentById $multiRoot (Get-MultiProjectAutomationId "workspace-loop-bar" $selectedOwner.node) $rawWalker
+    } else { $null }
+    if ($null -ne $loopBar) { $matches = $matches -and $loopBar.Current.Name -ceq "Selected loop workspace" }
+    return [ordered]@{ surface = $surface; matched = $matches; observedOwnerCount = @($observed | Where-Object { $null -ne $_.projectName }).Count
+      observedCardCount = $cards.Count; owners = $observed.ToArray()
+      workspaceLoopBar = if ($loopBar) { [ordered]@{ automationId = $loopBar.Current.AutomationId; name = $loopBar.Current.Name } } else { $null }
+      canvasBounds = if ($canvas) { @($canvas.Left, $canvas.Top, $canvas.Right, $canvas.Bottom) } else { @() } }
+  }
+  function Wait-MultiProjectObservation([string] $surface, $selectedOwner = $null) {
+    for ($attempt = 1; $attempt -le 100; $attempt++) {
+      $observation = Get-MultiProjectObservation $surface $selectedOwner
+      Write-Host ("UIA_MULTIPROJECT_OBSERVATION=" + ($observation | ConvertTo-Json -Depth 6 -Compress))
+      if ($observation.matched) { return $observation }
+      Start-Sleep -Milliseconds 100
+    }
+    throw "MULTIPROJECT_IDENTITY: exact owner/node/name/count/selection did not converge: $($observation | ConvertTo-Json -Depth 6 -Compress)"
+  }
+  function Click-MultiProjectRectangle([double[]] $rect, [double[]] $canvas, [switch] $RightClick) {
+    $clipped = Get-MultiProjectClippedRectangle $rect $canvas
+    Require (Ensure-ShellForeground $multiWindow "multi-project live rectangle") "multi-project lost foreground"
+    return ,@([GraphCodeUiaGateState]::ClickOwnedScreenRectangle($multiWindow,
+      [int][Math]::Ceiling($clipped[0]), [int][Math]::Ceiling($clipped[1]),
+      [int][Math]::Floor($clipped[2]), [int][Math]::Floor($clipped[3]), [bool]$RightClick))
+  }
+  function Open-MultiProjectLane($owner) {
+    Invoke-MultiProjectControl "overview-destination"
+    Invoke-MultiProjectControl "actual-size"
+    $overview = Wait-MultiProjectObservation "overview"
+    $row = @($overview.owners | Where-Object { $_.projectPath -ceq $owner.path })[0]
+    $geometry = Get-MultiProjectLaneGeometry $overview.canvasBounds $row.card.bounds
+    $click = Click-MultiProjectRectangle $geometry.open $overview.canvasBounds
+    $project = Wait-MultiProjectObservation "project" $owner
+    $navigation.Add([ordered]@{ action = "shown lane Open"; sourceGeometry = $geometry; input = $click; result = $project })
+    return $project
+  }
+  function Open-MultiProjectLoop($owner) {
+    Invoke-MultiProjectControl "overview-destination"
+    Invoke-MultiProjectControl "actual-size"
+    $overview = Wait-MultiProjectObservation "overview"
+    $row = @($overview.owners | Where-Object { $_.projectPath -ceq $owner.path })[0]
+    $click = Click-MultiProjectRectangle $row.card.bounds $overview.canvasBounds
+    $workspace = Wait-MultiProjectObservation "workspace" $owner
+    $navigation.Add([ordered]@{ action = "shown overview loop"; input = $click; result = $workspace })
+    return $workspace
+  }
+  function Invoke-MultiProjectNativeRename($owner, [string] $typedTitle, [switch] $Cancel) {
+    $project = Open-MultiProjectLane $owner
+    $row = @($project.owners | Where-Object { $_.projectPath -ceq $owner.path })[0]
+    $nodeHit = Click-MultiProjectRectangle $row.card.bounds $project.canvasBounds -RightClick
+    $popup = Wait-ForPopupMenu $multiProcess $multiWindow "multi-project Rename"
+    $rename = @(Get-PopupMenuItems $popup | Where-Object { $_.Text -like "Rename...*" -and $_.Enabled })
+    Require ($rename.Count -eq 1) "multi-project node popup lacks one enabled Rename"
+    $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($popup, $multiWindow, [int]$rename[0].Position, $rename[0].Id)
+    Require ($null -ne $click) "multi-project native Rename item was not hit"
+    $renameProcess = $multiProcess
+    $renameShellWindow = $multiWindow
+    $null = Assert-SketchModal "Rename Loop"
+    $modal = $script:edgeWorkflowWindow
+    $nativeDialog = [System.Windows.Automation.AutomationElement]::FromHandle($modal)
+    $content = @($nativeDialog.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name }) -join "`n"
+    Require ($content -match "(?m)^Title$" -and $content.Contains("Choose the title shown for this loop throughout the graph.")) `
+      "multi-project native Rename omitted its shown Title label/explanation"
+    $prefill = Sketch-Field 9904 "rename prefill"
+    Require ($prefill -ceq $owner.title) "multi-project Rename prefill belongs to a different loop/title"
+    $records = @(Edge-TypeText 9904 $typedTitle 6>&1)
+    $inputEvidence = [Collections.Generic.List[string]]::new()
+    foreach ($record in $records) {
+      if ($record -is [System.Management.Automation.InformationRecord]) {
+        $message = [string]$record.MessageData
+        Write-Host $message
+        if ($message -like "UIA_EDGE_TEXT_STABLE*") { $inputEvidence.Add($message) }
+      }
+    }
+    $fullInput = @($inputEvidence | Where-Object {
+      $_ -match 'inputAttempted=True' -and $_ -match 'inputCountsFull=True' -and
+      $_ -match ("textSent=" + (2 * $typedTitle.Length) + "/" + (2 * $typedTitle.Length) + "(?: |$)")
+    })
+    Require ($fullInput.Count -gt 0) "multi-project rename did not record full real clear/text SendInput counts"
+    $submitBuffer = Sketch-Field 9904 "rename stable immediately before submit"
+    Require ($submitBuffer -ceq $typedTitle) "multi-project Rename buffer differs at submit"
+    $action = if ($Cancel) { Sketch-Cancel "Rename Loop" } else { Sketch-Submit "Rename Loop OK" 9904 }
+    Wait-EdgeClosed "Rename Loop"
+    return [ordered]@{ pid = $multiProcess.Id; title = "Rename Loop"; controlID = 9904; nativeOwner = $modal.ToInt64()
+      prefill = $prefill; typedTitle = $typedTitle; stableSubmitBuffer = $submitBuffer
+      nodeHit = $nodeHit; inputAttempts = $inputEvidence.ToArray(); action = $action; projectCardAutomationId = $row.card.automationId }
+  }
+
+  try {
+    $environment = @{ TEMP = $temp; TMP = $temp; LOCALAPPDATA = $local }
+    $peerChild = Start-MultiProjectOwnedProcess (Get-Command pwsh).Source @("-NoProfile", "-File",
+      (Join-Path $PSScriptRoot "Stub-Daemon.ps1"), "-PipeName", $pipe, "-ResultPath", $peerPath,
+      "-SeedMultiProjects", "-ProjectAPath", $alphaPath, "-ProjectBPath", $betaPath,
+      "-PublicationControlPath", $controlPath) $environment "multiproject-stub"
+    $environment.GRAPHCODE_UIA_GATE = "1"
+    $environment.GRAPHCODE_GATE_CWD = $alphaPath
+    $environment.GRAPHCODE_ZMX = $env:GRAPHCODE_ZMX
+    $environment.GRAPHCODE_SUPPORT_DIR = $support
+    $environment.GRAPHCODE_UIA_RESET_SIDEBAR = "1"
+    $environment.GRAPHCODE_DAEMON_PIPE = "\\.\pipe\$pipe"
+    $environment.GRAPHCODE_UIA_DAEMON_COMMAND_LOG = $recorderPath
+    $shellChild = Start-MultiProjectOwnedProcess $Shell $ArgumentList $environment "multiproject-shell"
+    $multiProcess = $shellChild.process
+    for ($retry = 0; $retry -lt 160; $retry++) {
+      $multiProcess.Refresh()
+      Require (-not $multiProcess.HasExited) "multi-project shell exited before root acquisition"
+      if ($multiProcess.MainWindowHandle -ne [IntPtr]::Zero) {
+        $multiWindow = $multiProcess.MainWindowHandle
+        $candidate = [System.Windows.Automation.AutomationElement]::FromHandle($multiWindow)
+        if ($candidate.Current.AutomationId -ceq "graphcode-root") { $multiRoot = $candidate; break }
+      }
+      Start-Sleep -Milliseconds 100
+    }
+    Require ($null -ne $multiRoot -and [GraphCodeUiaGateState]::WindowProcessId($multiWindow) -eq $multiProcess.Id) "multi-project root lacks exact owned PID"
+    $initialPeer = Wait-MultiProjectPeerSettled
+    Require ($initialPeer.graphs.Count -eq 2) "multi-project peer published a different owner count"
+    foreach ($owner in $owners) {
+      $fixture = @($initialPeer.graphs | Where-Object { $_.project.path -ceq $owner.path })
+      Require ($fixture.Count -eq 1 -and $fixture[0].id -ceq $owner.graph -and $fixture[0].project.name -ceq $owner.name -and
+        $fixture[0].nodes.Count -eq 1 -and $fixture[0].nodes[0].id -ceq $owner.node -and
+        $fixture[0].nodes[0].title -ceq $owner.title) "multi-project peer fixture owner/graph/node/title differs"
+    }
+    Invoke-MultiProjectControl "overview-destination"
+    Invoke-MultiProjectControl "actual-size"
+    $initialOverview = Wait-MultiProjectObservation "overview"
+    foreach ($owner in $owners) {
+      $null = Open-MultiProjectLane $owner
+      $null = Open-MultiProjectLoop $owner
+    }
+    $betaBefore = Wait-MultiProjectObservation "workspace" $owners[1]
+    $beforeControl = Wait-MultiProjectPeerSettled
+    $token = [guid]::NewGuid().ToString()
+    $control = [ordered]@{ token = $token; projectPath = $alphaPath; nodeID = $owners[0].node; title = "Alpha interleaved"
+      selection = [ordered]@{ projectPath = $betaPath; nodeID = $owners[1].node; source = "live-uia" } }
+    $temporary = $controlPath + ".pending"
+    $control | ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath $temporary -NoNewline
+    Move-Item -LiteralPath $temporary -Destination $controlPath
+    for ($retry = 0; $retry -lt 100; $retry++) {
+      $afterControl = Read-MultiProjectPeer
+      if ($afterControl.graphSequence -eq $beforeControl.graphSequence + 1) { break }
+      Start-Sleep -Milliseconds 100
+    }
+    Require ($afterControl.graphSequence -eq $beforeControl.graphSequence + 1 -and
+      $afterControl.controls.Count -eq 1 -and $afterControl.controls[0].token -ceq $token -and
+      $afterControl.requestCount -eq $beforeControl.requestCount -and $afterControl.responseCount -eq $beforeControl.responseCount -and
+      $afterControl.appliedCount -eq $beforeControl.appliedCount) "multi-project control was not published exactly once without a protocol mutation"
+    $owners[0].title = "Alpha interleaved"
+    $betaAfter = Wait-MultiProjectObservation "workspace" $owners[1]
+    Invoke-MultiProjectControl "overview-destination"
+    $interleavedOverview = Wait-MultiProjectObservation "overview"
+    $beforeRename = Wait-MultiProjectPeerSettled
+    $nativeRename = Invoke-MultiProjectNativeRename $owners[0] "  Alpha renamed  "
+    for ($retry = 0; $retry -lt 100; $retry++) {
+      $afterRename = Read-MultiProjectPeer
+      if (Test-MultiProjectRenameReceipt $beforeRename $afterRename $alphaPath $owners[0].node "Alpha renamed") { break }
+      Start-Sleep -Milliseconds 100
+    }
+    Require (Test-MultiProjectRenameReceipt $beforeRename $afterRename $alphaPath $owners[0].node "Alpha renamed") "multi-project rename lacks exact owner/request/reply/application/publication correlation"
+    $owners[0].title = "Alpha renamed"
+    $renamedProject = Wait-MultiProjectObservation "project" $owners[0]
+    Invoke-MultiProjectControl "overview-destination"
+    $renamedOverview = Wait-MultiProjectObservation "overview"
+    $noMutation = [Collections.Generic.List[object]]::new()
+    foreach ($case in @(@{ name = "cancel"; text = "Cancelled Alpha title"; cancel = $true }, @{ name = "blank"; text = "   "; cancel = $false })) {
+      $before = Wait-MultiProjectPeerSettled
+      $native = Invoke-MultiProjectNativeRename $owners[0] $case.text -Cancel:$case.cancel
+      $after = Wait-MultiProjectPeerSettled
+      Require ((ConvertTo-SketchCanonicalJson (Get-MultiProjectPeerCounts $before)) -ceq
+        (ConvertTo-SketchCanonicalJson (Get-MultiProjectPeerCounts $after)) -and
+        (ConvertTo-SketchCanonicalJson $before.graphs) -ceq (ConvertTo-SketchCanonicalJson $after.graphs) -and
+        @($after.unansweredRequests).Count -eq 0) "multi-project $($case.name) changed positive peer counters/graphs"
+      $observed = Wait-MultiProjectObservation "project" $owners[0]
+      $noMutation.Add([ordered]@{ action = $case.name; native = $native; before = Get-MultiProjectPeerCounts $before
+        after = Get-MultiProjectPeerCounts $after; surfaces = $observed })
+    }
+    $beforeUnchanged = Wait-MultiProjectPeerSettled
+    $unchangedNative = Invoke-MultiProjectNativeRename $owners[0] "Alpha renamed"
+    for ($retry = 0; $retry -lt 100; $retry++) {
+      $afterUnchanged = Read-MultiProjectPeer
+      if (Test-MultiProjectRenameReceipt $beforeUnchanged $afterUnchanged $alphaPath $owners[0].node "Alpha renamed") { break }
+      Start-Sleep -Milliseconds 100
+    }
+    Require (Test-MultiProjectRenameReceipt $beforeUnchanged $afterUnchanged $alphaPath $owners[0].node "Alpha renamed") "Windows unchanged-title rename was incorrectly treated as a no-op"
+    Invoke-MultiProjectControl "overview-destination"
+    $finalOverview = Wait-MultiProjectObservation "overview"
+    foreach ($descendant in @(Get-UiaOwnedProcessDescendants @($multiProcess.Id))) {
+      $current = Get-CimInstance Win32_Process -Filter "ProcessId = $($descendant.ProcessId)" -ErrorAction Stop
+      if ($null -ne $current -and [string]$current.CreationDate -ceq [string]$descendant.CreationDate) {
+        $child = Get-Process -Id $descendant.ProcessId -ErrorAction SilentlyContinue
+        if ($child -and -not $child.HasExited) {
+          $null = $child.Handle
+          $ownedChildren.Add($child)
+        }
+      }
+    }
+    Require ([GraphCodeUiaGateState]::PostCommand($multiWindow, 0x5002)) "multi-project shell rejected Exit"
+    Require ($multiProcess.WaitForExit(5000) -and $multiProcess.ExitCode -eq 0) "multi-project owned shell did not exit cleanly"
+    return [ordered]@{
+      fixtures = @($owners | ForEach-Object { [ordered]@{ path = $_.path; name = $_.name; graphID = $_.graph; nodeID = $_.node } })
+      initialPeerCounts = Get-MultiProjectPeerCounts $initialPeer
+      initialOverview = $initialOverview; navigation = $navigation.ToArray()
+      interleaved = [ordered]@{ beforeSelection = $betaBefore; afterSelection = $betaAfter
+        control = $control; beforePeer = Get-MultiProjectPeerCounts $beforeControl
+        afterPeer = Get-MultiProjectPeerCounts $afterControl; overview = $interleavedOverview }
+      rename = [ordered]@{ native = $nativeRename; receivedWire = $afterRename.received[-1].frame.command
+        requestID = $afterRename.applied[-1].requestID; answered = $true; before = Get-MultiProjectPeerCounts $beforeRename
+        after = Get-MultiProjectPeerCounts $afterRename; project = $renamedProject; overview = $renamedOverview }
+      noMutation = $noMutation.ToArray()
+      unchangedTitle = [ordered]@{ native = $unchangedNative; dispatched = $true; macOSSourceSuppresses = $true
+        before = Get-MultiProjectPeerCounts $beforeUnchanged; after = Get-MultiProjectPeerCounts $afterUnchanged }
+      finalOverview = $finalOverview
+      limits = "Observed two owner/card groups; lane/Open geometry is source-derived, not a UIA caption. Header is project title; loop bar is Selected loop workspace; tabs independently named. Stub evidence does not prove production daemon persistence, glyphs, physical input devices, global-lane filtering, richer topology, worktrees, Edit Details or macOS runtime."
+    }
+  } finally {
+    $cleanupRoots = @($multiProcess, $(if ($peerChild) { $peerChild.process } else { $null })) + $ownedChildren.ToArray()
+    Stop-UiaOwnedProcessTrees $cleanupRoots
+    foreach ($child in $ownedChildren) { $child.Dispose() }
+    foreach ($child in @($peerChild, $shellChild)) {
+      if ($null -ne $child) {
+        $null = $child.process.WaitForExit(5000)
+        $child.stdout.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $logDirectory ($child.stem + "-stdout.log"))
+        $child.stderr.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $logDirectory ($child.stem + "-stderr.log"))
+      }
+    }
   }
 }
 
@@ -7800,6 +8282,9 @@ try {
 
   Write-Host ("UIA_SKETCH_CUSTODY_EVIDENCE=" + ($sketchCustodyEvidence | ConvertTo-Json -Depth 8 -Compress))
 
+  $multiProjectRenameEvidence = Invoke-MultiProjectRenamePhase
+  Write-Host ("UIA_MULTIPROJECT_RENAME_EVIDENCE=" + ($multiProjectRenameEvidence | ConvertTo-Json -Depth 8 -Compress))
+
   [pscustomobject]@{
     name = $rootName
     automationId = $rootAutomationId
@@ -7871,6 +8356,7 @@ try {
     edgeWorkflow = $edgeWorkflowEvidence
     nodeCreationSheet = $nodeCreationSheetEvidence
     sketchCustody = $sketchCustodyEvidence
+    multiProjectRename = $multiProjectRenameEvidence
     contextMenuItemCount = $projectMenuItems.Count
     contextMenuMoveProjectText = $moveProjectItem.Text
     contextMenuMoveProjectEnabled = $moveProjectItem.Enabled
