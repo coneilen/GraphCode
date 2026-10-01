@@ -105,6 +105,125 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     Assert-MultiCase ((Get-MultiProjectAutomationId "project-card" "graphcode://stub/project" $a) -ceq "canvas-card-1510499067760483540") "provider FNV row-key golden differs"
     return $ids
   }
+  Invoke-MultiCase "workspace marker independent prefix and row-key goldens" {
+    Assert-MultiCase ((Get-MultiProjectAutomationId "workspace-loop-bar" $a) -ceq
+      "workspace-loop-bar-1320898360543276851") "workspace loop-bar A prefix/row-key golden differs"
+    Assert-MultiCase ((Get-MultiProjectAutomationId "workspace-loop-bar" $b) -ceq
+      "workspace-loop-bar-2044737300313126929") "workspace loop-bar B prefix/row-key golden differs"
+    Assert-MultiCase ((Get-MultiProjectAutomationId "workspace-toolbar" "A") -ceq
+      "workspace-toolbar-2086745613872223135") "workspace toolbar A prefix/row-key golden differs"
+    Assert-MultiCase ((Get-MultiProjectAutomationId "workspace-toolbar" "B") -ceq
+      "workspace-toolbar-2086746713383851346") "workspace toolbar B prefix/row-key golden differs"
+    return "Literal provider-prefix/FNV64 goldens independently derived from native identity strings"
+  }
+  Invoke-MultiCase "unknown automation kind rejected" -Negative {
+    return Reject-MultiCase { Get-MultiProjectAutomationId "unsupported-marker" "A" $a } "MULTIPROJECT_KIND"
+  }
+  $workspaceOwner = @{ path = "A"; node = $a; name = "Alpha"; title = "Alpha loop" }
+  function New-MultiWorkspaceProjection {
+    return [ordered]@{
+      loopBars = @([ordered]@{ automationId = "workspace-loop-bar-1320898360543276851"
+        name = "Selected loop workspace"; processId = 4242; bounds = @(220,34,1200,80) })
+      toolbars = @([ordered]@{ automationId = "workspace-toolbar-2086745613872223135"
+        name = "Alpha"; processId = 4242; bounds = @(8,1,280,33) })
+      foreignWorkspaceFragmentCount = 0
+    }
+  }
+  Invoke-MultiCase "workspace projection requires both positively owned source markers" {
+    Assert-MultiCase (Test-MultiProjectObservedSurface "workspace" $true (New-MultiWorkspaceProjection) $workspaceOwner 4242) `
+      "literal expected workspace marker shape rejected"
+    return "Functional mock only: exact node-bound constant loop bar and project-bound named toolbar"
+  }
+  foreach ($mutation in @("project-only", "missing-loop", "missing-toolbar", "wrong-prefix", "wrong-node", "wrong-project",
+      "wrong-pid", "pid-type", "loop-name", "toolbar-name", "loop-duplicate", "toolbar-duplicate",
+      "bounds-empty", "bounds-type", "bounds-zero", "selection-unmatched", "foreign-marker-count")) {
+    Invoke-MultiCase ("workspace projection rejects " + $mutation) -Negative {
+      $projection = New-MultiWorkspaceProjection
+      $selectionMatches = $true
+      switch ($mutation) {
+        "project-only" { $projection.loopBars = @(); $projection.toolbars = @() }
+        "missing-loop" { $projection.loopBars = @() }
+        "missing-toolbar" { $projection.toolbars = @() }
+        "wrong-prefix" { $projection.loopBars[0].automationId = "canvas-card-1320898360543276851" }
+        "wrong-node" { $projection.loopBars[0].automationId = "workspace-loop-bar-2044737300313126929" }
+        "wrong-project" { $projection.toolbars[0].automationId = "workspace-toolbar-2086746713383851346" }
+        "wrong-pid" { $projection.toolbars[0].processId = 7777 }
+        "pid-type" { $projection.loopBars[0].processId = "4242" }
+        "loop-name" { $projection.loopBars[0].name = "Alpha loop" }
+        "toolbar-name" { $projection.toolbars[0].name = "Alpha loop" }
+        "loop-duplicate" { $projection.loopBars = @($projection.loopBars[0], $projection.loopBars[0]) }
+        "toolbar-duplicate" { $projection.toolbars = @($projection.toolbars[0], $projection.toolbars[0]) }
+        "bounds-empty" { $projection.loopBars[0].bounds = @() }
+        "bounds-type" { $projection.toolbars[0].bounds[0] = "8" }
+        "bounds-zero" { $projection.loopBars[0].bounds = @(220,34,220,80) }
+        "selection-unmatched" { $selectionMatches = $false }
+        "foreign-marker-count" { $projection.foreignWorkspaceFragmentCount = 1 }
+      }
+      Assert-MultiCase (-not (Test-MultiProjectObservedSurface "workspace" $selectionMatches $projection $workspaceOwner 4242)) `
+        "project-only or wrong-bound marker projection accepted as actual workspace: $mutation"
+      return "Actual functional predicate rejected $mutation; no native app claim"
+    }
+  }
+  Invoke-MultiCase "project request rejects actual workspace chrome" -Negative {
+    Assert-MultiCase (-not (Test-MultiProjectObservedSurface "project" $true (New-MultiWorkspaceProjection) $workspaceOwner 4242)) `
+      "requested project label accepted actual workspace marker shape"
+    return "Actual surface predicate rejects workspace chrome under a project expectation"
+  }
+  $rosterOwners = @($workspaceOwner, @{ path = "B"; node = $b; name = "Beta"; title = "Beta loop" })
+  function New-MultiRosterProjection {
+    return [ordered]@{
+      projectRows = @(
+        [ordered]@{ automationId = "open-project-1737218920896369762"; name = "Alpha"; processId = 4242; bounds = @(12,100,232,126) },
+        [ordered]@{ automationId = "open-project-1737217821384741551"; name = "Beta"; processId = 4242; bounds = @(12,148,232,174) }
+      )
+      cards = @(
+        [ordered]@{ automationId = "canvas-card-1929002346198335884"; name = "Alpha loop"; processId = 4242; bounds = @(262,118,482,204) },
+        [ordered]@{ automationId = "canvas-card-1616358459734844849"; name = "Beta loop"; processId = 4242; bounds = @(262,314,482,400) }
+      )
+      foreignCardFragmentCount = 0; foreignProjectFragmentCount = 0
+    }
+  }
+  Invoke-MultiCase "unfiltered ordinary overview roster exactly two owners and cards" {
+    Assert-MultiCase (Test-MultiProjectObservedRoster "overview" (New-MultiRosterProjection) $rosterOwners $null 4242) `
+      "literal two-owner/two-card whole roster rejected"
+    return "Functional whole scoped roster with literal provider IDs, not a live app claim"
+  }
+  Invoke-MultiCase "project roster retains two owners and exactly one selected project card" {
+    $projection = New-MultiRosterProjection
+    $projection.cards = @([ordered]@{ automationId = "canvas-card-1983941480823304696"
+      name = "Alpha loop"; processId = 4242; bounds = @(248,118,468,204) })
+    Assert-MultiCase (Test-MultiProjectObservedRoster "project" $projection $rosterOwners $workspaceOwner 4242) `
+      "surface-specific one-project card roster rejected"
+    Assert-MultiCase (Test-MultiProjectObservedSurface "project" $true ([ordered]@{
+      loopBars = @(); toolbars = @(); foreignWorkspaceFragmentCount = 0
+    }) $workspaceOwner 4242) "project-only marker shape rejected"
+    return "Two ordinary project rows, one exact project-card projection"
+  }
+  foreach ($mutation in @("extra-card", "extra-project", "duplicate-card", "duplicate-project",
+      "foreign-card-pid", "foreign-project-pid", "foreign-card-count", "foreign-project-count")) {
+    Invoke-MultiCase ("unfiltered roster rejects " + $mutation) -Negative {
+      $projection = New-MultiRosterProjection
+      switch ($mutation) {
+        "extra-card" {
+          $projection.cards += [ordered]@{ automationId = "canvas-card-1999999999999999999"
+            name = "Unexpected cached loop"; processId = 4242; bounds = @(508,118,728,204) }
+        }
+        "extra-project" {
+          $projection.projectRows += [ordered]@{ automationId = "open-project-1999999999999999999"
+            name = "Unexpected project"; processId = 4242; bounds = @(12,196,232,222) }
+        }
+        "duplicate-card" { $projection.cards += $projection.cards[0] }
+        "duplicate-project" { $projection.projectRows += $projection.projectRows[0] }
+        "foreign-card-pid" { $projection.cards[0].processId = 7777 }
+        "foreign-project-pid" { $projection.projectRows[0].processId = 7777 }
+        "foreign-card-count" { $projection.foreignCardFragmentCount = 1 }
+        "foreign-project-count" { $projection.foreignProjectFragmentCount = 1 }
+      }
+      Assert-MultiCase (-not (Test-MultiProjectObservedRoster "overview" $projection $rosterOwners $null 4242)) `
+        "whitelisting hid actual extra/duplicate/foreign roster fragments: $mutation"
+      return "Actual whole-roster predicate rejected $mutation"
+    }
+  }
   Invoke-MultiCase "literal lane geometry and DPI scaling" {
     $geometry = Get-MultiProjectLaneGeometry @(220,34,1200,900) @(262,118,482,204)
     Assert-MultiCase (($geometry.band -join ",") -ceq "244,72,1176,248" -and
@@ -1612,6 +1731,15 @@ Start-Sleep -Seconds 60
       "Windows unchanged-title rename was incorrectly treated as a no-op", "observedOwnerCount", "observedCardCount",
       "projectBounds", "sidebarBounds", "source-derived, not a UIA caption")) {
     if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: multi-project live evidence lacks $required" }
+  }
+  if (-not $uiaLiveGateSource.Contains('$matches = Test-MultiProjectObservedSurface $surface $matches $workspaceProjection $selectedOwner $multiProcess.Id') -or
+      $uiaLiveGateSource.Contains('if ($null -ne $loopBar) { $matches = $matches -and')) {
+    throw "RED: workspace observation still accepts a project-only projection without mandatory owned loop-bar and toolbar proof"
+  }
+  foreach ($required in @('Test-MultiProjectObservedRoster $surface $fragmentProjection $owners $selectedOwner $multiProcess.Id',
+      "totalObservedCardCount", "totalObservedProjectRowCount", "expectedMatchedOwners", "unexpectedCardIds", "unexpectedProjectIds",
+      "foreignProjectFragmentCount", "static Graph destination is not an ordinary project row")) {
+    if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: unfiltered multi-project observer roster lacks $required" }
   }
   Test-MultiProjectProtocolContracts $stubDaemonSource $uiaLiveGateSource `
     (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") $pwsh
