@@ -2961,6 +2961,303 @@ function Invoke-MultiProjectTypeText(
   return [ordered]@{ sourceInvocations = $sourceInvocations; producedInformationRecords = $informationRecords; retainedInformationRecords = $retainedRecords }
 }
 
+function New-MultiProjectEditNativeApi {
+  if(-not("GraphCodeMultiProjectEditNative" -as [type])){
+    Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Diagnostics;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class GraphCodeMultiProjectEditNative {
+  [StructLayout(LayoutKind.Sequential)] private struct Key { public ushort Vk, Scan; public uint Flags, Time; public UIntPtr Extra; }
+  [StructLayout(LayoutKind.Sequential)] private struct Input { public uint Type; public Key Key; public uint Pad0, Pad1; }
+  [StructLayout(LayoutKind.Sequential)] private struct Rect {public int Left,Top,Right,Bottom;}
+  [StructLayout(LayoutKind.Sequential)] private struct GuiInfo {
+    public int Size; public uint Flags; public IntPtr Active,Focus,Capture,MenuOwner,MoveSize,Caret; public Rect CaretRect;
+  }
+  [DllImport("user32.dll", SetLastError=true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
+  [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", SetLastError=true)]
+  private static extern IntPtr Message(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
+  [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", CharSet=CharSet.Unicode, SetLastError=true)]
+  private static extern IntPtr TextMessage(IntPtr window, uint message, UIntPtr wparam, StringBuilder text, uint flags, uint timeout, out UIntPtr result);
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+  [DllImport("user32.dll",SetLastError=true)] private static extern bool GetGUIThreadInfo(uint thread,ref GuiInfo info);
+  private static uint Remaining(int budget, Stopwatch watch) {
+    long value=budget-watch.ElapsedMilliseconds;
+    if(value<=0) throw new TimeoutException("N3e edit transaction deadline expired");
+    return (uint)value;
+  }
+  private static UIntPtr ReadMessage(IntPtr window,uint message,UIntPtr first,IntPtr last,int budget,Stopwatch watch) {
+    UIntPtr result;
+    if(Message(window,message,first,last,0x23,Remaining(budget,watch),out result)==IntPtr.Zero)
+      throw new Win32Exception(Marshal.GetLastWin32Error(),"N3e edit message unavailable/timed out");
+    return result;
+  }
+  public static string Buffer(IntPtr edit,int budget) {
+    var watch=Stopwatch.StartNew();
+    int length=checked((int)ReadMessage(edit,0x000E,UIntPtr.Zero,IntPtr.Zero,budget,watch).ToUInt64());
+    if(length<0 || length>65536) throw new InvalidOperationException("N3e edit buffer exceeds bound");
+    var text=new StringBuilder(length+1); UIntPtr result;
+    if(TextMessage(edit,0x000D,(UIntPtr)text.Capacity,text,0x23,Remaining(budget,watch),out result)==IntPtr.Zero)
+      throw new Win32Exception(Marshal.GetLastWin32Error(),"N3e WM_GETTEXT unavailable/timed out");
+    return text.ToString();
+  }
+  public static int[] Selection(IntPtr edit,int budget) {
+    var watch=Stopwatch.StartNew(); IntPtr memory=Marshal.AllocHGlobal(8);
+    try {
+      Marshal.WriteInt32(memory,-1); Marshal.WriteInt32(memory,4,-1);
+      ReadMessage(edit,0x00B0,(UIntPtr)memory.ToInt64(),IntPtr.Add(memory,4),budget,watch);
+      return new[]{Marshal.ReadInt32(memory),Marshal.ReadInt32(memory,4)};
+    } finally {Marshal.FreeHGlobal(memory);}
+  }
+  public static void SelectAll(IntPtr edit,int budget) {
+    ReadMessage(edit,0x00B1,UIntPtr.Zero,new IntPtr(-1),budget,Stopwatch.StartNew());
+  }
+  public static IntPtr FocusOf(IntPtr modal) {
+    uint pid; uint thread=GetWindowThreadProcessId(modal,out pid);
+    var info=new GuiInfo{Size=Marshal.SizeOf(typeof(GuiInfo))};
+    if(thread==0 || !GetGUIThreadInfo(thread,ref info)) throw new Win32Exception(Marshal.GetLastWin32Error(),"N3e GetGUIThreadInfo");
+    return info.Focus;
+  }
+  public static int[] Unicode(string text) {
+    var inputs=new Input[text.Length*2]; int index=0;
+    foreach(char value in text){
+      inputs[index++]=new Input{Type=1,Key=new Key{Scan=value,Flags=4}};
+      inputs[index++]=new Input{Type=1,Key=new Key{Scan=value,Flags=6}};
+    }
+    uint sent=SendInput((uint)inputs.Length,inputs,Marshal.SizeOf(typeof(Input)));
+    return new[]{checked((int)sent),inputs.Length};
+  }
+}
+'@
+  }
+  $api=New-MultiProjectRenameNativeApi
+  $api | Add-Member NoteProperty Watch ([Diagnostics.Stopwatch]::StartNew())
+  $api | Add-Member ScriptMethod Clock {return $this.Watch.ElapsedMilliseconds}
+  $api | Add-Member ScriptMethod Title {param($modal,$remaining) [GraphCodeMultiProjectEditNative]::Buffer($modal,$remaining)} -Force
+  $api | Add-Member ScriptMethod FocusHandle {param($modal) [GraphCodeMultiProjectEditNative]::FocusOf($modal)}
+  $api | Add-Member ScriptMethod FocusInsertion {
+    param($modal,$point)
+    return ,@([GraphCodeUiaGateState]::ClickOwnedScreenRectangle($modal,$point[0],$point[1],$point[0]+1,$point[1]+1,$false))
+  }
+  $api | Add-Member ScriptMethod FocusMouse {
+    param($modal,$edit,$point,$expectedProcessId,$started)
+    $null=Get-MultiProjectEditRemaining $this $started
+    $owner=$this.ProcessId($modal)
+    $editOwner=$this.ProcessId($edit)
+    if(($owner -isnot [int] -and $owner -isnot [uint32] -and $owner -isnot [long]) -or $owner -ne $expectedProcessId -or
+      ($editOwner -isnot [int] -and $editOwner -isnot [uint32] -and $editOwner -isnot [long]) -or $editOwner -ne $expectedProcessId){
+      throw "MULTIPROJECT_EDIT_OWNER: expected modal/edit PID changed before focus content/input"
+    }
+    $hit=$this.Hit($modal,$point[0],$point[1])
+    $foreground=$this.Foreground($modal);$visible=$this.Visible($edit);$enabled=$this.Enabled($edit)
+    $controlId=$this.ControlId($edit);$root=$this.Root($edit);$held=$this.Control($modal,9904)
+    if($hit.root -isnot [IntPtr] -or $hit.root -ne $modal -or $hit.child -isnot [IntPtr] -or $hit.child -ne $edit -or
+      ($hit.processId -isnot [int] -and $hit.processId -isnot [uint32] -and $hit.processId -isnot [long]) -or
+      $hit.processId -ne $expectedProcessId -or $held -isnot [IntPtr] -or $held -ne $edit -or
+      $root -isnot [IntPtr] -or $root -ne $modal -or $controlId -isnot [int] -or $controlId -ne 9904 -or
+      $foreground -isnot [bool] -or -not $foreground -or $visible -isnot [bool] -or -not $visible -or
+      $enabled -isnot [bool] -or -not $enabled){
+      throw "MULTIPROJECT_EDIT_FOCUS: measured edit focus target changed before single mouse insertion"
+    }
+    $title=$this.Title($modal,(Get-MultiProjectEditRemaining $this $started))
+    if($title -isnot [string] -or $title -cne "Rename Loop"){throw "MULTIPROJECT_EDIT_FOCUS: owned focus modal title changed"}
+    $owner=$this.ProcessId($modal);$editOwner=$this.ProcessId($edit)
+    if(($owner -isnot [int] -and $owner -isnot [uint32] -and $owner -isnot [long]) -or $owner -ne $expectedProcessId -or
+      ($editOwner -isnot [int] -and $editOwner -isnot [uint32] -and $editOwner -isnot [long]) -or $editOwner -ne $expectedProcessId){
+      throw "MULTIPROJECT_EDIT_OWNER: expected PID changed during bounded focus title query"
+    }
+    $null=Get-MultiProjectEditRemaining $this $started
+    return ,@($this.FocusInsertion($modal,$point))
+  }
+  $api | Add-Member ScriptMethod EditBuffer {param($edit,$remaining) [GraphCodeMultiProjectEditNative]::Buffer($edit,$remaining)}
+  $api | Add-Member ScriptMethod Selection {param($edit,$remaining) [GraphCodeMultiProjectEditNative]::Selection($edit,$remaining)}
+  $api | Add-Member ScriptMethod SelectAll {param($edit,$remaining) [GraphCodeMultiProjectEditNative]::SelectAll($edit,$remaining)}
+  $api | Add-Member ScriptMethod Delete {return ,@(([GraphCodeUiaGateState]::SendKeyInput(0x2E,1)*2),2)}
+  $api | Add-Member ScriptMethod Unicode {param($text) return ,@([GraphCodeMultiProjectEditNative]::Unicode($text))}
+  $api | Add-Member ScriptMethod Observe {param($remaining) Start-Sleep -Milliseconds ([Math]::Min(25,$remaining))}
+  return $api
+}
+
+function Get-MultiProjectEditRemaining($api,[long]$started) {
+  $elapsed=[long]$api.Clock()-$started
+  if($elapsed -lt 0 -or $elapsed -ge 5000){throw "MULTIPROJECT_EDIT_DEADLINE: total owned transaction reached5000ms"}
+  return [int](5000-$elapsed)
+}
+
+function Assert-MultiProjectEditOwned($api,[IntPtr]$modal,[int]$processId,[long]$started,$known=$null,[switch]$Focused) {
+  $null=Get-MultiProjectEditRemaining $api $started
+  $actualPid=$api.ProcessId($modal)
+  if(($actualPid -isnot [int] -and $actualPid -isnot [uint32] -and $actualPid -isnot [long]) -or $actualPid -ne $processId -or $processId -le 0){
+    throw "MULTIPROJECT_EDIT_OWNER: modal PID unavailable/foreign before content"
+  }
+  $field=Read-MultiProjectRenameField $api $modal 9904 $processId
+  $title=$api.Title($modal,(Get-MultiProjectEditRemaining $api $started))
+  $foreground=$api.Foreground($modal);$visible=$api.Visible($modal);$enabled=$api.Enabled($modal)
+  if($title -isnot [string] -or $title -cne "Rename Loop" -or
+    -not(Test-MultiProjectRenameField $field $modal 9904 $processId) -or $foreground -isnot [bool] -or -not $foreground -or
+    $visible -isnot [bool] -or -not $visible -or $enabled -isnot [bool] -or -not $enabled -or
+    ($null -ne $known -and $field.handle -ne $known.handle)){
+    throw "MULTIPROJECT_EDIT_OWNER: exact owned enabled visible title/control/foreground changed"
+  }
+  if($Focused){
+    $focus=$api.FocusHandle($modal)
+    if($focus -isnot [IntPtr] -or $focus -ne [IntPtr]$field.handle -or $api.ProcessId($focus) -ne $processId){
+      throw "MULTIPROJECT_EDIT_FOCUS: observed GUI edit focus/PID unavailable/changed"
+    }
+  }
+  $null=Get-MultiProjectEditRemaining $api $started
+  return $field
+}
+
+function Invoke-MultiProjectSequencedEdit(
+  [IntPtr]$modal,[int]$processId,[string]$expectedPrefill,[string]$text,$nativeApi=$null,[scriptblock]$phaseSink=$null
+) {
+  $api=if($null -ne $nativeApi){$nativeApi}else{New-MultiProjectEditNativeApi}
+  $phaseWriter=if($phaseSink){$phaseSink}else{{param($message) Write-Host $message}}
+  $started=[long]$api.Clock()
+  $record=[ordered]@{phase="initial";expectedPrefill=$expectedPrefill;expectedText=$text;clear=@();typed=@()
+    focusBatches=0;focusReceipt=@();focusSentEvents=0;focusExpectedEvents=0;clearBatches=0;unicodeBatches=0;observations=@();observableNonemptyToEmpty=$false
+    nativeQueueAckClaimed=$false;historicalLeadingALossEstablished=$false;maximumMilliseconds=5000
+    boundLimit="Target-thread messages use remaining time; one shared stage budget. SendInput has no kernel/scheduler timeout guarantee."}
+  try{
+    if([string]::IsNullOrEmpty($expectedPrefill)){throw "MULTIPROJECT_EDIT_PREFILL: known nonempty prefill required"}
+    $field=Assert-MultiProjectEditOwned $api $modal $processId $started
+    $record.initialOwnedTarget=$field
+    $edit=[IntPtr]$field.handle
+    $initial=$api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started))
+    $record.initialBuffer=$initial
+    if($initial -isnot [string] -or $initial -cne $expectedPrefill){throw "MULTIPROJECT_EDIT_PREFILL: fresh buffer differs from known nonempty prefill"}
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field
+    $focus=$api.FocusHandle($modal)
+    $record.focusAlreadyOwned=$focus -is [IntPtr] -and $focus -eq $edit -and $api.ProcessId($focus) -eq $processId
+    $record.focusInitialHandle=if($focus -is [IntPtr]){$focus.ToInt64()}else{$null}
+    $focusObservations=[Collections.Generic.List[object]]::new()
+    if($record.focusAlreadyOwned){$record.focusObservedHandle=$focus.ToInt64()}
+    if(-not $record.focusAlreadyOwned){
+      $client=@($api.ClientBounds($modal));$work=@($api.WorkBounds($modal))
+      if(-not(Test-MultiProjectRenameRectangle $client) -or -not(Test-MultiProjectRenameRectangle $work)){
+        throw "MULTIPROJECT_EDIT_FOCUS: measured client/work focus bounds unavailable"
+      }
+      $clip=Get-MultiProjectClippedRectangle $field.bounds $client
+      $clip=Get-MultiProjectClippedRectangle $clip $work
+      $record.focusClippedBounds=$clip
+      $focusSamples=[Collections.Generic.List[object]]::new();$point=$null
+      foreach($candidate in @(@(0.5,0.5),@(0.25,0.25),@(0.75,0.25),@(0.25,0.75),@(0.75,0.75))){
+        $null=Get-MultiProjectEditRemaining $api $started
+        $x=[int][Math]::Floor($clip[0]+($clip[2]-$clip[0]-1)*$candidate[0])
+        $y=[int][Math]::Floor($clip[1]+($clip[3]-$clip[1]-1)*$candidate[1])
+        $hit=$api.Hit($modal,$x,$y)
+        $valid=$hit.root -is [IntPtr] -and $hit.root -eq $modal -and $hit.child -is [IntPtr] -and
+          $hit.child -eq $edit -and ($hit.processId -is [int] -or $hit.processId -is [uint32] -or $hit.processId -is [long]) -and
+          $hit.processId -eq $processId
+        $focusSamples.Add([ordered]@{point=@($x,$y);root=if($hit.root -is [IntPtr]){$hit.root.ToInt64()}else{$null}
+          pid=$hit.processId;child=if($hit.child -is [IntPtr]){$hit.child.ToInt64()}else{$null};hitTarget=$valid})
+        if($valid){$point=@($x,$y);break}
+      }
+      $record.focusHitSamples=$focusSamples.ToArray()
+      if($null -eq $point){throw "MULTIPROJECT_EDIT_FOCUS: no measured uncovered owned edit point"}
+      $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field
+      $null=Get-MultiProjectEditRemaining $api $started
+      $record.focusBatches++
+      $record.focusExpectedEvents=2;$record.focusSentEvents=$null
+      $record.focusReceipt=@($api.FocusMouse($modal,$edit,$point,$processId,$started))
+      if($record.focusReceipt.Count -eq 8){$record.focusSentEvents=$record.focusReceipt[6]}
+      if($record.focusReceipt.Count -ne 8 -or @($record.focusReceipt|Where-Object{$_ -isnot [int]}).Count -ne 0 -or
+        $record.focusReceipt[6] -ne 2 -or $record.focusReceipt[7] -ne 2 -or
+        $record.focusReceipt[4] -ne $point[0] -or $record.focusReceipt[5] -ne $point[1]){
+        throw "MULTIPROJECT_EDIT_COUNTS: single focus mouse insertion receipt incomplete"
+      }
+      $null=Get-MultiProjectEditRemaining $api $started
+      $focus=$api.FocusHandle($modal)
+      while($focus -isnot [IntPtr] -or $focus -ne $edit -or $api.ProcessId($focus) -ne $processId){
+        $focusObservations.Add([ordered]@{handle=if($focus -is [IntPtr]){$focus.ToInt64()}else{$null};ownedEditFocused=$false
+          elapsed=[long]$api.Clock()-$started})
+        $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field
+        $api.Observe((Get-MultiProjectEditRemaining $api $started))
+        $focus=$api.FocusHandle($modal)
+      }
+      $record.focusObservedHandle=$focus.ToInt64()
+      $focusObservations.Add([ordered]@{handle=$focus.ToInt64();pid=$api.ProcessId($focus);ownedEditFocused=$true
+        elapsed=[long]$api.Clock()-$started})
+    }
+    $record.focusObservations=$focusObservations.ToArray()
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+    $focused=$api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started))
+    if($focused -isnot [string] -or $focused -cne $expectedPrefill){throw "MULTIPROJECT_EDIT_PREFILL: nonempty prefill changed while focusing"}
+    $api.SelectAll($edit,(Get-MultiProjectEditRemaining $api $started))
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+    $selection=@($api.Selection($edit,(Get-MultiProjectEditRemaining $api $started)))
+    $record.selectedSpan=$selection
+    if($selection.Count -ne 2 -or $selection[0] -isnot [int] -or $selection[1] -isnot [int] -or
+      $selection[0] -ne 0 -or $selection[1] -ne $expectedPrefill.Length){
+      throw "MULTIPROJECT_EDIT_SELECTION: actual select-all span not0..knownUTF16length"
+    }
+    $selectedBuffer=$api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started))
+    if($selectedBuffer -isnot [string] -or $selectedBuffer -cne $expectedPrefill){throw "MULTIPROJECT_EDIT_PREFILL: selected nonempty source buffer changed"}
+    & $phaseWriter ("UIA_MULTIPROJECT_EDIT_PHASE="+($record|ConvertTo-Json -Depth 6 -Compress)) | Out-Null
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+    $null=Get-MultiProjectEditRemaining $api $started
+    $record.phase="clear";$record.clearBatches++
+    $record.clear=@($api.Delete())
+    if($record.clear.Count -ne 2 -or $record.clear[0] -isnot [int] -or $record.clear[1] -isnot [int] -or
+      $record.clear[0] -ne 2 -or $record.clear[1] -ne 2){throw "MULTIPROJECT_EDIT_COUNTS: clear insertion receipt not2/2"}
+    $observations=[Collections.Generic.List[object]]::new();$emptyStreak=0
+    while($emptyStreak -lt 3){
+      $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+      $buffer=$api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started))
+      $span=@($api.Selection($edit,(Get-MultiProjectEditRemaining $api $started)))
+      $empty=$buffer -is [string] -and $buffer -ceq "" -and $span.Count -eq 2 -and
+        $span[0] -is [int] -and $span[1] -is [int] -and $span[0] -eq 0 -and $span[1] -eq 0
+      $observations.Add([ordered]@{phase="clear";buffer=$buffer;selection=$span;exactEmpty=$empty;elapsed=[long]$api.Clock()-$started})
+      if($empty){$emptyStreak++}else{$emptyStreak=0}
+      if($emptyStreak -lt 3){$api.Observe((Get-MultiProjectEditRemaining $api $started))}
+    }
+    $record.observableNonemptyToEmpty=$true
+    $record.observations=$observations.ToArray()
+    & $phaseWriter ("UIA_MULTIPROJECT_EDIT_PHASE="+($record|ConvertTo-Json -Depth 6 -Compress)) | Out-Null
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+    $beforeType=$api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started))
+    $span=@($api.Selection($edit,(Get-MultiProjectEditRemaining $api $started)))
+    if($beforeType -isnot [string] -or $beforeType -cne "" -or $span.Count -ne 2 -or
+      $span[0] -isnot [int] -or $span[1] -isnot [int] -or $span[0] -ne 0 -or $span[1] -ne 0){
+      throw "MULTIPROJECT_EDIT_CLEAR: completed empty transition rebound before Unicode"
+    }
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+    $null=Get-MultiProjectEditRemaining $api $started
+    $record.phase="unicode";$record.unicodeBatches++
+    $record.typed=@($api.Unicode($text))
+    if($record.typed.Count -ne 2 -or $record.typed[0] -isnot [int] -or $record.typed[1] -isnot [int] -or
+      $record.typed[0] -ne 2*$text.Length -or $record.typed[1] -ne 2*$text.Length){
+      throw "MULTIPROJECT_EDIT_COUNTS: single Unicode insertion receipt incomplete"
+    }
+    $finalStreak=0
+    while($finalStreak -lt 3){
+      $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+      $actual=$api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started))
+      $exact=$actual -is [string] -and $actual -ceq $text
+      $observations.Add([ordered]@{phase="final";buffer=$actual;exactExpected=$exact;elapsed=[long]$api.Clock()-$started})
+      if($exact){$finalStreak++}else{$finalStreak=0}
+      if($finalStreak -lt 3){$api.Observe((Get-MultiProjectEditRemaining $api $started))}
+    }
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+    $record.phase="complete";$record.observations=$observations.ToArray();$record.elapsedMilliseconds=[long]$api.Clock()-$started
+    & $phaseWriter ("UIA_MULTIPROJECT_EDIT_PHASE="+($record|ConvertTo-Json -Depth 6 -Compress)) | Out-Null
+    & $phaseWriter "UIA_EDGE_TEXT_STABLE id=9904 attempt=1 before='$initial' after='$actual' expected='$text' modal=True foreground=True stable=True inputAttempted=True inputCountsFull=True clearSent=$($record.clear[0])/$($record.clear[1]) textSent=$($record.typed[0])/$($record.typed[1]) control=0x$('{0:x}' -f $edit.ToInt64())" | Out-Null
+    return $actual
+  }catch{
+    $primary=$_
+    try{
+      $record.failure=Get-MultiProjectRetentionError $primary "sequenced-edit"
+      $record.elapsedMilliseconds=[long]$api.Clock()-$started
+      & $phaseWriter ("UIA_MULTIPROJECT_EDIT_REFUSAL="+($record|ConvertTo-Json -Depth 6 -Compress)) | Out-Null
+    }
+    catch{$primary.Exception.Data["MultiProjectEditDiagnostic"]=Get-MultiProjectRetentionError $_ "sequenced-edit-refusal"}
+    throw
+  }
+}
+
 function New-MultiProjectRenameNativeApi {
   if (-not ("GraphCodeMultiProjectRenameNative" -as [type])) {
     Add-Type -TypeDefinition @'
@@ -3791,7 +4088,9 @@ function Invoke-MultiProjectRenamePhase {
     $prefill = Sketch-Field 9904 "rename prefill"
     Require ($prefill -ceq $owner.title) "multi-project Rename prefill belongs to a different loop/title"
     $inputEvidence = [Collections.Generic.List[string]]::new()
-    $null = Invoke-MultiProjectTypeText 9904 $typedTitle $inputEvidence
+    $null = Invoke-MultiProjectTypeText 9904 $typedTitle $inputEvidence -typeSource {
+      param($id,$text) Invoke-MultiProjectSequencedEdit $modal $multiProcess.Id $prefill $text
+    }
     $fullInput = @($inputEvidence | Where-Object {
       $_ -match 'inputAttempted=True' -and $_ -match 'inputCountsFull=True' -and
       $_ -match ("textSent=" + (2 * $typedTitle.Length) + "/" + (2 * $typedTitle.Length) + "(?: |$)")

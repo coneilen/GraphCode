@@ -42,18 +42,19 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     . ([scriptblock]::Create($decision.Extent.Text))
     $caller=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq "Invoke-MultiProjectNativeRename"},$true)
     $call=$caller.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and
-      $n.Extent.Text -ceq '$null = Invoke-MultiProjectTypeText 9904 $typedTitle $inputEvidence'},$true)
+      $n.Extent.Text.StartsWith('$null = Invoke-MultiProjectTypeText 9904 $typedTitle $inputEvidence -typeSource')},$true)
     Assert-MultiCase ($null -ne $call) "actual new streaming caller binding missing"
-    function Edge-TypeText {
-      param($id,$text)
+    function Invoke-MultiProjectSequencedEdit {
+      param($modal,$pidValue,$prefill,$text)
       $script:actualStreamCalls++
       for($i=1;$i -le 5;$i++){
-        Write-Host "UIA_EDGE_TEXT_STABLE id=$id attempt=$i after='' expected='$text' inputAttempted=False textSent=0/0"
+        Write-Host "UIA_EDGE_TEXT_STABLE id=9904 attempt=$i after='' expected='$text' inputAttempted=False textSent=0/0"
         $null=Get-EdgeTextAttemptDecision $true "" $text $i 5
       }
     }
     $script:actualStreamCalls=0; $script:actualStreamPrimary=$null
-    $typedTitle="   "; $inputEvidence=[Collections.Generic.List[string]]::new()
+    $typedTitle="   "; $modal=[IntPtr]42;$multiProcess=[pscustomobject]@{Id=4242};$prefill="Alpha renamed"
+    $inputEvidence=[Collections.Generic.List[string]]::new()
     $records=@(& { try { . ([scriptblock]::Create($call.Extent.Text)) } catch { $script:actualStreamPrimary=$_ } } 6>&1)
     $retained=@($records | Where-Object {$_ -is [Management.Automation.InformationRecord] -and
       ([string]$_.MessageData).StartsWith("UIA_EDGE_TEXT_STABLE ",[StringComparison]::Ordinal)})
@@ -452,6 +453,217 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     }
     $api | Add-Member ScriptMethod Click $productionRenameClick
     return $api
+  }
+  $productionFocusMouse=(New-MultiProjectEditNativeApi).PSObject.Methods["FocusMouse"].Script
+  function New-MultiSequencedEditMock {
+    $api=New-MultiRenameNativeMock
+    $api | Add-Member NoteProperty Now ([long]0)
+    $api | Add-Member NoteProperty PhaseState @{buffer="Alpha renamed";selection=@(0,0);focus=[IntPtr]::Zero
+      clearCalls=0;unicodeCalls=0;deleteProcessed=$false;clearPending=$false;observes=0;deleteDelay=3
+      focusClicks=0;focusPending=$false;focusObserves=0;focusDelay=1;focusSent=2;neverFocus=$false
+      neverClear=$false;finalWrong=$false;clearSent=2;unicodeShort=$false;prefillReads=0;emptyReads=0;rebound=$false}
+    $api.state.hitChild=[IntPtr]9904
+    $api | Add-Member NoteProperty PhaseOrder ([Collections.Generic.List[string]]::new())
+    $api | Add-Member ScriptMethod Clock {return $this.Now}
+    $api | Add-Member ScriptMethod FocusInsertion {
+      param($modal,$point)
+      $this.PhaseOrder.Add("focus-insert");$this.PhaseState.focusClicks++;$this.PhaseState.focusPending=$true
+      return ,@($point[0],$point[1],($point[0]+1),($point[1]+1),$point[0],$point[1],$this.PhaseState.focusSent,2)
+    }
+    $api | Add-Member ScriptMethod FocusMouse $productionFocusMouse
+    $api | Add-Member ScriptMethod FocusHandle {param($modal) return $this.PhaseState.focus}
+    $api | Add-Member ScriptMethod EditBuffer {
+      param($edit,$remaining)
+      $this.PhaseState.prefillReads++
+      if($this.PhaseState.buffer -ceq ""){
+        $this.PhaseState.emptyReads++
+        if($this.PhaseState.rebound -and $this.PhaseState.emptyReads -eq 4){$this.PhaseState.buffer="Rebound"}
+      }
+      return $this.PhaseState.buffer
+    }
+    $api | Add-Member ScriptMethod Selection {param($edit,$remaining) return ,$this.PhaseState.selection}
+    $api | Add-Member ScriptMethod SelectAll {
+      param($edit,$remaining)
+      $this.PhaseOrder.Add("select")
+      $this.PhaseState.selection=if($this.PhaseState.ContainsKey("badSelection")){$this.PhaseState.badSelection}else{@(0,$this.PhaseState.buffer.Length)}
+    }
+    $api | Add-Member ScriptMethod Delete {
+      $this.PhaseOrder.Add("clear-enqueue");$this.PhaseState.clearCalls++;$this.PhaseState.clearPending=$true
+      return ,@($this.PhaseState.clearSent,2)
+    }
+    $api | Add-Member ScriptMethod Unicode {
+      param($text)
+      if(-not $this.PhaseState.deleteProcessed -or $this.PhaseState.clearPending -or $this.PhaseState.buffer -cne "" -or
+        $this.PhaseState.clearCalls -ne 1){throw "Unicode before actual inert Delete transition"}
+      $this.PhaseOrder.Add("unicode-enqueue");$this.PhaseState.unicodeCalls++
+      $this.PhaseState.buffer=if($this.PhaseState.finalWrong){"lpha renamed"}else{$text}
+      if($this.PhaseState.ContainsKey("unicodeDrift")){& $this.PhaseState.unicodeDrift $this}
+      $count=2*$text.Length
+      $sent=if($this.PhaseState.unicodeShort){$count-1}else{$count}
+      return ,@($sent,$count)
+    }
+    $api | Add-Member ScriptMethod Observe {
+      param($remaining)
+      $this.Now+=[Math]::Min(25,$remaining);$this.PhaseState.observes++
+      if($this.PhaseState.focusPending){
+        $this.PhaseState.focusObserves++
+        if(-not $this.PhaseState.neverFocus -and $this.PhaseState.focusObserves -ge $this.PhaseState.focusDelay){
+          $this.PhaseState.focus=[IntPtr]9904;$this.PhaseState.focusPending=$false;$this.PhaseOrder.Add("focus-observed")
+        }
+      }
+      if($this.PhaseState.clearPending -and -not $this.PhaseState.neverClear -and
+        $this.PhaseState.observes -ge $this.PhaseState.deleteDelay){
+        $this.PhaseState.buffer="";$this.PhaseState.selection=@(0,0);$this.PhaseState.clearPending=$false
+        $this.PhaseState.deleteProcessed=$true;$this.PhaseOrder.Add("clear-processed")
+        if($this.PhaseState.ContainsKey("clearDrift")){& $this.PhaseState.clearDrift $this}
+      }
+    }
+    return $api
+  }
+  foreach($expected in @("   ","Alpha renamed","  Alpha renamed  ")){
+    Invoke-MultiCase ("single sequenced entry exact target " + $expected.Length + ":" + $expected.Trim()) {
+      $api=New-MultiSequencedEditMock
+      $evidence=[Collections.Generic.List[string]]::new();$script:sequencedSourceCalls=0
+      $null=Invoke-MultiProjectTypeText 9904 $expected $evidence -typeSource {
+        param($id,$text)
+        $script:sequencedSourceCalls++
+        Invoke-MultiProjectSequencedEdit ([IntPtr]42) 4242 "Alpha renamed" $text -nativeApi $api
+      }
+      Assert-MultiCase ($script:sequencedSourceCalls -eq 1 -and $api.PhaseState.clearCalls -eq 1 -and $api.PhaseState.unicodeCalls -eq 1 -and
+        ($api.PhaseOrder -join "|") -ceq "focus-insert|focus-observed|select|clear-enqueue|clear-processed|unicode-enqueue" -and
+        $api.PhaseState.focusClicks -eq 1 -and
+        $api.PhaseState.buffer -ceq $expected -and $api.Now -lt 5000 -and $evidence.Count -eq 1 -and
+        $evidence[0].Contains("clearSent=2/2") -and $evidence[0].Contains("textSent=$([int](2*$expected.Length))/$([int](2*$expected.Length))")) `
+        "actual production phases sent extra batches/Unicode before observed transition/lost exact target"
+      return [ordered]@{sourceCalls=1;clearBatches=1;unicodeBatches=1;inertQueueOrder=$api.PhaseOrder.ToArray();observations=$api.PhaseState.observes
+        nativeCalls=0;actualHistoricalALossReproduced=$false}
+    }
+  }
+  Invoke-MultiCase "already owned GUI edit focus uses zero focus input" {
+    $api=New-MultiSequencedEditMock;$api.PhaseState.focus=[IntPtr]9904
+    $null=Invoke-MultiProjectSequencedEdit ([IntPtr]42) 4242 "Alpha renamed" "Alpha renamed" -nativeApi $api
+    Assert-MultiCase ($api.PhaseState.focusClicks -eq 0 -and $api.PhaseState.clearCalls -eq 1 -and $api.PhaseState.unicodeCalls -eq 1 -and
+      ($api.PhaseOrder -join "|") -ceq "select|clear-enqueue|clear-processed|unicode-enqueue") "alreadyFocused route inserted mouse"
+    return "Actual observed focused EDIT avoids focus mouse; one clear/Unicode"
+  }
+  foreach($mutation in @("focus-short","focus-occluded","focus-foreign-hit","focus-outside","focus-timeout",
+      "focus-post-owner","focus-switched","before-mouse-deadline","last-selection-deadline","last-selection-owner")){
+    Invoke-MultiCase ("bounded focus and pre-input phase rejects " + $mutation) -Negative {
+      $api=New-MultiSequencedEditMock
+      switch($mutation){
+        "focus-short"{$api.PhaseState.focusSent=1}
+        "focus-occluded"{$api.state.hitChild=[IntPtr]9800}
+        "focus-foreign-hit"{$api.state.hitPID=7777}
+        "focus-outside"{$api.state.controls["9904"].bounds=@(700,700,900,724)}
+        "focus-timeout"{$api.PhaseState.neverFocus=$true}
+        "focus-post-owner"{
+          $api|Add-Member ScriptMethod FocusInsertion {param($modal,$point)
+            $this.PhaseState.focusClicks++;$this.state.controls["9904"].processId=7777
+            return ,@($point[0],$point[1],($point[0]+1),($point[1]+1),$point[0],$point[1],2,2)} -Force
+        }
+        "focus-switched"{$api.PhaseState.clearDrift={param($a)$a.PhaseState.focus=[IntPtr]9800}}
+        "before-mouse-deadline"{
+          $api|Add-Member ScriptMethod Hit {param($modal,$x,$y)$this.Now=5000;return @{root=[IntPtr]42;child=[IntPtr]9904;processId=4242}} -Force
+        }
+        "last-selection-deadline"{
+          $api|Add-Member ScriptMethod Selection {param($edit,$remaining)
+            if($this.PhaseState.emptyReads -ge 4){$this.Now=5000};return ,$this.PhaseState.selection} -Force
+        }
+        "last-selection-owner"{
+          $api|Add-Member ScriptMethod Selection {param($edit,$remaining)
+            if($this.PhaseState.emptyReads -ge 4){$this.state.controls["9904"].processId=7777};return ,$this.PhaseState.selection} -Force
+        }
+      }
+      $caught=$null;try{Invoke-MultiProjectSequencedEdit ([IntPtr]42) 4242 "Alpha renamed" "Alpha renamed" -nativeApi $api|Out-Null}catch{$caught=$_}
+      Assert-MultiCase ($null -ne $caught -and $api.PhaseState.focusClicks -le 1 -and $api.PhaseState.clearCalls -le 1 -and
+        $api.PhaseState.unicodeCalls -eq 0) "focus/deadline/selection failure added/replayed input"
+      if($mutation -ceq "before-mouse-deadline"){Assert-MultiCase ($api.PhaseState.focusClicks -eq 0) "deadlineBeforeMouse allowed focus insertion"}
+      return [ordered]@{failure=$caught.Exception.Message;focusClicks=$api.PhaseState.focusClicks;clear=$api.PhaseState.clearCalls;unicode=0;elapsed=$api.Now}
+    }
+  }
+  foreach($mutation in @("both-foreign","both-zero","both-type","id-wrong","title-wrong","foreground-false","hit-wrong","title-deadline")){
+    Invoke-MultiCase ("actual production FocusMouse refuses late " + $mutation) -Negative {
+      $api=New-MultiSequencedEditMock
+      switch($mutation){
+        "both-foreign"{$api.state.modalPID=7777;$api.state.controls["9904"].processId=7777}
+        "both-zero"{$api.state.modalPID=0;$api.state.controls["9904"].processId=0}
+        "both-type"{$api.state.modalPID="4242";$api.state.controls["9904"].processId="4242"}
+        "id-wrong"{$api.state.controls["9904"].id=9800}
+        "title-wrong"{$api.state.title="Different dialog"}
+        "foreground-false"{$api.state.foreground=$false}
+        "hit-wrong"{$api.state.hitChild=[IntPtr]9800}
+        "title-deadline"{$api|Add-Member ScriptMethod Title {param($modal,$remaining)$this.order.Add("TITLE:$modal");$this.Now=5000;return "Rename Loop"} -Force}
+      }
+      $caught=$null;try{$api.FocusMouse([IntPtr]42,[IntPtr]9904,@(100,110),4242,[long]0)|Out-Null}catch{$caught=$_}
+      Assert-MultiCase ($null -ne $caught -and $api.PhaseState.focusClicks -eq 0) "actual production focus primitive adopted PID or latebudget"
+      if($mutation -cin @("both-foreign","both-zero","both-type")){
+        Assert-MultiCase (-not($api.order -contains "TITLE:42")) "foreign modal title read before expectedPID guard"
+      }
+      return "Actual FocusMouse ScriptMethod + PS primitive transport rejects with focusInsertion0"
+    }
+  }
+  foreach($mutation in @("empty-initial","mismatch-prefill","selection-short","selection-offset","selection-type","never-clear","empty-rebound",
+      "clear-short","unicode-short","final-wrong","focus-deadline","initial-foreign","initial-control","initial-hidden","initial-disabled",
+      "initial-foreground","clear-foreign","clear-focus","preunicode-control","final-owner","final-focus","selection-nonzero-empty")){
+    Invoke-MultiCase ("single sequenced edit rejects " + $mutation) -Negative {
+      $api=New-MultiSequencedEditMock
+      switch($mutation){
+        "empty-initial" {$api.PhaseState.buffer="";$api.PhaseState.clearPending=$true}
+        "mismatch-prefill" {$api.PhaseState.buffer="Other title"}
+        "selection-short" {$api.PhaseState.badSelection=@(0,12)}
+        "selection-offset" {$api.PhaseState.badSelection=@(1,13)}
+        "selection-type" {$api.PhaseState.badSelection=@("0",13)}
+        "never-clear" {$api.PhaseState.neverClear=$true}
+        "empty-rebound" {$api.PhaseState.rebound=$true}
+        "clear-short" {$api.PhaseState.clearSent=1}
+        "unicode-short" {$api.PhaseState.unicodeShort=$true}
+        "final-wrong" {$api.PhaseState.finalWrong=$true}
+        "focus-deadline" {$api.PhaseState.neverFocus=$true}
+        "initial-foreign" {$api.state.controls["9904"].processId=7777}
+        "initial-control" {$api.state.controls["9904"].id=9105}
+        "initial-hidden" {$api.state.controls["9904"].visible=$false}
+        "initial-disabled" {$api.state.controls["9904"].enabled=$false}
+        "initial-foreground" {$api.state.foreground=$false}
+        "clear-foreign" {$api.PhaseState.clearDrift={param($a)$a.state.controls["9904"].processId=7777}}
+        "clear-focus" {$api.PhaseState.clearDrift={param($a)$a.PhaseState.focus=[IntPtr]9800}}
+        "preunicode-control" {$api.PhaseState.clearDrift={param($a)$a.state.controls["9904"].id=9105}}
+        "final-owner" {$api.PhaseState.unicodeDrift={param($a)$a.state.controls["9904"].root=[IntPtr]99}}
+        "final-focus" {$api.PhaseState.unicodeDrift={param($a)$a.PhaseState.focus=[IntPtr]9800}}
+        "selection-nonzero-empty" {$api.PhaseState.clearDrift={param($a)$a.PhaseState.selection=@(1,1)}}
+      }
+      $caught=$null
+      try{Invoke-MultiProjectSequencedEdit ([IntPtr]42) 4242 "Alpha renamed" "Alpha renamed" -nativeApi $api|Out-Null}catch{$caught=$_}
+      Assert-MultiCase ($null -ne $caught -and $caught.Exception.Message.StartsWith("MULTIPROJECT_EDIT_",[StringComparison]::Ordinal) -and
+        $api.PhaseState.clearCalls -le 1 -and $api.PhaseState.unicodeCalls -le 1) "guard failed without exact refusal or added input batch"
+      $expectedUnicode=if($mutation -cin @("unicode-short","final-wrong","final-owner","final-focus")){1}else{0}
+      Assert-MultiCase ($api.PhaseState.unicodeCalls -eq $expectedUnicode) "refused clear/ownership/prefill allowed Unicode"
+      if($mutation -ceq "empty-initial"){Assert-MultiCase ($api.PhaseState.clearCalls -eq 0 -and $api.PhaseState.observes -eq 0) "initialEMPTYbecame false transition ack"}
+      return [ordered]@{refusal=$caught.Exception.Message;clear=$api.PhaseState.clearCalls;unicode=$api.PhaseState.unicodeCalls;elapsed=$api.Now
+        noNativeOSCalls=$true;inertQueueOnly=$true}
+    }
+  }
+  Invoke-MultiCase "new sequenced native declaration compile only" {
+    $api=New-MultiProjectEditNativeApi
+    Assert-MultiCase ($null -ne ("GraphCodeMultiProjectEditNative" -as [type]) -and $null -ne $api.PSObject.Methods["Selection"]) "new production interop declaration failed"
+    return "Declaration compilation only, no PInvoke/window/input/native focus invocation"
+  }
+  Invoke-MultiCase "sequenced entry rejects unknown empty expected prefill before any input" -Negative {
+    $api=New-MultiSequencedEditMock;$caught=$null
+    try{Invoke-MultiProjectSequencedEdit ([IntPtr]42) 4242 "" "   " -nativeApi $api|Out-Null}catch{$caught=$_}
+    Assert-MultiCase ($null -ne $caught -and $api.PhaseState.focusClicks -eq 0 -and $api.PhaseState.clearCalls -eq 0 -and
+      $api.PhaseState.unicodeCalls -eq 0) "empty expected prefill admitted an invented transition"
+    return "No source-known nonempty prefill, no focus/clear/type"
+  }
+  Invoke-MultiCase "sequenced refusal diagnostic failure preserves exact primary" -Negative {
+    $api=New-MultiSequencedEditMock;$api.PhaseState.buffer=""
+    $caught=$null;try{Invoke-MultiProjectSequencedEdit ([IntPtr]42) 4242 "Alpha renamed" "   " -nativeApi $api -phaseSink {
+      param($message) throw [IO.IOException]::new("phase refusal writer failed")
+    }|Out-Null}catch{$caught=$_}
+    $secondary=$caught.Exception.Data["MultiProjectEditDiagnostic"]
+    Assert-MultiCase ($caught.Exception.Message -ceq "MULTIPROJECT_EDIT_PREFILL: fresh buffer differs from known nonempty prefill" -and
+      $secondary.errorType -ceq "System.IO.IOException" -and $secondary.operation -ceq "sequenced-edit-refusal" -and
+      $api.PhaseState.focusClicks -eq 0 -and $api.PhaseState.unicodeCalls -eq 0) "refusal writer replaced primary or sent input"
+    return "Original prefill guard retained with typed secondary diagnostic failure"
   }
   $renameText = "  Alpha renamed  "
   $renameProof = @("UIA_EDGE_TEXT_STABLE id=9904 inputAttempted=True inputCountsFull=True clearSent=2/2 textSent=34/34")
