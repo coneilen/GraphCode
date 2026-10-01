@@ -16,6 +16,23 @@ Statuses:
 - `Divergent`: Windows exposes a different product concept in the place where the macOS
   surface belongs; it must be separated or redesigned before parity.
 
+## Preview delivery lanes
+
+The [Windows preview-readiness plan](windows-preview-release-plan.md) separates
+release-critical functional bugs/core qualification, optional functionality,
+polish, and evidence gaps. It maps every current Partial surface to a delivery
+lane and alpha disposition without changing this ledger's macOS-equivalence
+rule, row names, statuses, or existing evidence. A scoped tester preview need
+not wait for full parity, but unreadable terminals, lost input, unreachable
+controls and unsafe mutations are not cosmetic work.
+
+Mixed surfaces are split in the plan's notes: clipboard, IME, DPI, accessibility
+and font quality have functional as well as refinement residuals. Missing
+runtime evidence is a qualification gap, not automatically a product bug.
+Track observable app bugs fixed and core behaviors qualified alongside whole-row
+parity closures; PR/test counts and a flat Partial count cannot substitute for
+either outcome. Only the existing parity criteria can promote a row here.
+
 ## Application shell and navigation
 
 | macOS surface | Required visible behavior | Windows evidence | Status |
