@@ -15,10 +15,275 @@ param(
   # publish the result as a new graphChanged event, so a caller can observe what
   # a daemon that accepted the command would send back.
   [switch] $ApplyGraphCommands,
-  [switch] $SeedSketches
+  [switch] $SeedSketches,
+  [switch] $SeedMultiProjects,
+  [string] $ProjectAPath = "",
+  [string] $ProjectBPath = "",
+  [string] $PublicationControlPath = ""
 )
 
 $ErrorActionPreference = "Stop"
+function Copy-MultiProjectValue($value) {
+  return ,(ConvertTo-Json -InputObject $value -Depth 32 -Compress |
+    ConvertFrom-Json -AsHashtable -NoEnumerate)
+}
+
+function ConvertTo-MultiProjectCanonicalJson($value) {
+  if ($null -eq $value) { return "null" }
+  if ($value -is [Collections.IDictionary]) {
+    $keys = [string[]]@($value.Keys)
+    [Array]::Sort($keys, [StringComparer]::Ordinal)
+    $fields = foreach ($key in $keys) {
+      (ConvertTo-Json -InputObject $key -Compress) + ":" + (ConvertTo-MultiProjectCanonicalJson $value[$key])
+    }
+    return "{" + ($fields -join ",") + "}"
+  }
+  if ($value -is [array]) {
+    $items = foreach ($item in $value) { ConvertTo-MultiProjectCanonicalJson $item }
+    return "[" + ($items -join ",") + "]"
+  }
+  return ConvertTo-Json -InputObject $value -Compress
+}
+
+function Assert-MultiProjectObject($value, [string[]] $keys, [string] $label) {
+  if ($value -isnot [Collections.IDictionary] -or $value.Count -ne $keys.Count) {
+    throw "MULTIPROJECT_SCHEMA: $label has the wrong object shape"
+  }
+  foreach ($key in $value.Keys) {
+    if ($keys -cnotcontains $key) { throw "MULTIPROJECT_SCHEMA: $label unexpected field $key" }
+  }
+}
+
+function Assert-MultiProjectUuid($value, [string] $label) {
+  if ($value -isnot [string]) { throw "MULTIPROJECT_TYPE: $label must be a string" }
+  if ($value -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') {
+    throw "MULTIPROJECT_UUID: $label must be a lowercase version-4 UUID"
+  }
+}
+
+function Assert-MultiProjectJsonProperties([System.Text.Json.JsonElement] $element) {
+  if ($element.ValueKind -eq [System.Text.Json.JsonValueKind]::Object) {
+    $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($property in $element.EnumerateObject()) {
+      if (-not $names.Add($property.Name)) { throw "MULTIPROJECT_JSON: duplicate field $($property.Name)" }
+      Assert-MultiProjectJsonProperties $property.Value
+    }
+  } elseif ($element.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+    foreach ($item in $element.EnumerateArray()) { Assert-MultiProjectJsonProperties $item }
+  }
+}
+
+function ConvertFrom-MultiProjectJson([string] $json) {
+  $document = $null
+  try {
+    try { $document = [System.Text.Json.JsonDocument]::Parse($json) }
+    catch [System.Text.Json.JsonException] { throw "MULTIPROJECT_JSON: malformed JSON" }
+    if ($document.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
+      throw "MULTIPROJECT_JSON: root must be an object"
+    }
+    Assert-MultiProjectJsonProperties $document.RootElement
+    return ConvertFrom-Json -InputObject $json -AsHashtable -Depth 32
+  } finally {
+    if ($null -ne $document) { $document.Dispose() }
+  }
+}
+
+function New-MultiProjectPeer([string] $alphaPath, [string] $betaPath) {
+  foreach ($path in @($alphaPath, $betaPath)) {
+    if (-not [IO.Path]::IsPathFullyQualified($path) -or [IO.Path]::GetFullPath($path) -cne $path -or
+        -not [IO.Directory]::Exists($path) -or (Test-Path -LiteralPath (Join-Path $path ".git"))) {
+      throw "MULTIPROJECT_FIXTURE: require exact existing ordinary-folder paths"
+    }
+  }
+  if ([string]::Equals($alphaPath, $betaPath, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "MULTIPROJECT_FIXTURE: owners must be different folders"
+  }
+  $graphs = @(
+    [ordered]@{
+      id = "aaaaaaaa-1111-4111-8111-111111111111"
+      project = [ordered]@{ path = $alphaPath; name = "Alpha"; remote = $false }
+      nodes = @([ordered]@{ id = "11111111-1111-4111-8111-111111111111"; title = "Alpha loop"
+        loopType = "turnBased"; state = "idle"; activity = "stub"
+        presence = [ordered]@{ presence = "idle"; confidence = "reported" } })
+      edges = @()
+    },
+    [ordered]@{
+      id = "bbbbbbbb-2222-4222-8222-222222222222"
+      project = [ordered]@{ path = $betaPath; name = "Beta"; remote = $false }
+      nodes = @([ordered]@{ id = "22222222-2222-4222-8222-222222222222"; title = "Beta loop"
+        loopType = "turnBased"; state = "idle"; activity = "stub"
+        presence = [ordered]@{ presence = "idle"; confidence = "reported" } })
+      edges = @()
+    }
+  )
+  return [ordered]@{
+    graphs = $graphs; sequence = 0
+    received = [Collections.Generic.List[object]]::new()
+    applied = [Collections.Generic.List[object]]::new()
+    answered = [Collections.Generic.List[object]]::new()
+    publications = [Collections.Generic.List[object]]::new()
+    controls = [Collections.Generic.List[object]]::new()
+  }
+}
+
+function Find-MultiProjectGraph($peer, $path, $nodeId = $null) {
+  if ($path -isnot [string]) { throw "MULTIPROJECT_TYPE: projectPath must be a string" }
+  $matches = @($peer.graphs | Where-Object { $_.project.path -ceq $path })
+  if ($matches.Count -ne 1 -or ($null -ne $nodeId -and $matches[0].nodes[0].id -cne $nodeId)) {
+    throw "MULTIPROJECT_OWNER: wrong exact project/node owner"
+  }
+  return $matches[0]
+}
+
+function Invoke-MultiProjectRequest($peer, $frame) {
+  Assert-MultiProjectObject $frame @("version", "kind", "requestID", "command") "request"
+  if (($frame.version -isnot [int] -and $frame.version -isnot [long]) -or $frame.kind -isnot [string]) {
+    throw "MULTIPROJECT_TYPE: version/kind types differ"
+  }
+  if ($frame.version -ne 2 -or $frame.kind -cne "request") { throw "MULTIPROJECT_SCHEMA: expected v2 request" }
+  Assert-MultiProjectUuid $frame.requestID "requestID"
+  if (@($peer.received | Where-Object { $_.requestID -ceq $frame.requestID }).Count -ne 0) {
+    throw "MULTIPROJECT_DUPLICATE: requestID already received"
+  }
+  if ($frame.command -isnot [Collections.IDictionary] -or $frame.command.Count -ne 1) {
+    throw "MULTIPROJECT_SCHEMA: expected one command"
+  }
+  $verb = @($frame.command.Keys)[0]
+  $response = $null
+  $owner = $null
+  $rename = $null
+  if ($verb -ceq "graphCommand") {
+    $command = $frame.command.graphCommand
+    Assert-MultiProjectObject $command @("projectPath", "command") "graphCommand"
+    Assert-MultiProjectObject $command.command @("renameNode") "graphCommand.command"
+    $rename = $command.command.renameNode
+    Assert-MultiProjectObject $rename @("_0", "title") "renameNode"
+    Assert-MultiProjectUuid $rename._0 "nodeID"
+    if ($rename.title -isnot [string]) { throw "MULTIPROJECT_TYPE: title must be a string" }
+    if ([string]::IsNullOrWhiteSpace($rename.title)) { throw "MULTIPROJECT_TITLE: title cannot be blank" }
+    $owner = Find-MultiProjectGraph $peer $command.projectPath $rename._0
+    $response = [ordered]@{ version = 2; kind = "response"; requestID = $frame.requestID; success = $true }
+  } elseif ($verb -ceq "listRecentProjects") {
+    Assert-MultiProjectObject $frame.command.listRecentProjects @() "listRecentProjects"
+    $response = [ordered]@{ version = 2; kind = "response"; requestID = $frame.requestID
+      event = [ordered]@{ recentProjectsListed = @($peer.graphs | ForEach-Object { Copy-MultiProjectValue $_.project }) } }
+  } elseif ($verb -cin @("listQuickChats", "restoreOpenProjects", "openGlobalGraph")) {
+    Assert-MultiProjectObject $frame.command[$verb] @() $verb
+  } elseif ($verb -ceq "openProject") {
+    Assert-MultiProjectObject $frame.command.openProject @("path") "openProject"
+    $null = Find-MultiProjectGraph $peer $frame.command.openProject.path
+  } else {
+    throw "MULTIPROJECT_SCHEMA: unsupported opt-in command $verb"
+  }
+  $peer.received.Add([ordered]@{ requestID = $frame.requestID; frame = Copy-MultiProjectValue $frame
+    expectedResponse = Copy-MultiProjectValue $response })
+  if ($null -ne $rename) {
+    $peer.applied.Add([ordered]@{ requestID = $frame.requestID; projectPath = $owner.project.path
+      nodeID = $rename._0; beforeTitle = $owner.nodes[0].title; title = $rename.title })
+    $owner.nodes[0].title = $rename.title
+  }
+  return [ordered]@{ response = $response; publishPath = if ($null -ne $owner) { $owner.project.path } else { $null } }
+}
+
+function Complete-MultiProjectResponse($peer, $response) {
+  $keys = if (@($response.Keys) -ccontains "event") { @("version", "kind", "requestID", "event") } else { @("version", "kind", "requestID", "success") }
+  Assert-MultiProjectObject $response $keys "response"
+  if (($response.version -isnot [int] -and $response.version -isnot [long]) -or $response.version -ne 2 -or
+      $response.kind -cne "response" -or ((@($response.Keys) -ccontains "success") -and $response.success -isnot [bool])) {
+    throw "MULTIPROJECT_TYPE: response version/kind/success types differ"
+  }
+  Assert-MultiProjectUuid $response.requestID "response.requestID"
+  $received = @($peer.received | Where-Object { $_.requestID -ceq $response.requestID })
+  if ($received.Count -ne 1) { throw "MULTIPROJECT_CORRELATION: response has no unique request" }
+  if (@($peer.answered | Where-Object { $_.requestID -ceq $response.requestID }).Count -ne 0) {
+    throw "MULTIPROJECT_DUPLICATE: request already answered"
+  }
+  if ($null -ne $received[0].expectedResponse -and
+      (ConvertTo-MultiProjectCanonicalJson $received[0].expectedResponse) -cne
+      (ConvertTo-MultiProjectCanonicalJson $response)) {
+    throw "MULTIPROJECT_CORRELATION: reply differs from expected typed response"
+  }
+  $peer.answered.Add([ordered]@{ requestID = $response.requestID; response = Copy-MultiProjectValue $response })
+}
+
+function New-MultiProjectPublication($peer, [string] $path) {
+  $graph = Find-MultiProjectGraph $peer $path
+  return [ordered]@{ version = 2; kind = "event"; sequence = $peer.sequence + 1
+    event = [ordered]@{ graphChanged = Copy-MultiProjectValue $graph } }
+}
+
+function Complete-MultiProjectPublication($peer, $frame, [string] $cause, [string] $correlationId) {
+  $expected = New-MultiProjectPublication $peer $frame.event.graphChanged.project.path
+  if ((ConvertTo-MultiProjectCanonicalJson $expected) -cne (ConvertTo-MultiProjectCanonicalJson $frame)) {
+    throw "MULTIPROJECT_SEQUENCE: publication differs from exact next graph frame"
+  }
+  if ($cause -cne "control" -and @($peer.answered | Where-Object { $_.requestID -ceq $correlationId }).Count -ne 1) {
+    throw "MULTIPROJECT_UNANSWERED: publication precedes correlated response"
+  }
+  $peer.sequence = $frame.sequence
+  $peer.publications.Add([ordered]@{ cause = $cause; correlationID = $correlationId; frame = Copy-MultiProjectValue $frame })
+}
+
+function Get-MultiProjectPeerSnapshot($peer) {
+  return [ordered]@{
+    receivedCount = $peer.received.Count; requestCount = $peer.received.Count
+    responseCount = $peer.answered.Count; appliedCount = $peer.applied.Count
+    publicationCount = $peer.publications.Count; graphSequence = $peer.sequence
+    received = Copy-MultiProjectValue $peer.received.ToArray()
+    applied = Copy-MultiProjectValue $peer.applied.ToArray()
+    answered = Copy-MultiProjectValue $peer.answered.ToArray()
+    publications = Copy-MultiProjectValue $peer.publications.ToArray()
+    controls = Copy-MultiProjectValue $peer.controls.ToArray()
+    graphs = Copy-MultiProjectValue $peer.graphs
+    unansweredRequests = @($peer.received | Where-Object {
+      $id = $_.requestID
+      @($peer.answered | Where-Object { $_.requestID -ceq $id }).Count -ne 1
+    } | ForEach-Object { $_.requestID })
+  }
+}
+
+function Invoke-MultiProjectPublicationControl($peer, $control) {
+  Assert-MultiProjectObject $control @("token", "projectPath", "nodeID", "title", "selection") "publication control"
+  Assert-MultiProjectUuid $control.token "control.token"
+  Assert-MultiProjectUuid $control.nodeID "control.nodeID"
+  if (@($peer.controls | Where-Object { $_.token -ceq $control.token }).Count -ne 0) {
+    throw "MULTIPROJECT_DUPLICATE: control token already used"
+  }
+  if ($peer.controls.Count -ne 0) { throw "MULTIPROJECT_ONE_SHOT: Alpha control was already applied" }
+  $graph = Find-MultiProjectGraph $peer $control.projectPath $control.nodeID
+  if ($graph.project.path -cne $peer.graphs[0].project.path) { throw "MULTIPROJECT_OWNER: control must target Alpha" }
+  if ($control.title -isnot [string]) { throw "MULTIPROJECT_TYPE: control title must be a string" }
+  if ([string]::IsNullOrWhiteSpace($control.title)) { throw "MULTIPROJECT_TITLE: control title cannot be blank" }
+  Assert-MultiProjectObject $control.selection @("projectPath", "nodeID", "source") "selected Beta"
+  if ($control.selection.projectPath -cne $peer.graphs[1].project.path -or
+      $control.selection.nodeID -cne $peer.graphs[1].nodes[0].id -or
+      $control.selection.source -cnotin @("live-uia", "synthetic-client")) {
+    throw "MULTIPROJECT_SELECTION: expected exact observed Beta identity"
+  }
+  $snapshot = Get-MultiProjectPeerSnapshot $peer
+  if ($snapshot.requestCount -le 0 -or $snapshot.responseCount -ne $snapshot.requestCount -or
+      $snapshot.unansweredRequests.Count -ne 0 -or $snapshot.publicationCount -lt 2) {
+    throw "MULTIPROJECT_UNANSWERED: require positive settled request/publication baseline"
+  }
+  foreach ($owner in $peer.graphs) {
+    if (@($peer.publications | Where-Object { $_.cause -ceq "initial" -and
+        $_.frame.event.graphChanged.project.path -ceq $owner.project.path }).Count -lt 1) {
+      throw "MULTIPROJECT_PREREQUISITE: both owners must be published before interleaving"
+    }
+  }
+  $beforeTitle = $graph.nodes[0].title
+  $graph.nodes[0].title = $control.title
+  $peer.controls.Add([ordered]@{ token = $control.token; projectPath = $control.projectPath
+    nodeID = $control.nodeID; beforeTitle = $beforeTitle; title = $control.title
+    selection = Copy-MultiProjectValue $control.selection })
+  return New-MultiProjectPublication $peer $control.projectPath
+}
+
+$multiProjectPeer = if ($SeedMultiProjects) { New-MultiProjectPeer $ProjectAPath $ProjectBPath } else { $null }
+$multiProjectControlVersion = $null
+if ($SeedMultiProjects -and ($SeedSketches -or $NonReading -or [string]::IsNullOrWhiteSpace($PublicationControlPath))) {
+  throw "MULTIPROJECT_FIXTURE: use a dedicated opt-in peer and publication control path"
+}
 $utf8 = [Text.Encoding]::UTF8
 $seenRequests = [Collections.Generic.HashSet[string]]::new()
 $seenResponses = [Collections.Generic.HashSet[string]]::new()
@@ -83,7 +348,16 @@ function Read-Exact([IO.Stream] $stream, [int] $length) {
   $buffer = [byte[]]::new($length)
   $offset = 0
   while ($offset -lt $length) {
-    $read = $stream.Read($buffer, $offset, $length - $offset)
+    if ($SeedMultiProjects) {
+      $readTask = $stream.ReadAsync($buffer, $offset, $length - $offset)
+      for ($wait = 0; -not $readTask.Wait(50); $wait++) {
+        Invoke-MultiProjectControlPump $stream
+        if ($wait -ge 3600) { throw "MULTIPROJECT_TIMEOUT: idle peer exceeded three minutes" }
+      }
+      $read = $readTask.GetAwaiter().GetResult()
+    } else {
+      $read = $stream.Read($buffer, $offset, $length - $offset)
+    }
     if ($read -le 0) { return $null }
     $offset += $read
   }
@@ -127,6 +401,24 @@ function Send-Frame([IO.Stream] $stream, [string] $json, [switch] $Fragment) {
     $script:errorMessage = $_.Exception.Message
     return $false
   }
+}
+
+function Send-MultiProjectPublication([IO.Stream] $stream, $frame, [string] $cause, [string] $correlationId) {
+  if (-not (Send-Frame $stream ($frame | ConvertTo-Json -Depth 16 -Compress))) {
+    throw "MULTIPROJECT_PUBLICATION: graph frame was not written: $errorMessage"
+  }
+  Complete-MultiProjectPublication $multiProjectPeer $frame $cause $correlationId
+}
+
+function Invoke-MultiProjectControlPump([IO.Stream] $stream) {
+  if (-not (Test-Path -LiteralPath $PublicationControlPath)) { return }
+  $version = (Get-Item -LiteralPath $PublicationControlPath).LastWriteTimeUtc.Ticks
+  if ($version -eq $script:multiProjectControlVersion) { return }
+  $control = ConvertFrom-MultiProjectJson (Get-Content -LiteralPath $PublicationControlPath -Raw)
+  $frame = Invoke-MultiProjectPublicationControl $multiProjectPeer $control
+  Send-MultiProjectPublication $stream $frame "control" $control.token
+  $script:multiProjectControlVersion = $version
+  Write-Result
 }
 
 function Get-StubResultWriteWin32Error([System.Exception] $exception) {
@@ -208,7 +500,12 @@ function Write-Result {
     edges = @($edges)
     graphSequence = $graphSequence
   }
-  $json = $result | ConvertTo-Json -Compress
+  if ($SeedMultiProjects) {
+    $result.multiProjectPeer = Get-MultiProjectPeerSnapshot $multiProjectPeer
+    $json = $result | ConvertTo-Json -Depth 16 -Compress
+  } else {
+    $json = $result | ConvertTo-Json -Compress
+  }
   $null = Write-StubResultFile $ResultPath $json
 }
 
@@ -220,7 +517,7 @@ try {
       [IO.Pipes.PipeDirection]::InOut,
       1,
       [IO.Pipes.PipeTransmissionMode]::Byte,
-      [IO.Pipes.PipeOptions]::None,
+      $(if ($SeedMultiProjects) { [IO.Pipes.PipeOptions]::Asynchronous } else { [IO.Pipes.PipeOptions]::None }),
       $bufferSize,
       $bufferSize
     )
@@ -254,6 +551,9 @@ try {
         if ($frame.kind -ne "request" -or [string]::IsNullOrEmpty($frame.requestID)) {
           break
         }
+        $multiProjectPending = if ($SeedMultiProjects) {
+          Invoke-MultiProjectRequest $multiProjectPeer (ConvertFrom-MultiProjectJson ($utf8.GetString($payload)))
+        } else { $null }
         [void] $seenRequests.Add([string]$frame.requestID)
         $commandName = $frame.command.PSObject.Properties.Name | Select-Object -First 1
         $requestCommands[[string]$frame.requestID] = [string]$commandName
@@ -268,7 +568,7 @@ try {
         $createApplied = $false
         $edgeApplied = $false
         $promotionApplied = $false
-        if ($ApplyGraphCommands -and $commandName -eq "graphCommand") {
+        if ($ApplyGraphCommands -and $commandName -eq "graphCommand" -and -not $SeedMultiProjects) {
           $rename = $frame.command.graphCommand.command.renameNode
           if ($null -ne $rename) {
             $renameTarget = [string]$rename._0
@@ -437,12 +737,27 @@ try {
         } else {
           $success.Replace("{0}", [string]$frame.requestID)
         }
+        if ($SeedMultiProjects -and $null -ne $multiProjectPending.response) {
+          $response = $multiProjectPending.response | ConvertTo-Json -Depth 16 -Compress
+        }
         if ($ResponseDelayMilliseconds -gt 0) {
           Start-Sleep -Milliseconds $ResponseDelayMilliseconds
         }
         if (-not (Send-Frame $server $response)) { break }
+        if ($SeedMultiProjects) {
+          Complete-MultiProjectResponse $multiProjectPeer (ConvertFrom-MultiProjectJson $response)
+          if ($commandName -eq "listRecentProjects" -and -not $graphSentOnConnection) {
+            foreach ($owner in $multiProjectPeer.graphs) {
+              Send-MultiProjectPublication $server (New-MultiProjectPublication $multiProjectPeer $owner.project.path) "initial" $frame.requestID
+            }
+            $graphSent = $true
+            $graphSentOnConnection = $true
+          } elseif ($null -ne $multiProjectPending.publishPath) {
+            Send-MultiProjectPublication $server (New-MultiProjectPublication $multiProjectPeer $multiProjectPending.publishPath) "rename" $frame.requestID
+          }
+        }
         [void] $seenResponses.Add([string]$frame.requestID)
-        if ($commandName -eq "listRecentProjects" -and -not $graphSentOnConnection) {
+        if ($commandName -eq "listRecentProjects" -and -not $graphSentOnConnection -and -not $SeedMultiProjects) {
           if (-not (Send-Frame $server (New-StubGraphEvent))) { break }
           $graphSent = $true
           $graphSentOnConnection = $true
