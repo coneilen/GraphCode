@@ -830,7 +830,7 @@ Invoke-Native "Terminal input queue tests" {
   }
   Push-Location $shellRoot
   try {
-    & $zig test src\TerminalSurface.zig -target x86_64-windows-msvc -lc "-I$include" $terminalVtLib
+    & $zig test src\TerminalSurface.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 -ladvapi32 "-I$include" $terminalVtLib
   } finally { Pop-Location }
 }
 Invoke-Native "Windows clipboard encoding tests" {
