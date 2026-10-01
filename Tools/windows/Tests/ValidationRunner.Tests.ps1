@@ -36,6 +36,122 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     }
     throw "RED: multi-project expected actual $prefix rejection"
   }
+  # Exact whole synthetic peer file from accepted 91dc PR run 36837690691, not the unavailable 95e success file.
+  $receiptFixtureGzip = "H4sIAAAAAAACCu1b3W+jOBD/VyqeE4kQkkDe2uzpdNLpttfuPV2qypih5Uoxa0x2qyj/+9nGxKZNLiQlTW4XP1jxBzOe33wYj8nSyihhBJNkRtIUMIPQmjJaQM/ChFJIEO+5ga8F5CzXI3JqTNIZKVJmTZ2eRcs5qmMwED15RtIcjK4iRWn+DahJ8u87s39Gnp9RGqp+rFtWEufsBjCk7JqSfzj73OrJzj+LGD/NHtG6Y/csvjRGKHzOIDWmEd18J6UHirJHJcrrJhcLKCXUmqZFkvSsvAhyTONMwHkLkFYgU1Awfw5yoAutF0ntFgSmZUdQ5C96UoSSnHeiLEtigXOKnkHBqfpmFLhWN/XVtaKGfgkfYNMjov+vLNzYv4Nc+djGYY7iMxFYbOmuP8RBgpiL/auBsBhaVvb42ydratmq9GXlisoT1SgIxngCtj9xwFpbG39gORduIbR5jdjj3JrOrU/TOS9IVPcMnjPx46HoO8PAnoxDd+K4A9ezkT+2YQxoEPm+Zwdgi2nl5Mske0Rzqzev+HCynA+VCvqDhFC2723JbqBKX1auqLyqWRVJjMUsAfmIZHBR0uPEV6uVteo1BsILJqEXDiH6MYG4U34j6JcGEgv5mlDngEjafPotK4KLlJO4uBTBgJDsy0smBlhB0yuUg/B2LG0/vHopPVzoQPJyVOnLyhWVVzWrspHXVXNeIrhw/1LeoSIF13+K+ZM8AD8XCYtVoLoG4EFoufahWuhuEMyryLHeArIiSGKMjH1h8mYNE+2z+7ipGwZ47AbY5zJHlOtVLHwBNOe8JO+nWNqrImf1DiG8NvvlpuA/XXJD4vB+z+QueaMA2boQNXzQSmAhw3upG72G3/mqFG4Zd0dOTzgjWjtiIzcUE6WHcD6pRNKqmhR4jAW1hQi7fR+XK2AGE9Wq87gTmO5hBSFy/IHvtG8FmvArKzB2+60WULl5U24wGGEUhVHrYhiET2zMxko6Y94C0XCI7IHvtW8FmvBHGLOPfdsL24/MBmFDjE0v3G3JMrIHjj2e2OO2ZTEJG7KYB45pO27QFhCe7zr2KGofCE34tBHKXEkXobZAFIxRMHC89q1AEz5+hBrZkTNEMBq1L4Ym/EERyjyutirLxnPwsp65ECFKHwbf7w41zKrDn2jd2/sfzWqHPhEGjxo9TLjyAmPIVXJsdeCRu1VlbjzLd8psAtcrZeoE1KFJpVZBFukAybwhngFEPBJ9qaEapwxoAmghEwhbED/MiM9O1kqerXIK/arM86HpCNolAk6aCDgC/pr4Gv+v6/cSA3uZ1huq0peVKyqvalbldVpPUrvAnJwwXISfQK4VJ6gIYSYC5zq1d8nZ29xKMYsXMXsRa8nNjB6D70yKicIX6YKQl2NL4zdfaVLu7GkUh6qPQkYoK+NrlaN0Venryqt+VcUQ5gYWMXy7SIm4A6hJQrI4IawuxsAUo0xX7nli1kkF2mUsTpqxOAL+mnjndWfldToPcwSta+IHv0eb2RXafp5AE3/HCnWygXaZjJNmMo6AvybeRa4zilxmfuYIWtfED44L5kGRnn2Ogn7swdu4Ti5v7DEqcmmcacxilFj6EyU+pa0b5NKDe3WnWbt1mUJ5ROkDyFSHdAKkyo4DatZupn9XEJYH6MM/dSgPyuKzg+1fH+QMMSNaaGflI0VwcHQxP2JYlR5/ItU7u1QfqLLjm47WVN9gZ3yj+D2/OxFEfwy9N73Feqv3YefyP6vq3c7lz0Pv/BFGySa9Y892J25o9xFXdN+dBLjvIxT1kTNGEE38CDzYW++jn9jl61cCZ2MBZZZ+P8dvekH61gDGP7EB6HuS/7Xym16ovlX+pFP+yZUv/+8hY34pESNP4t8QTcP92V0+qg31v0JtDkn5P5rWruOrt4Vq/Q3fBHJSUKmfJF5Av4hRqR/pCoZ9dV5wXC/ode+YR0b4btuf0FarfwHVcnXmCzcAAA=="
+  $compressed = [IO.MemoryStream]::new([Convert]::FromBase64String($receiptFixtureGzip))
+  $decompressor = [IO.Compression.GZipStream]::new($compressed,[IO.Compression.CompressionMode]::Decompress)
+  $output = [IO.MemoryStream]::new()
+  try { $decompressor.CopyTo($output); $receiptFixtureBytes = $output.ToArray() }
+  finally { $decompressor.Dispose(); $compressed.Dispose(); $output.Dispose() }
+  Assert-MultiCase ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($receiptFixtureBytes)) -ceq
+    "361883611D172E3A884A3F6CBCD5918EBACB94F531DDDF921627B5E36A706241") "actual accepted peer fixture byte hash differs"
+  $receiptFixture = [Text.Encoding]::UTF8.GetString($receiptFixtureBytes)
+  function New-MultiReceiptReport { return ConvertFrom-MultiProjectReceiptJson $receiptFixture }
+  Invoke-MultiCase "complete actual accepted whole peer receipt preserves bytes and all state" {
+    $report = New-MultiReceiptReport
+    $records = @(Write-MultiProjectPeerReceipt $receiptFixture $report.multiProjectPeer 6>&1)
+    $record = @($records | Where-Object { $_ -is [Management.Automation.InformationRecord] })[0]
+    $receipt = Read-MultiProjectPeerReceipt ([string]$record.MessageData)
+    Assert-MultiCase ($receipt.utf8Sha256 -ceq "361883611D172E3A884A3F6CBCD5918EBACB94F531DDDF921627B5E36A706241" -and
+      $receipt.report.protocolConnected -and $receipt.report.correlatedRequests -and
+      $receipt.report.multiProjectPeer.received.Count -eq 11 -and $receipt.report.multiProjectPeer.answered.Count -eq 11 -and
+      $receipt.report.multiProjectPeer.applied.Count -eq 2 -and $receipt.report.multiProjectPeer.publications.Count -eq 7 -and
+      $receipt.report.multiProjectPeer.controls.Count -eq 1 -and $receipt.rawJson -ceq $receiptFixture) "whole actual receipt lost custody/bytes"
+    return "Actual accepted91dc file fixture only; not claimed as95e success state or current native evidence"
+  }
+  foreach ($mutation in @("missing-top", "unknown-top", "disconnected", "correlation-false", "global-error",
+      "global-unanswered", "root-count", "connection-type", "graph-not-sent", "missing-peer", "unknown-peer", "count-type", "count-missing",
+      "unanswered", "empty-requests", "request-duplicate", "request-id", "request-kind-type", "request-extra",
+      "unknown-verb", "wrong-owner", "wrong-node", "rename-title-type", "missing-expectation",
+      "answer-duplicate", "answer-missing", "answer-id", "answer-kind", "answer-success", "answer-type", "quick-chat-extra",
+      "application-owner", "application-node", "application-title", "application-before", "application-duplicate",
+      "publication-sequence", "publication-kind-type", "publication-owner", "publication-title", "publication-correlation",
+      "publication-duplicate", "unknown-cause", "control-owner", "control-selection", "control-token",
+      "graph-missing", "graph-duplicate", "graph-title", "graph-id", "graph-depth-loss")) {
+    Invoke-MultiCase ("complete peer receipt rejects " + $mutation) -Negative {
+      $report = New-MultiReceiptReport; $p = $report.multiProjectPeer
+      switch ($mutation) {
+        "missing-top" { $report.Remove("protocolConnected") }
+        "unknown-top" { $report.unexpected = $true }
+        "disconnected" { $report.protocolConnected = $false }
+        "correlation-false" { $report.correlatedRequests = $false }
+        "global-error" { $report.error = "actual error" }
+        "global-unanswered" { $report.unansweredRequests = @("unanswered") }
+        "root-count" { $report.requestCount++ }
+        "connection-type" { $report.connectionCount = "2" }
+        "graph-not-sent" { $report.graphSent = $false }
+        "missing-peer" { $report.multiProjectPeer = $null }
+        "unknown-peer" { $p.unexpected = $true }
+        "count-type" { $p.requestCount = "11" }
+        "count-missing" { $p.Remove("receivedCount") }
+        "unanswered" { $p.unansweredRequests = @($p.received[0].requestID) }
+        "empty-requests" { $p.received = @() }
+        "request-duplicate" { $p.received[1] = $p.received[0] }
+        "request-id" { $p.received[0].frame.requestID = "wrong" }
+        "request-kind-type" { $p.received[0].frame.kind = $true }
+        "request-extra" { $p.received[0].frame.extra = 1 }
+        "unknown-verb" { $p.received[0].frame.command = @{ unknown = @{} } }
+        "wrong-owner" { $p.received[-1].frame.command.graphCommand.projectPath = $p.graphs[1].project.path }
+        "wrong-node" { $p.received[-1].frame.command.graphCommand.command.renameNode._0 = $p.graphs[1].nodes[0].id }
+        "rename-title-type" { $p.received[-1].frame.command.graphCommand.command.renameNode.title = 7 }
+        "missing-expectation" { $p.received[-1].expectedResponse = $null }
+        "answer-duplicate" { $p.answered[1] = $p.answered[0] }
+        "answer-missing" { $p.answered = @($p.answered[0]) }
+        "answer-id" { $p.answered[-1].response.requestID = $p.answered[0].requestID }
+        "answer-kind" { $p.answered[-1].response.kind = "event" }
+        "answer-success" { $p.answered[-1].response.success = $false }
+        "answer-type" { $p.answered[-1].response.success = "true" }
+        "quick-chat-extra" { $p.answered[1].response.event.quickChatsListed[0].unknown = 1 }
+        "application-owner" { $p.applied[0].projectPath = $p.graphs[1].project.path }
+        "application-node" { $p.applied[0].nodeID = $p.graphs[1].nodes[0].id }
+        "application-title" { $p.applied[0].title = "Not applied" }
+        "application-before" { $p.applied[0].beforeTitle = "Not prior" }
+        "application-duplicate" { $p.applied[1] = $p.applied[0] }
+        "publication-sequence" { $p.publications[-1].frame.sequence = 99 }
+        "publication-kind-type" { $p.publications[-1].frame.kind = $true }
+        "publication-owner" { $p.publications[-1].frame.event.graphChanged.project.path = $p.graphs[1].project.path }
+        "publication-title" { $p.publications[-1].frame.event.graphChanged.nodes[0].title = "Not published" }
+        "publication-correlation" { $p.publications[-1].correlationID = $p.received[0].requestID }
+        "publication-duplicate" { $p.publications[-1] = $p.publications[-2] }
+        "unknown-cause" { $p.publications[-1].cause = "unknown" }
+        "control-owner" { $p.controls[0].projectPath = $p.graphs[1].project.path }
+        "control-selection" { $p.controls[0].selection.nodeID = $p.graphs[0].nodes[0].id }
+        "control-token" { $p.controls[0].token = $p.received[0].requestID }
+        "graph-missing" { $p.graphs = @($p.graphs[0]) }
+        "graph-duplicate" { $p.graphs[1] = $p.graphs[0] }
+        "graph-title" { $p.graphs[0].nodes[0].title = "Not final" }
+        "graph-id" { $p.graphs[0].id = "bad" }
+        "graph-depth-loss" { $p.graphs[0].nodes[0].presence = "@{presence=idle}" }
+      }
+      return Reject-MultiCase { New-MultiProjectPeerReceipt (ConvertTo-Json -InputObject $report -Depth 16 -Compress) } "MULTIPROJECT_PEER_RECEIPT:"
+    }
+  }
+  foreach ($mutation in @("no-record", "duplicate-record", "bad-json", "duplicate-property", "bad-hash",
+      "byte-count", "report-mismatch", "schema", "provenance", "json-depth", "settled-mismatch")) {
+    Invoke-MultiCase ("retained complete receipt reader rejects " + $mutation) -Negative {
+      $receipt = New-MultiProjectPeerReceipt $receiptFixture
+      $json = ConvertTo-Json -InputObject $receipt -Depth 16 -Compress
+      $line = "UIA_MULTIPROJECT_PEER_RECEIPT=" + $json
+      $reject = {
+        switch ($mutation) {
+          "no-record" { Read-MultiProjectPeerReceipt "native job succeeded without retained peer" }
+          "duplicate-record" { Read-MultiProjectPeerReceipt ($line + "`n" + $line) }
+          "bad-json" { Read-MultiProjectPeerReceipt "UIA_MULTIPROJECT_PEER_RECEIPT={bad" }
+          "duplicate-property" { Read-MultiProjectPeerReceipt ('UIA_MULTIPROJECT_PEER_RECEIPT={"x":1,"x":2}') }
+          "bad-hash" { $receipt.utf8Sha256 = "bad"; Assert-MultiProjectPeerReceipt $receipt }
+          "byte-count" { $receipt.utf8ByteCount++; Assert-MultiProjectPeerReceipt $receipt }
+          "report-mismatch" { $receipt.report.protocolConnected = $false; Assert-MultiProjectPeerReceipt $receipt }
+          "schema" { $receipt.schemaVersion = "1"; Assert-MultiProjectPeerReceipt $receipt }
+          "provenance" { $receipt.provenance = "expected fixture"; Assert-MultiProjectPeerReceipt $receipt }
+          "json-depth" { Read-MultiProjectPeerReceipt ("UIA_MULTIPROJECT_PEER_RECEIPT=" +
+            (ConvertTo-Json -InputObject $receipt -Depth 2 -Compress -WarningAction SilentlyContinue)) }
+          "settled-mismatch" { $peer = (New-MultiReceiptReport).multiProjectPeer; $peer.graphSequence++
+            Write-MultiProjectPeerReceipt $receiptFixture $peer }
+        }
+      }
+      return Reject-MultiCase $reject "MULTIPROJECT_PEER_RECEIPT:"
+    }
+  }
   function New-MultiRequest([string] $id = $renameId, [string] $title = "Alpha renamed") {
     return [ordered]@{ version = 2; kind = "request"; requestID = $id
       command = [ordered]@{ graphCommand = [ordered]@{ projectPath = $alpha
@@ -1184,6 +1300,25 @@ if ($mode -eq "abrupt") { [Environment]::Exit(23) }
     executed = $results.Count; positive = $positive; negative = $negative; artifacts = $scratch
     liveAppSelectionProved = $false
   } | ConvertTo-Json -Compress))
+}
+
+function Assert-MultiProjectPeerEmissionContract([string] $source) {
+  $ast = [Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)
+  $phase = $ast.Find({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq "Invoke-MultiProjectRenamePhase"
+  },$true)
+  $calls = @($phase.FindAll({ param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq "Write-MultiProjectPeerReceipt"
+  },$true))
+  if ($calls.Count -ne 1 -or $calls[0].Extent.Text -cne 'Write-MultiProjectPeerReceipt (Read-DaemonCommandLog $peerPath) $afterUnchanged' -or
+      $phase.Extent.Text.IndexOf($calls[0].Extent.Text) -ge $phase.Extent.Text.IndexOf('multi-project shell rejected Exit') -or
+      $phase.Extent.Text.IndexOf($calls[0].Extent.Text) -le $phase.Extent.Text.IndexOf('$finalOverview = Wait-MultiProjectObservation "overview"')) {
+    throw "RED: actual complete peer receipt not bound once to final owned file before teardown"
+  }
+  foreach ($token in @("UIA_MULTIPROJECT_PEER_RECEIPT=", "owned-stub-final-file-read", "rawJson", "utf8Sha256",
+      "Assert-MultiProjectCompleteReport", "WarningAction Stop")) {
+    if (-not $source.Contains($token)) { throw "RED: complete actual peer emission lacks $token" }
+  }
 }
 
 function Assert-MultiProjectRenameSubmitContract([string] $source, [string] $dialogSource, [string] $formSource) {
@@ -2536,6 +2671,7 @@ Start-Sleep -Seconds 60
     if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: bounded multi-project capture lacks $required" }
   }
   Assert-MultiProjectFreshCaptureContract $uiaLiveGateSource
+  Assert-MultiProjectPeerEmissionContract $uiaLiveGateSource
   Assert-MultiProjectRenameSubmitContract $uiaLiveGateSource `
     ([IO.File]::ReadAllText((Join-Path $repoRoot "graphcode-windows\src\WindowsNativeDialogs.zig"))) `
     ([IO.File]::ReadAllText((Join-Path $repoRoot "graphcode-windows\src\NativeForms.zig")))

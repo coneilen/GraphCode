@@ -2258,6 +2258,328 @@ function Assert-UiaProviderPathBudget(
   }
 }
 
+function Read-MultiProjectPeerReceipt([string] $jobLog) {
+  $prefix = "UIA_MULTIPROJECT_PEER_RECEIPT="
+  $lines = @($jobLog -split "`n" | Where-Object { $_.Contains($prefix) })
+  if ($lines.Count -ne 1) {
+    throw "MULTIPROJECT_PEER_RECEIPT: expected exactly one complete actual snapshot receipt; observed=$($lines.Count)"
+  }
+  $line = $lines[0]
+  $receipt = ConvertFrom-MultiProjectReceiptJson $line.Substring($line.IndexOf($prefix) + $prefix.Length).TrimEnd("`r")
+  Assert-MultiProjectPeerReceipt $receipt
+  return $receipt
+}
+
+function Assert-MultiProjectReceiptObject($value, [string[]] $keys, [string] $label) {
+  if ($value -isnot [Collections.IDictionary] -or $value.Count -ne $keys.Count -or
+      @($value.Keys | Where-Object { $keys -cnotcontains $_ }).Count -ne 0) {
+    throw "MULTIPROJECT_PEER_RECEIPT: invalid $label object fields"
+  }
+}
+
+function Assert-MultiProjectReceiptId($value) {
+  if ($value -isnot [string] -or $value -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') {
+    throw "MULTIPROJECT_PEER_RECEIPT: invalid actual UUID"
+  }
+}
+
+function ConvertFrom-MultiProjectReceiptJson([string] $json) {
+  if ([Text.Encoding]::UTF8.GetByteCount($json) -le 0 -or [Text.Encoding]::UTF8.GetByteCount($json) -gt 524288) {
+    throw "MULTIPROJECT_PEER_RECEIPT: missing/oversized actual JSON"
+  }
+  $options = New-Object System.Text.Json.JsonDocumentOptions
+  $options.MaxDepth = 16
+  $document = $null
+  try {
+    try { $document = [System.Text.Json.JsonDocument]::Parse($json,$options) }
+    catch [System.Text.Json.JsonException] { throw "MULTIPROJECT_PEER_RECEIPT: invalid/truncated/deep actual JSON" }
+    function Check-MultiProjectReceiptProperties($element) {
+      if ($element.ValueKind -eq [System.Text.Json.JsonValueKind]::Object) {
+        $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($property in $element.EnumerateObject()) {
+          if (-not $seen.Add($property.Name)) { throw "MULTIPROJECT_PEER_RECEIPT: duplicate actual JSON property" }
+          Check-MultiProjectReceiptProperties $property.Value
+        }
+      } elseif ($element.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+        foreach ($item in $element.EnumerateArray()) { Check-MultiProjectReceiptProperties $item }
+      }
+    }
+    if ($document.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual JSON root is not an object"
+    }
+    Check-MultiProjectReceiptProperties $document.RootElement
+    return ConvertFrom-Json -InputObject $json -AsHashtable -Depth 16
+  } finally { if ($document) { $document.Dispose() } }
+}
+
+function Assert-MultiProjectReceiptGraph($graph) {
+  Assert-MultiProjectReceiptObject $graph @("id","project","nodes","edges") "graph"
+  Assert-MultiProjectReceiptId $graph.id
+  Assert-MultiProjectReceiptObject $graph.project @("path","name","remote") "project"
+  if ($graph.project.path -isnot [string] -or -not [IO.Path]::IsPathFullyQualified($graph.project.path) -or
+      $graph.project.name -isnot [string] -or $graph.project.remote -isnot [bool] -or $graph.project.remote -or
+      $graph.nodes -isnot [array] -or $graph.nodes.Count -ne 1 -or $graph.edges -isnot [array] -or $graph.edges.Count -ne 0) {
+    throw "MULTIPROJECT_PEER_RECEIPT: invalid actual ordinary-owner graph"
+  }
+  $node = $graph.nodes[0]
+  Assert-MultiProjectReceiptObject $node @("id","title","loopType","state","activity","presence") "node"
+  Assert-MultiProjectReceiptId $node.id
+  Assert-MultiProjectReceiptObject $node.presence @("presence","confidence") "presence"
+  foreach ($value in @($node.title,$node.loopType,$node.state,$node.activity,$node.presence.presence,$node.presence.confidence)) {
+    if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) { throw "MULTIPROJECT_PEER_RECEIPT: invalid actual node information" }
+  }
+}
+
+function Assert-MultiProjectCompleteReport($report) {
+  Assert-MultiProjectReceiptObject $report @("protocolConnected","correlatedRequests","connectionCount","requestCount","responseCount",
+    "unansweredRequests","unansweredCommands","commands","error","subscriptionSeen","reconnectObserved","graphSent","busyObserved",
+    "appliedRenames","appliedCreates","appliedCreateRequests","appliedEdgeCreates","appliedEdgeUpdates","appliedEdgeCreateRequests",
+    "appliedEdgeUpdateRequests","appliedPromotions","appliedPromotionRequests","receivedGraphCommands","graphNodes","edges",
+    "graphSequence","multiProjectPeer") "whole actual report"
+  if ($report.protocolConnected -isnot [bool] -or -not $report.protocolConnected -or
+      $report.correlatedRequests -isnot [bool] -or -not $report.correlatedRequests -or $null -ne $report.error -or
+      $report.unansweredRequests -isnot [array] -or $report.unansweredRequests.Count -ne 0 -or
+      $report.unansweredCommands -isnot [array] -or $report.unansweredCommands.Count -ne 0) {
+    throw "MULTIPROJECT_PEER_RECEIPT: actual whole-report connection/correlation incomplete"
+  }
+  if (($report.connectionCount -isnot [int] -and $report.connectionCount -isnot [long]) -or
+      $report.connectionCount -le 0 -or $report.graphSent -isnot [bool] -or -not $report.graphSent) {
+    throw "MULTIPROJECT_PEER_RECEIPT: actual connection/publication custody unavailable"
+  }
+  $peer = $report.multiProjectPeer
+  Assert-MultiProjectReceiptObject $peer @("receivedCount","requestCount","responseCount","appliedCount","publicationCount","graphSequence",
+    "received","applied","answered","publications","controls","graphs","unansweredRequests") "complete peer state"
+  foreach ($name in @("received","applied","answered","publications","controls","graphs","unansweredRequests")) {
+    if ($peer[$name] -isnot [array]) { throw "MULTIPROJECT_PEER_RECEIPT: missing/invalid actual $name array" }
+  }
+  foreach ($pair in @(@("receivedCount","received"),@("requestCount","received"),@("responseCount","answered"),
+      @("appliedCount","applied"),@("publicationCount","publications"),@("graphSequence","publications"))) {
+    $value = $peer[$pair[0]]
+    if (($value -isnot [int] -and $value -isnot [long]) -or $value -le 0 -or $value -ne $peer[$pair[1]].Count) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual counts disagree with complete arrays"
+    }
+  }
+  if ($peer.received.Count -gt 128 -or $peer.publications.Count -gt 128 -or $peer.requestCount -ne $peer.responseCount -or
+      $peer.unansweredRequests.Count -ne 0 -or $peer.graphs.Count -ne 2 -or $peer.controls.Count -ne 1 -or $peer.applied.Count -ne 2 -or
+      ($report.requestCount -isnot [int] -and $report.requestCount -isnot [long]) -or
+      ($report.responseCount -isnot [int] -and $report.responseCount -isnot [long]) -or
+      $report.requestCount -ne $peer.requestCount -or $report.responseCount -ne $peer.responseCount) {
+    throw "MULTIPROJECT_PEER_RECEIPT: final actual workflow accounting incomplete"
+  }
+  $owners = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+  $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach ($graph in $peer.graphs) {
+    Assert-MultiProjectReceiptGraph $graph
+    if ($owners.ContainsKey($graph.project.path) -or -not $ids.Add($graph.id) -or -not $ids.Add($graph.nodes[0].id)) {
+      throw "MULTIPROJECT_PEER_RECEIPT: duplicate actual owner/graph/node identity"
+    }
+    $owners.Add($graph.project.path,$graph)
+  }
+  if ($peer.graphs[0].project.name -cne "Alpha" -or $peer.graphs[1].project.name -cne "Beta" -or
+      [string]::Equals($peer.graphs[0].project.path,$peer.graphs[1].project.path,[StringComparison]::OrdinalIgnoreCase)) {
+    throw "MULTIPROJECT_PEER_RECEIPT: exact independent owners unavailable"
+  }
+  $requests = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+  $answers = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+  foreach ($received in $peer.received) {
+    Assert-MultiProjectReceiptObject $received @("requestID","frame","expectedResponse") "received record"
+    $frame = $received.frame
+    Assert-MultiProjectReceiptObject $frame @("version","kind","requestID","command") "request envelope"
+    Assert-MultiProjectReceiptId $frame.requestID
+    if (($frame.version -isnot [int] -and $frame.version -isnot [long]) -or $frame.version -ne 2 -or
+        $frame.kind -isnot [string] -or $frame.kind -cne "request" -or $received.requestID -isnot [string] -or
+        $received.requestID -cne $frame.requestID -or $requests.ContainsKey($frame.requestID) -or
+        $frame.command -isnot [Collections.IDictionary] -or $frame.command.Count -ne 1) {
+      throw "MULTIPROJECT_PEER_RECEIPT: invalid/duplicate actual request envelope"
+    }
+    $verb = @($frame.command.Keys)[0]
+    if ($verb -ceq "graphCommand") {
+      $command = $frame.command.graphCommand
+      Assert-MultiProjectReceiptObject $command @("projectPath","command") "graph command"
+      Assert-MultiProjectReceiptObject $command.command @("renameNode") "inner command"
+      Assert-MultiProjectReceiptObject $command.command.renameNode @("_0","title") "rename"
+      Assert-MultiProjectReceiptId $command.command.renameNode._0
+      if ($command.projectPath -isnot [string] -or -not $owners.ContainsKey($command.projectPath) -or
+          $command.projectPath -cne $peer.graphs[0].project.path -or
+          $command.command.renameNode._0 -cne $owners[$command.projectPath].nodes[0].id -or
+          $command.command.renameNode.title -isnot [string] -or [string]::IsNullOrWhiteSpace($command.command.renameNode.title)) {
+        throw "MULTIPROJECT_PEER_RECEIPT: actual rename owner/value mismatch"
+      }
+    } elseif ($verb -ceq "openProject") {
+      Assert-MultiProjectReceiptObject $frame.command.openProject @("path") "openProject"
+      if ($frame.command.openProject.path -isnot [string] -or -not $owners.ContainsKey($frame.command.openProject.path)) {
+        throw "MULTIPROJECT_PEER_RECEIPT: actual open request owner mismatch"
+      }
+    } elseif ($verb -cin @("listRecentProjects","listQuickChats","restoreOpenProjects","openGlobalGraph")) {
+      Assert-MultiProjectReceiptObject $frame.command[$verb] @() "listing command"
+    } else { throw "MULTIPROJECT_PEER_RECEIPT: unknown actual request verb" }
+    $requests.Add($frame.requestID,$received)
+  }
+  foreach ($answer in $peer.answered) {
+    Assert-MultiProjectReceiptObject $answer @("requestID","response") "answered record"
+    Assert-MultiProjectReceiptId $answer.requestID
+    if (-not $requests.ContainsKey($answer.requestID) -or $answers.ContainsKey($answer.requestID)) {
+      throw "MULTIPROJECT_PEER_RECEIPT: missing/duplicate actual answer correlation"
+    }
+    $response = $answer.response; $request = $requests[$answer.requestID]
+    $verb = @($request.frame.command.Keys)[0]
+    $listing = $verb -cin @("listRecentProjects","listQuickChats")
+    Assert-MultiProjectReceiptObject $response $(if ($listing) { @("version","kind","requestID","event") } else { @("version","kind","requestID","success") }) "response"
+    if (($response.version -isnot [int] -and $response.version -isnot [long]) -or $response.version -ne 2 -or
+        $response.kind -isnot [string] -or $response.kind -cne "response" -or $response.requestID -isnot [string] -or
+        $response.requestID -cne $answer.requestID) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual answered envelope mismatch"
+    }
+    if ($listing) {
+      $eventName = if ($verb -ceq "listRecentProjects") { "recentProjectsListed" } else { "quickChatsListed" }
+      Assert-MultiProjectReceiptObject $response.event @($eventName) "listing event"
+      if ($response.event[$eventName] -isnot [array]) { throw "MULTIPROJECT_PEER_RECEIPT: invalid actual listing payload" }
+      if ($verb -ceq "listRecentProjects" -and
+          (ConvertTo-SketchCanonicalJson $response.event.recentProjectsListed) -cne
+          (ConvertTo-SketchCanonicalJson @($peer.graphs | ForEach-Object { $_.project }))) {
+        throw "MULTIPROJECT_PEER_RECEIPT: actual recent-owner listing differs"
+      }
+      if ($verb -ceq "listQuickChats") {
+        foreach ($chat in $response.event.quickChatsListed) {
+          Assert-MultiProjectReceiptObject $chat @("id","title","backend","createdAt","activity") "quick-chat listing"
+          Assert-MultiProjectReceiptId $chat.id
+          if ($chat.title -isnot [string] -or $chat.backend -isnot [string] -or
+              ($chat.createdAt -isnot [int] -and $chat.createdAt -isnot [long])) {
+            throw "MULTIPROJECT_PEER_RECEIPT: actual quick-chat listing types differ"
+          }
+          if ($null -ne $chat.activity) {
+            Assert-MultiProjectReceiptObject $chat.activity @("sequence","text","presence") "quick-chat activity"
+            Assert-MultiProjectReceiptObject $chat.activity.presence @("presence","confidence") "quick-chat presence"
+          }
+        }
+      }
+    } elseif ($response.success -isnot [bool] -or -not $response.success) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual request not answered successfully"
+    }
+    if (($verb -cin @("graphCommand","listRecentProjects") -and $null -eq $request.expectedResponse) -or
+        ($null -ne $request.expectedResponse -and
+        (ConvertTo-SketchCanonicalJson $response) -cne (ConvertTo-SketchCanonicalJson $request.expectedResponse))) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual response differs from received request expectation"
+    }
+    $answers.Add($answer.requestID,$answer)
+  }
+  $applied = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+  foreach ($application in $peer.applied) {
+    Assert-MultiProjectReceiptObject $application @("requestID","projectPath","nodeID","beforeTitle","title") "application"
+    if ($application.requestID -isnot [string] -or -not $requests.ContainsKey($application.requestID) -or
+        $applied.ContainsKey($application.requestID)) { throw "MULTIPROJECT_PEER_RECEIPT: application correlation missing/duplicated" }
+    $wire = $requests[$application.requestID].frame.command.graphCommand
+    if ($null -eq $wire -or $application.projectPath -cne $wire.projectPath -or
+        $application.projectPath -isnot [string] -or $application.nodeID -isnot [string] -or $application.title -isnot [string] -or
+        $application.nodeID -cne $wire.command.renameNode._0 -or $application.title -cne $wire.command.renameNode.title -or
+        $application.beforeTitle -isnot [string]) { throw "MULTIPROJECT_PEER_RECEIPT: actual application differs from received wire" }
+    $applied.Add($application.requestID,$application)
+  }
+  if (@($peer.received | Where-Object { $_.frame.command.Contains("graphCommand") }).Count -ne 2) {
+    throw "MULTIPROJECT_PEER_RECEIPT: received/applied rename count differs"
+  }
+  $control = $peer.controls[0]
+  Assert-MultiProjectReceiptObject $control @("token","projectPath","nodeID","beforeTitle","title","selection") "control"
+  Assert-MultiProjectReceiptId $control.token
+  Assert-MultiProjectReceiptObject $control.selection @("projectPath","nodeID","source") "control selection"
+  if ($control.projectPath -cne $peer.graphs[0].project.path -or $control.nodeID -cne $peer.graphs[0].nodes[0].id -or
+      $control.selection.projectPath -cne $peer.graphs[1].project.path -or $control.selection.nodeID -cne $peer.graphs[1].nodes[0].id -or
+      $control.selection.source -cne "live-uia" -or $control.title -isnot [string] -or $control.beforeTitle -isnot [string]) {
+    throw "MULTIPROJECT_PEER_RECEIPT: actual control owner/selection mismatch"
+  }
+  $latest = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+  $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $controlPublications = 0
+  foreach ($publication in $peer.publications) {
+    Assert-MultiProjectReceiptObject $publication @("cause","correlationID","frame") "publication record"
+    $frame = $publication.frame
+    Assert-MultiProjectReceiptObject $frame @("version","kind","sequence","event") "publication envelope"
+    Assert-MultiProjectReceiptObject $frame.event @("graphChanged") "publication event"
+    Assert-MultiProjectReceiptGraph $frame.event.graphChanged
+    $graph = $frame.event.graphChanged; $path = $graph.project.path
+    if (($frame.version -isnot [int] -and $frame.version -isnot [long]) -or $frame.version -ne 2 -or
+        $frame.kind -isnot [string] -or $frame.kind -cne "event" -or
+        $publication.cause -isnot [string] -or $publication.correlationID -isnot [string] -or
+        ($frame.sequence -isnot [int] -and $frame.sequence -isnot [long]) -or
+        $frame.sequence -ne ($seen.Count + 1) -or -not $owners.ContainsKey($path) -or
+        $graph.id -cne $owners[$path].id -or $graph.nodes[0].id -cne $owners[$path].nodes[0].id -or
+        (ConvertTo-SketchCanonicalJson $graph.project) -cne (ConvertTo-SketchCanonicalJson $owners[$path].project) -or
+        -not $seen.Add("$($publication.cause)|$($publication.correlationID)|$path")) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual publication sequence/identity/uniqueness mismatch"
+    }
+    if ($publication.cause -ceq "initial") {
+      if ($publication.correlationID -isnot [string] -or -not $answers.ContainsKey($publication.correlationID) -or
+          -not $requests[$publication.correlationID].frame.command.Contains("listRecentProjects") -or $controlPublications -ne 0) {
+        throw "MULTIPROJECT_PEER_RECEIPT: actual initial publication correlation mismatch"
+      }
+    } elseif ($publication.cause -ceq "control") {
+      $controlPublications++
+      if ($controlPublications -ne 1 -or $latest.Count -ne 2 -or $publication.correlationID -cne $control.token -or
+          $path -cne $control.projectPath -or $graph.nodes[0].title -cne $control.title -or
+          $latest[$path].nodes[0].title -cne $control.beforeTitle) {
+        throw "MULTIPROJECT_PEER_RECEIPT: actual one-shot control publication mismatch"
+      }
+    } elseif ($publication.cause -ceq "rename") {
+      if ($publication.correlationID -isnot [string] -or -not $applied.ContainsKey($publication.correlationID) -or
+          -not $answers.ContainsKey($publication.correlationID) -or $controlPublications -ne 1 -or
+          $path -cne $applied[$publication.correlationID].projectPath -or
+          $graph.nodes[0].title -cne $applied[$publication.correlationID].title -or
+          $latest[$path].nodes[0].title -cne $applied[$publication.correlationID].beforeTitle) {
+        throw "MULTIPROJECT_PEER_RECEIPT: actual rename publication/application mismatch"
+      }
+    } else { throw "MULTIPROJECT_PEER_RECEIPT: unknown actual publication cause" }
+    $latest[$path] = $graph
+  }
+  if ($controlPublications -ne 1 -or @($peer.publications | Where-Object { $_.cause -ceq "rename" }).Count -ne 2 -or
+      $peer.applied[1].beforeTitle -cne $peer.applied[1].title) {
+    throw "MULTIPROJECT_PEER_RECEIPT: actual final unchanged-title/control accounting missing"
+  }
+  foreach ($graph in $peer.graphs) {
+    if (-not $latest.ContainsKey($graph.project.path) -or
+        (ConvertTo-SketchCanonicalJson $graph) -cne (ConvertTo-SketchCanonicalJson $latest[$graph.project.path])) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual final graph differs from latest publication"
+    }
+  }
+}
+
+function New-MultiProjectPeerReceipt([string] $actualJson) {
+  $report = ConvertFrom-MultiProjectReceiptJson $actualJson
+  Assert-MultiProjectCompleteReport $report
+  # Hash the retained decoded owned-file text, not a projected native marker or an invented file snapshot.
+  $bytes = [Text.Encoding]::UTF8.GetBytes($actualJson)
+  return [ordered]@{ schemaVersion = 1; provenance = "owned-stub-final-file-read"; phase = "final-overview-before-exit"
+    utf8ByteCount = $bytes.Length; utf8Sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+    rawJson = $actualJson; report = $report }
+}
+
+function Assert-MultiProjectPeerReceipt($receipt) {
+  Assert-MultiProjectReceiptObject $receipt @("schemaVersion","provenance","phase","utf8ByteCount","utf8Sha256","rawJson","report") "receipt"
+  if (($receipt.schemaVersion -isnot [int] -and $receipt.schemaVersion -isnot [long]) -or $receipt.schemaVersion -ne 1 -or
+      $receipt.provenance -cne "owned-stub-final-file-read" -or $receipt.phase -cne "final-overview-before-exit" -or
+      ($receipt.utf8ByteCount -isnot [int] -and $receipt.utf8ByteCount -isnot [long]) -or $receipt.utf8Sha256 -isnot [string] -or
+      $receipt.rawJson -isnot [string]) { throw "MULTIPROJECT_PEER_RECEIPT: receipt schema/provenance/types unavailable" }
+  $bytes = [Text.Encoding]::UTF8.GetBytes($receipt.rawJson)
+  if ($bytes.Length -ne $receipt.utf8ByteCount -or
+      [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) -cne $receipt.utf8Sha256) {
+    throw "MULTIPROJECT_PEER_RECEIPT: actual raw UTF8 bytes/hash mismatch"
+  }
+  $actual = ConvertFrom-MultiProjectReceiptJson $receipt.rawJson
+  if ((ConvertTo-SketchCanonicalJson $actual) -cne (ConvertTo-SketchCanonicalJson $receipt.report)) {
+    throw "MULTIPROJECT_PEER_RECEIPT: retained report differs from actual file JSON"
+  }
+  Assert-MultiProjectCompleteReport $actual
+}
+
+function Write-MultiProjectPeerReceipt([string] $actualJson, $settledPeer) {
+  $receipt = New-MultiProjectPeerReceipt $actualJson
+  if ((ConvertTo-SketchCanonicalJson $receipt.report.multiProjectPeer) -cne (ConvertTo-SketchCanonicalJson $settledPeer)) {
+    throw "MULTIPROJECT_PEER_RECEIPT: actual final file differs from existing settled peer state"
+  }
+  $json = ConvertTo-Json -InputObject $receipt -Depth 16 -Compress -WarningAction Stop
+  $null = Read-MultiProjectPeerReceipt ("UIA_MULTIPROJECT_PEER_RECEIPT=" + $json)
+  Write-Host ("UIA_MULTIPROJECT_PEER_RECEIPT=" + $json)
+}
+
 function Get-MultiProjectAutomationId([string] $kind, [string] $path, [string] $nodeId = "") {
   $prefix = switch -CaseSensitive ($kind) {
     "loop" { "loop-row" }
@@ -3533,6 +3855,7 @@ function Invoke-MultiProjectRenamePhase {
     Require (Test-MultiProjectRenameReceipt $beforeUnchanged $afterUnchanged $alphaPath $owners[0].node "Alpha renamed") "Windows unchanged-title rename was incorrectly treated as a no-op"
     Invoke-MultiProjectControl "overview-destination"
     $finalOverview = Wait-MultiProjectObservation "overview"
+    Write-MultiProjectPeerReceipt (Read-DaemonCommandLog $peerPath) $afterUnchanged
     Require ([GraphCodeUiaGateState]::PostCommand($multiWindow, 0x5002)) "multi-project shell rejected Exit"
     Require ($multiProcess.WaitForExit(5000) -and $multiProcess.ExitCode -eq 0) "multi-project owned shell did not exit cleanly"
     return [ordered]@{
