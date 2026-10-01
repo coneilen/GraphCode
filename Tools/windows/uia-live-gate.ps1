@@ -2445,10 +2445,149 @@ function Test-MultiProjectRenameReceipt($before, $after, [string] $path, [string
     (ConvertTo-SketchCanonicalJson $graph) -ceq (ConvertTo-SketchCanonicalJson $owners[0])
 }
 
-function Start-MultiProjectOwnedProcess([string] $file, [string[]] $arguments, [hashtable] $environment, [string] $stem) {
-  $start = [Diagnostics.ProcessStartInfo]::new($file)
+function Initialize-MultiProjectProcessJob([string] $sourcePath) {
+  if ("StandaloneProcessJob" -as [type]) { return }
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$null, [ref]$errors)
+  if ($errors.Count -ne 0) { throw "MULTIPROJECT_JOB: approved standalone ownership source does not parse" }
+  $definitions = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+      $node.Value.Contains("public static class StandaloneProcessJob")
+  }, $true))
+  if ($definitions.Count -ne 1) { throw "MULTIPROJECT_JOB: exact approved job ownership definition missing" }
+  Add-Type $definitions[0].Value
+}
+
+function Wait-MultiProjectCapture($capture, [int] $timeoutMilliseconds = 5000) {
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
+  if (-not $capture.rootProcess.WaitForExit($remaining)) {
+    throw "MULTIPROJECT_CAPTURE_EXIT: pid=$($capture.rootPID) start=$($capture.rootStartUtcTicks) job=$($capture.job.ToInt64())"
+  }
+  $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
+  try {
+    $drained = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($capture.stdout, $capture.stderr), $remaining)
+  } catch {
+    throw "MULTIPROJECT_CAPTURE_DRAIN: pid=$($capture.rootPID) start=$($capture.rootStartUtcTicks) job=$($capture.job.ToInt64()) stdout=$($capture.stdout.Status) stderr=$($capture.stderr.Status) failure=$($_.Exception.Message)"
+  }
+  if (-not $drained) {
+    throw "MULTIPROJECT_CAPTURE_DRAIN: pid=$($capture.rootPID) start=$($capture.rootStartUtcTicks) job=$($capture.job.ToInt64()) stdout=$($capture.stdout.Status) stderr=$($capture.stderr.Status)"
+  }
+}
+
+function Complete-MultiProjectCapture($capture, [string] $logDirectory, [int] $timeoutMilliseconds = 5000, $primaryError = $null) {
+  if ($null -eq $capture) { return }
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  $errors = [Collections.Generic.List[string]]::new()
+  $identity = "pid=$($capture.rootPID) start=$($capture.rootStartUtcTicks) target=$($capture.targetPID) targetStart=$($capture.targetStartUtcTicks) job=$($capture.job.ToInt64())"
+  $exited = $false
+  $empty = $false
+  $drained = $false
+  try {
+    if ($capture.assigned) {
+      [StandaloneProcessJob]::Terminate($capture.job)
+      $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
+      [StandaloneProcessJob]::WaitForEmpty($capture.job, $remaining)
+      $empty = [StandaloneProcessJob]::Active($capture.job) -eq 0
+      if (-not $empty) { throw "owned job census is not empty" }
+    } elseif ($capture.rootProcess -and -not $capture.rootProcess.HasExited) {
+      if ($capture.rootProcess.StartTime.ToUniversalTime().Ticks -ne $capture.rootStartUtcTicks) {
+        throw "unassigned root identity changed"
+      }
+      Stop-Process -Id $capture.rootPID -Force
+    }
+    $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
+    $exited = $capture.rootProcess.WaitForExit($remaining)
+    if (-not $exited) { throw "root did not exit within shared teardown deadline" }
+    if ($capture.process -and $capture.process -ne $capture.rootProcess) {
+      $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
+      if (-not $capture.process.WaitForExit($remaining)) { throw "retained target did not exit within shared teardown deadline" }
+    }
+  } catch { $errors.Add("owned exit/quiescence: $($_.Exception.Message)") }
+  try {
+    if ($capture.stdout -and $capture.stderr) {
+      $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
+      $drained = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($capture.stdout, $capture.stderr), $remaining)
+      if (-not $drained) { throw "stdout=$($capture.stdout.Status) stderr=$($capture.stderr.Status) shared pipe-drain deadline exceeded" }
+      foreach ($stream in @("stdout", "stderr")) {
+        $task = $capture[$stream]
+        if ($task.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion) { throw "$stream reader did not successfully complete" }
+        try {
+          $task.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $logDirectory ($capture.stem + "-$stream.log"))
+        } catch { $errors.Add("$stream capture persistence: $($_.Exception.Message)") }
+      }
+    }
+  } catch { $errors.Add("redirected pipe drain: $($_.Exception.Message)") }
+  foreach ($stream in @("StandardOutput", "StandardError")) {
+    try { if ($capture.rootProcess) { $capture.rootProcess.$stream.Dispose() } }
+    catch { $errors.Add("disposing $stream reader: $($_.Exception.Message)") }
+  }
+  try {
+    if ($capture.job -ne [IntPtr]::Zero) { [StandaloneProcessJob]::Close($capture.job) }
+  } catch { $errors.Add("closing owned job: $($_.Exception.Message)") }
+  try {
+    if ($capture.process -and $capture.process -ne $capture.rootProcess) { $capture.process.Dispose() }
+  } catch { $errors.Add("disposing retained target: $($_.Exception.Message)") }
+  try { if ($capture.rootProcess) { $capture.rootProcess.Dispose() } }
+  catch { $errors.Add("disposing retained root: $($_.Exception.Message)") }
+  $diagnostic = [ordered]@{
+    identity = $identity; rootExited = $exited; ownedJobEmpty = $empty
+    redirectedReadersDrained = $drained; deadlineMilliseconds = $timeoutMilliseconds
+    elapsedMilliseconds = $clock.ElapsedMilliseconds; failures = $errors.ToArray()
+  }
+  if ($primaryError) {
+    $primaryError.Exception.Data["MultiProjectCapture:$($capture.stem)"] = $diagnostic
+  }
+  Write-Host ("MULTIPROJECT_CAPTURE_TEARDOWN=" + ($diagnostic | ConvertTo-Json -Depth 8 -Compress))
+  if ($errors.Count -gt 0) {
+    $message = "MULTIPROJECT_TEARDOWN: $identity; $($errors -join '; ')"
+    if ($primaryError) {
+      $primaryError.Exception.Data["MultiProjectTeardown:$($capture.stem)"] = $message
+      Write-Warning $message -WarningAction Continue
+    } else { throw $message }
+  }
+  return $diagnostic
+}
+
+function Start-MultiProjectOwnedProcess(
+  [string] $file, [string[]] $arguments, [hashtable] $environment, [string] $stem,
+  [string] $jobSourcePath = (Join-Path $PSScriptRoot "Tests\Packaging.Standalone.Tests.ps1"),
+  [switch] $Visible
+) {
+  Initialize-MultiProjectProcessJob $jobSourcePath
+  $gate = Join-Path $environment.TEMP ("mp-start-" + [guid]::NewGuid().ToString("N"))
+  $identityPath = $gate + ".identity"
+  $launch = @{ gate = $gate; identity = $identityPath; file = $file; arguments = @($arguments); visible = [bool]$Visible } |
+    ConvertTo-Json -Depth 8 -Compress
+  $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($launch))
+  $command = @'
+$ErrorActionPreference = "Stop"
+$launch = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("LAUNCH_PAYLOAD")) | ConvertFrom-Json
+$deadline = [DateTime]::UtcNow.AddSeconds(10)
+while (-not [IO.File]::Exists($launch.gate)) {
+  if ([DateTime]::UtcNow -ge $deadline) { throw "Owned launch assignment gate timed out" }
+  [Threading.Thread]::Sleep(10)
+}
+$start = [Diagnostics.ProcessStartInfo]::new($launch.file)
+$start.UseShellExecute = $false
+$start.CreateNoWindow = -not $launch.visible
+foreach ($argument in $launch.arguments) { $start.ArgumentList.Add([string]$argument) }
+$target = [Diagnostics.Process]::Start($start)
+try {
+  $null = $target.Handle
+  $temporaryIdentity = $launch.identity + ".pending"
+  @{ pid = $target.Id; startUtcTicks = $target.StartTime.ToUniversalTime().Ticks } |
+    ConvertTo-Json -Compress | Set-Content -LiteralPath $temporaryIdentity
+  [IO.File]::Move($temporaryIdentity, $launch.identity)
+  if (-not $target.WaitForExit(600000)) { throw "Owned target exceeded ten-minute launch lifetime" }
+  exit $target.ExitCode
+} finally { $target.Dispose() }
+'@
+  $command = $command.Replace("LAUNCH_PAYLOAD", $payload)
+  $start = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh).Source)
   $start.UseShellExecute = $false
-  $start.CreateNoWindow = $file -cne $Shell
+  $start.CreateNoWindow = $true
   $start.RedirectStandardOutput = $true
   $start.RedirectStandardError = $true
   $start.WorkingDirectory = $environment.TEMP
@@ -2458,10 +2597,45 @@ function Start-MultiProjectOwnedProcess([string] $file, [string[]] $arguments, [
     if ($null -ne $value) { $start.Environment[$name] = $value }
   }
   foreach ($name in $environment.Keys) { $start.Environment[$name] = [string]$environment[$name] }
-  foreach ($argument in $arguments) { $start.ArgumentList.Add($argument) }
-  $child = [Diagnostics.Process]::Start($start)
-  return [ordered]@{ process = $child; stdout = $child.StandardOutput.ReadToEndAsync()
-    stderr = $child.StandardError.ReadToEndAsync(); stem = $stem }
+  foreach ($argument in @("-NoProfile", "-NonInteractive", "-EncodedCommand",
+      [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)))) { $start.ArgumentList.Add($argument) }
+  $capture = [ordered]@{ process = $null; rootProcess = $null; rootPID = $null; rootStartUtcTicks = $null
+    targetPID = $null; targetStartUtcTicks = $null; job = [StandaloneProcessJob]::Create()
+    assigned = $false; stdout = $null; stderr = $null; stem = $stem }
+  try {
+    $root = [Diagnostics.Process]::Start($start)
+    $capture.rootProcess = $root
+    $capture.rootPID = $root.Id
+    $capture.rootStartUtcTicks = $root.StartTime.ToUniversalTime().Ticks
+    $handle = $root.Handle
+    $capture.stdout = $root.StandardOutput.ReadToEndAsync()
+    $capture.stderr = $root.StandardError.ReadToEndAsync()
+    [StandaloneProcessJob]::Assign($capture.job, $handle)
+    $capture.assigned = $true
+    [IO.File]::WriteAllText($gate, "assigned")
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not [IO.File]::Exists($identityPath)) {
+      if ($root.HasExited -or [DateTime]::UtcNow -ge $deadline) {
+        throw "MULTIPROJECT_START: target identity missing pid=$($capture.rootPID) start=$($capture.rootStartUtcTicks) job=$($capture.job.ToInt64())"
+      }
+      [Threading.Thread]::Sleep(10)
+    }
+    $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+    $target = Get-Process -Id $identity.pid -ErrorAction Stop
+    if ($target.StartTime.ToUniversalTime().Ticks -ne $identity.startUtcTicks) {
+      $target.Dispose()
+      throw "MULTIPROJECT_START: target identity changed before retention"
+    }
+    $null = $target.Handle
+    $capture.process = $target
+    $capture.targetPID = $target.Id
+    $capture.targetStartUtcTicks = $identity.startUtcTicks
+    return $capture
+  } catch {
+    $primary = $_
+    $null = Complete-MultiProjectCapture $capture $environment.TEMP 5000 $primary
+    throw
+  }
 }
 
 function Invoke-MultiProjectRenamePhase {
@@ -2487,7 +2661,7 @@ function Invoke-MultiProjectRenamePhase {
   $multiWindow = [IntPtr]::Zero
   $multiRoot = $null
   $navigation = [Collections.Generic.List[object]]::new()
-  $ownedChildren = [Collections.Generic.List[Diagnostics.Process]]::new()
+  $primaryError = $null
 
   function Read-MultiProjectPeer {
     for ($retry = 0; $retry -lt 40; $retry++) {
@@ -2724,7 +2898,7 @@ function Invoke-MultiProjectRenamePhase {
     $environment.GRAPHCODE_UIA_RESET_SIDEBAR = "1"
     $environment.GRAPHCODE_DAEMON_PIPE = "\\.\pipe\$pipe"
     $environment.GRAPHCODE_UIA_DAEMON_COMMAND_LOG = $recorderPath
-    $shellChild = Start-MultiProjectOwnedProcess $Shell $ArgumentList $environment "multiproject-shell"
+    $shellChild = Start-MultiProjectOwnedProcess $Shell $ArgumentList $environment "multiproject-shell" -Visible
     $multiProcess = $shellChild.process
     for ($retry = 0; $retry -lt 160; $retry++) {
       $multiProcess.Refresh()
@@ -2808,16 +2982,6 @@ function Invoke-MultiProjectRenamePhase {
     Require (Test-MultiProjectRenameReceipt $beforeUnchanged $afterUnchanged $alphaPath $owners[0].node "Alpha renamed") "Windows unchanged-title rename was incorrectly treated as a no-op"
     Invoke-MultiProjectControl "overview-destination"
     $finalOverview = Wait-MultiProjectObservation "overview"
-    foreach ($descendant in @(Get-UiaOwnedProcessDescendants @($multiProcess.Id))) {
-      $current = Get-CimInstance Win32_Process -Filter "ProcessId = $($descendant.ProcessId)" -ErrorAction Stop
-      if ($null -ne $current -and [string]$current.CreationDate -ceq [string]$descendant.CreationDate) {
-        $child = Get-Process -Id $descendant.ProcessId -ErrorAction SilentlyContinue
-        if ($child -and -not $child.HasExited) {
-          $null = $child.Handle
-          $ownedChildren.Add($child)
-        }
-      }
-    }
     Require ([GraphCodeUiaGateState]::PostCommand($multiWindow, 0x5002)) "multi-project shell rejected Exit"
     Require ($multiProcess.WaitForExit(5000) -and $multiProcess.ExitCode -eq 0) "multi-project owned shell did not exit cleanly"
     return [ordered]@{
@@ -2836,16 +3000,23 @@ function Invoke-MultiProjectRenamePhase {
       finalOverview = $finalOverview
       limits = "Observed two owner/card groups; lane/Open geometry is source-derived, not a UIA caption. Header is project title; loop bar is Selected loop workspace; tabs independently named. Stub evidence does not prove production daemon persistence, glyphs, physical input devices, global-lane filtering, richer topology, worktrees, Edit Details or macOS runtime."
     }
+  } catch {
+    $primaryError = $_
+    throw
   } finally {
-    $cleanupRoots = @($multiProcess, $(if ($peerChild) { $peerChild.process } else { $null })) + $ownedChildren.ToArray()
-    Stop-UiaOwnedProcessTrees $cleanupRoots
-    foreach ($child in $ownedChildren) { $child.Dispose() }
+    $cleanupFailures = [Collections.Generic.List[string]]::new()
     foreach ($child in @($peerChild, $shellChild)) {
       if ($null -ne $child) {
-        $null = $child.process.WaitForExit(5000)
-        $child.stdout.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $logDirectory ($child.stem + "-stdout.log"))
-        $child.stderr.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $logDirectory ($child.stem + "-stderr.log"))
+        try { $null = Complete-MultiProjectCapture $child $logDirectory 5000 $primaryError }
+        catch { $cleanupFailures.Add($_.Exception.Message) }
       }
+    }
+    if ($cleanupFailures.Count -gt 0) {
+      $message = "MULTIPROJECT_PHASE_TEARDOWN: $($cleanupFailures -join '; ')"
+      if ($primaryError) {
+        $primaryError.Exception.Data["MultiProjectPhaseTeardown"] = $message
+        Write-Warning $message -WarningAction Continue
+      } else { throw $message }
     }
   }
 }

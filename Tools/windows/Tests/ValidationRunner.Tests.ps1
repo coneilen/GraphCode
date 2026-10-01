@@ -329,7 +329,10 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     }
   }
   $helper = $null
+  $capture = $null
+  $primaryError = $null
   $client = $null
+  $jobSourcePath = Join-Path (Split-Path $stubPath -Parent) "Tests\Packaging.Standalone.Tests.ps1"
   $resultPath = Join-Path $scratch "peer.json"
   $controlPath = Join-Path $scratch "publish.json"
   $pipeName = "graphcode-contract-mp-" + [guid]::NewGuid().ToString("N")
@@ -363,21 +366,11 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     return ConvertFrom-MultiProjectJson ([Text.Encoding]::UTF8.GetString((Read-MultiTestBytes $length)))
   }
   try {
-    $start = [Diagnostics.ProcessStartInfo]::new($pwsh)
-    $start.UseShellExecute = $false
-    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
-    $start.Environment.Clear()
-    foreach ($name in @("SystemRoot", "WINDIR", "PATH", "PSModulePath", "USERPROFILE", "SystemDrive", "ComSpec")) {
-      $value = [Environment]::GetEnvironmentVariable($name)
-      if ($null -ne $value) { $start.Environment[$name] = $value }
-    }
-    $start.Environment["TEMP"] = $scratch; $start.Environment["TMP"] = $scratch
-    foreach ($argument in @("-NoProfile", "-File", $stubPath, "-PipeName", $pipeName, "-ResultPath", $resultPath,
-        "-SeedMultiProjects", "-ProjectAPath", $alpha, "-ProjectBPath", $beta, "-PublicationControlPath", $controlPath)) {
-      $start.ArgumentList.Add($argument)
-    }
-    $helper = [Diagnostics.Process]::Start($start)
-    $stdout = $helper.StandardOutput.ReadToEndAsync(); $stderr = $helper.StandardError.ReadToEndAsync()
+    $environment = @{ TEMP = $scratch; TMP = $scratch }
+    $capture = Start-MultiProjectOwnedProcess $pwsh @("-NoProfile", "-File", $stubPath, "-PipeName", $pipeName, "-ResultPath", $resultPath,
+      "-SeedMultiProjects", "-ProjectAPath", $alpha, "-ProjectBPath", $beta, "-PublicationControlPath", $controlPath) `
+      $environment "multiproject" $jobSourcePath
+    $helper = $capture.process
     $client = [IO.Pipes.NamedPipeClientStream]::new(".", $pipeName, [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
     $client.Connect(5000)
     Send-MultiTestFrame ([ordered]@{ version = 2; kind = "hello"; supportedVersions = @(1,2) })
@@ -408,21 +401,14 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     }
     $client.Dispose()
     $client = $null
-    $null = $helper.WaitForExit(100)
-    if (-not $helper.HasExited) { Stop-Process -Id $helper.Id -Force }
-    $null = $helper.WaitForExit(5000)
-    $stdout.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $scratch "multiproject-stdout.log")
-    $stderr.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $scratch "multiproject-stderr.log")
-    $helper.Dispose()
+    $null = Complete-MultiProjectCapture $capture $scratch 5000
+    $capture = $null
     $helper = $null
     $defaultResult = Join-Path $scratch "default-peer.json"
     $defaultPipe = "graphcode-contract-default-" + [guid]::NewGuid().ToString("N")
-    $start.ArgumentList.Clear()
-    foreach ($argument in @("-NoProfile", "-File", $stubPath, "-PipeName", $defaultPipe, "-ResultPath", $defaultResult)) {
-      $start.ArgumentList.Add($argument)
-    }
-    $helper = [Diagnostics.Process]::Start($start)
-    $stdout = $helper.StandardOutput.ReadToEndAsync(); $stderr = $helper.StandardError.ReadToEndAsync()
+    $capture = Start-MultiProjectOwnedProcess $pwsh @("-NoProfile", "-File", $stubPath, "-PipeName", $defaultPipe, "-ResultPath", $defaultResult) `
+      $environment "default-peer" $jobSourcePath
+    $helper = $capture.process
     $client = [IO.Pipes.NamedPipeClientStream]::new(".", $defaultPipe, [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
     $client.Connect(5000)
     Send-MultiTestFrame ([ordered]@{ version = 2; kind = "hello"; supportedVersions = @(1,2) })
@@ -438,17 +424,134 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
         $event.event.graphChanged.nodes[1].id -ceq $b -and $event.event.graphChanged.nodes[1].title -ceq "Stub node B") "legacy default fixture changed"
       return "default one-project/two-node fixture read through unchanged protocol"
     }
+  } catch {
+    $primaryError = $_
+    throw
   } finally {
-    if ($client) { $client.Dispose() }
-    if ($helper) {
-      if (-not $helper.HasExited) { Stop-Process -Id $helper.Id -Force }
-      $null = $helper.WaitForExit(5000)
-      $stdout.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $scratch "stdout.log")
-      $stderr.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $scratch "stderr.log")
-      $helper.Dispose()
+    $cleanupErrors = [Collections.Generic.List[string]]::new()
+    try { if ($client) { $client.Dispose() } } catch { $cleanupErrors.Add("disposing owned protocol client: $($_.Exception.Message)") }
+    try { $null = Complete-MultiProjectCapture $capture $scratch 5000 $primaryError }
+    catch { $cleanupErrors.Add($_.Exception.Message) }
+    try { $results.ToArray() | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath (Join-Path $scratch "cases.json") }
+    catch { $cleanupErrors.Add("persisting protocol case diagnostics: $($_.Exception.Message)") }
+    if ($cleanupErrors.Count -gt 0) {
+      $message = "MULTIPROJECT_PROTOCOL_TEARDOWN: $($cleanupErrors -join '; ')"
+      if ($primaryError) {
+        $primaryError.Exception.Data["MultiProjectProtocolTeardown"] = $message
+        Write-Warning $message -WarningAction Continue
+      } else { throw $message }
     }
-    $results.ToArray() | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath (Join-Path $scratch "cases.json")
   }
+  $drainSource = @'
+param([string] $hostPath, [string] $caseRoot, [string] $mode)
+$ErrorActionPreference = "Stop"
+Start-Sleep -Milliseconds 300
+[Console]::Out.WriteLine("owned-capture-stdout")
+[Console]::Error.WriteLine("owned-capture-stderr")
+if ($mode -in @("inherited", "inherited-timeout")) {
+  $ready = Join-Path $caseRoot "descendant-ready"
+  $command = "[IO.File]::WriteAllText('" + $ready.Replace("'", "''") + "', 'ready'); [Threading.Thread]::Sleep(30000)"
+  $start = [Diagnostics.ProcessStartInfo]::new($hostPath)
+  $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+  foreach ($argument in @("-NoProfile", "-NonInteractive", "-EncodedCommand",
+      [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)))) { $start.ArgumentList.Add($argument) }
+  $child = [Diagnostics.Process]::Start($start)
+  @{ pid = $child.Id; startUtcTicks = $child.StartTime.ToUniversalTime().Ticks } |
+    ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $caseRoot "descendant.json")
+  $deadline = [DateTime]::UtcNow.AddSeconds(5)
+  while (-not [IO.File]::Exists($ready)) {
+    if ([DateTime]::UtcNow -ge $deadline) { throw "Controlled descendant not ready" }
+    Start-Sleep -Milliseconds 10
+  }
+  $child.Dispose()
+}
+[IO.File]::WriteAllText((Join-Path $caseRoot "ready"), "ready")
+if ($mode -in @("stop", "timeout")) { [Threading.Thread]::Sleep(30000) }
+if ($mode -eq "abrupt") { [Environment]::Exit(23) }
+'@
+  foreach ($mode in @("normal", "stop", "inherited", "abrupt", "timeout", "inherited-timeout", "primary-secondary", "cleanup-only")) {
+    Invoke-MultiCase ("bounded capture " + $mode) -Negative:($mode -in @("timeout", "inherited-timeout", "primary-secondary", "cleanup-only")) {
+      $caseRoot = Join-Path $scratch ("drain-" + $mode)
+      $null = New-Item -ItemType Directory -Path $caseRoot
+      $entry = Join-Path $caseRoot "helper.ps1"
+      [IO.File]::WriteAllText($entry, $drainSource)
+      $ownedCapture = $null
+      $lock = $null
+      $primary = $null
+      try {
+        $ownedCapture = Start-MultiProjectOwnedProcess $pwsh @("-NoProfile", "-File", $entry, $pwsh, $caseRoot, $mode) `
+          @{ TEMP = $caseRoot; TMP = $caseRoot } "controlled" $jobSourcePath
+        $deadline = [DateTime]::UtcNow.AddSeconds(5)
+        while (-not [IO.File]::Exists((Join-Path $caseRoot "ready"))) {
+          Assert-MultiCase ([DateTime]::UtcNow -lt $deadline) "controlled helper did not become ready"
+          Start-Sleep -Milliseconds 10
+        }
+        if ($mode -in @("timeout", "inherited-timeout")) {
+          $code = if ($mode -eq "timeout") { "MULTIPROJECT_CAPTURE_EXIT" } else { "MULTIPROJECT_CAPTURE_DRAIN" }
+          try { Wait-MultiProjectCapture $ownedCapture 500 }
+          catch { $primary = $_ }
+          Assert-MultiCase ($null -ne $primary -and $primary.Exception.Message.StartsWith($code, [StringComparison]::Ordinal)) `
+            "actual controlled $code timeout missing"
+        } elseif ($mode -notin @("stop", "inherited")) {
+          Wait-MultiProjectCapture $ownedCapture 5000
+          if ($mode -eq "abrupt") {
+            Assert-MultiCase ($ownedCapture.rootProcess.ExitCode -eq 23) "controlled abrupt-close exit was not actually exercised"
+          } else {
+            Assert-MultiCase ($ownedCapture.rootProcess.ExitCode -eq 0) "controlled normal-exit helper failed"
+          }
+        } else {
+          if ($mode -eq "inherited") {
+            Assert-MultiCase ($ownedCapture.rootProcess.WaitForExit(5000) -and -not $ownedCapture.stdout.IsCompleted -and
+              [StandaloneProcessJob]::Active($ownedCapture.job) -gt 0) "real inherited-open-pipe condition absent"
+          }
+        }
+        if ($mode -in @("primary-secondary", "cleanup-only")) {
+          $lock = [IO.File]::Open((Join-Path $caseRoot "controlled-stdout.log"), [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+          if ($mode -eq "primary-secondary") {
+            try { throw "controlled original primary failure" } catch { $primary = $_ }
+          }
+        }
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        if ($mode -eq "cleanup-only") {
+          $message = Reject-MultiCase { Complete-MultiProjectCapture $ownedCapture $caseRoot 3000 } "MULTIPROJECT_TEARDOWN"
+          Assert-MultiCase ($message.Contains("stdout capture persistence") -and $message.Contains("pid=") -and
+            $message.Contains("start=") -and $message.Contains("job=")) "cleanup-only exact identity diagnostic missing"
+          $ownedCapture = $null
+          return $message
+        }
+        $diagnostic = Complete-MultiProjectCapture $ownedCapture $caseRoot 3000 $primary
+        $ownedCapture = $null
+        Assert-MultiCase ($diagnostic.rootExited -and $diagnostic.ownedJobEmpty -and
+          $diagnostic.redirectedReadersDrained -and $clock.ElapsedMilliseconds -lt 5000) "shared bounded teardown not proved"
+        if ($mode -eq "primary-secondary") {
+          Assert-MultiCase ($primary.Exception.Message -ceq "controlled original primary failure" -and
+            $primary.Exception.Data["MultiProjectTeardown:controlled"].Contains("stdout capture persistence")) `
+            "original primary or explicit secondary diagnostic lost"
+        } elseif ($primary) {
+          Assert-MultiCase ($diagnostic.failures.Count -eq 0 -and
+            $primary.Exception.Data["MultiProjectCapture:controlled"].redirectedReadersDrained) `
+            "timeout primary lost its explicit drained-capture diagnostics"
+        }
+        if ($mode -in @("inherited", "inherited-timeout")) {
+          $identity = Get-Content -LiteralPath (Join-Path $caseRoot "descendant.json") -Raw | ConvertFrom-Json
+          $survivor = Get-Process -Id $identity.pid -ErrorAction SilentlyContinue
+          if ($survivor) {
+            try { Assert-MultiCase ($survivor.StartTime.ToUniversalTime().Ticks -ne $identity.startUtcTicks) "owned inherited writer survived" }
+            finally { $survivor.Dispose() }
+          }
+        }
+        return $diagnostic
+      } catch {
+        if (-not $primary) { $primary = $_ }
+        throw
+      } finally {
+        if ($lock) { $lock.Dispose() }
+        if ($ownedCapture) { $null = Complete-MultiProjectCapture $ownedCapture $caseRoot 3000 $primary }
+      }
+    }
+  }
+  $results.ToArray() | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath (Join-Path $scratch "cases.json")
   $positive = @($results | Where-Object { -not $_.negative }).Count
   $negative = @($results | Where-Object { $_.negative }).Count
   Assert-MultiCase ($positive -gt 0 -and $negative -gt 0) "empty protocol controls"
@@ -1740,6 +1843,12 @@ Start-Sleep -Seconds 60
       "totalObservedCardCount", "totalObservedProjectRowCount", "expectedMatchedOwners", "unexpectedCardIds", "unexpectedProjectIds",
       "foreignProjectFragmentCount", "static Graph destination is not an ordinary project row")) {
     if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: unfiltered multi-project observer roster lacks $required" }
+  }
+  foreach ($required in @("function Complete-MultiProjectCapture", "function Wait-MultiProjectCapture",
+      "function Initialize-MultiProjectProcessJob", "StandaloneProcessJob", "rootStartUtcTicks", "targetStartUtcTicks",
+      'if (-not $capture.rootProcess.WaitForExit($remaining))', "MULTIPROJECT_CAPTURE_DRAIN", "MULTIPROJECT_CAPTURE_TEARDOWN=",
+      "MultiProjectTeardown:", "WaitAll", "ownedJobEmpty", '$null = Complete-MultiProjectCapture $child $logDirectory 5000 $primaryError')) {
+    if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: bounded multi-project capture lacks $required" }
   }
   Test-MultiProjectProtocolContracts $stubDaemonSource $uiaLiveGateSource `
     (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") $pwsh
