@@ -1840,31 +1840,12 @@ pub const Workspace = struct {
         const slot = &self.surfaces[index];
         const child = slot.attach orelse return;
         const stdout = child.stdout orelse return;
-        var available: c.DWORD = 0;
-        if (c.PeekNamedPipe(@ptrCast(stdout.handle), null, 0, null, &available, null) == 0) {
-            self.handleAttachExit(index);
-            return;
-        }
-        var budget: usize = 64 * 1024;
-        while (available > 0 and budget > 0) {
-            var buffer: [4096]u8 = undefined;
-            var read: c.DWORD = 0;
-            const amount = @min(
-                @min(available, @as(c.DWORD, @intCast(buffer.len))),
-                @as(c.DWORD, @intCast(budget)),
-            );
-            if (c.ReadFile(@ptrCast(stdout.handle), &buffer, amount, &read, null) == 0 or read == 0) {
-                self.handleAttachExit(index);
-                return;
-            }
-            self.feedTerminalOutput(index, buffer[0..@intCast(read)]);
-            budget -= @intCast(read);
-            if (c.PeekNamedPipe(@ptrCast(stdout.handle), null, 0, null, &available, null) == 0) {
-                self.handleAttachExit(index);
-                return;
-            }
-        }
-        if (c.GetExitCodeProcess(child.id, &available) != 0 and available != c.STILL_ACTIVE) {
+        if (pollAttachOutput(NativeAttachOutput{
+            .workspace = self,
+            .index = index,
+            .pipe = @ptrCast(stdout.handle),
+            .process = child.id,
+        }) == .exited) {
             self.handleAttachExit(index);
         }
     }
@@ -1919,6 +1900,52 @@ pub const Workspace = struct {
         self.routeVtResponses(index);
         self.render_error = result.render_result;
         if (!std.meta.eql(previous, slot.output_result)) slot.output_result.logFailures(index);
+    }
+};
+
+const AttachOutputPollResult = enum { keep_attached, exited };
+
+fn pollAttachOutput(api: anytype) AttachOutputPollResult {
+    var available = api.peek() orelse return .exited;
+    var budget: usize = 64 * 1024;
+    while (available > 0 and budget > 0) {
+        var buffer: [4096]u8 = undefined;
+        const amount = @min(@min(available, buffer.len), budget);
+        const read = api.read(buffer[0..amount]) orelse return .exited;
+        if (read == 0) return .exited;
+        api.publish(buffer[0..read]);
+        budget -= read;
+        available = api.peek() orelse return .exited;
+    }
+    if (available > 0) return .keep_attached;
+    return if (api.exited()) .exited else .keep_attached;
+}
+
+const NativeAttachOutput = struct {
+    workspace: *Workspace,
+    index: usize,
+    pipe: c.HANDLE,
+    process: c.HANDLE,
+
+    fn peek(self: NativeAttachOutput) ?usize {
+        var available: c.DWORD = 0;
+        if (c.PeekNamedPipe(self.pipe, null, 0, null, &available, null) == 0) return null;
+        return @intCast(available);
+    }
+
+    fn read(self: NativeAttachOutput, buffer: []u8) ?usize {
+        var count: c.DWORD = 0;
+        if (c.ReadFile(self.pipe, buffer.ptr, @intCast(buffer.len), &count, null) == 0) return null;
+        return @intCast(count);
+    }
+
+    fn publish(self: NativeAttachOutput, bytes: []const u8) void {
+        self.workspace.feedTerminalOutput(self.index, bytes);
+    }
+
+    fn exited(self: NativeAttachOutput) bool {
+        var code: c.DWORD = 0;
+        return c.GetExitCodeProcess(self.process, &code) != 0 and code != c.STILL_ACTIVE;
     }
 };
 
@@ -4204,4 +4231,167 @@ test "loop bar actions expose stop only for active loops" {
     try std.testing.expect(loopBarActionAt(220, 34, 1200, 1010, 50, true) == null);
     try std.testing.expectEqual(LoopBarAction.show_graph, loopBarActionAt(220, 34, 1200, 1120, 50, false).?);
     try std.testing.expect(loopBarActionAt(220, 34, 1200, 1120, 90, false) == null);
+}
+
+const AttachOutputProbe = struct {
+    input: []const u8,
+    output: []u8,
+    offset: usize = 0,
+    delivered: usize = 0,
+    publications: usize = 0,
+    process_exited: bool = true,
+    exit_queries: usize = 0,
+    peek_calls: usize = 0,
+    fail_peek_at: ?usize = null,
+    fail_read: bool = false,
+    zero_read: bool = false,
+    read_limit: usize = 4096,
+    largest_request: usize = 0,
+    terminal: ?*Surface = null,
+    publication: ?*TerminalOutputProbe = null,
+
+    fn peek(self: *AttachOutputProbe) ?usize {
+        self.peek_calls += 1;
+        if (self.fail_peek_at == self.peek_calls) return null;
+        return self.input.len - self.offset;
+    }
+
+    fn read(self: *AttachOutputProbe, buffer: []u8) ?usize {
+        self.largest_request = @max(self.largest_request, buffer.len);
+        if (self.fail_read) return null;
+        if (self.zero_read) return 0;
+        const count = @min(buffer.len, self.read_limit);
+        @memcpy(buffer[0..count], self.input[self.offset..][0..count]);
+        self.offset += count;
+        return count;
+    }
+
+    fn publish(self: *AttachOutputProbe, bytes: []const u8) void {
+        @memcpy(self.output[self.delivered..][0..bytes.len], bytes);
+        self.delivered += bytes.len;
+        self.publications += 1;
+        if (self.terminal) |slot| {
+            const probe = self.publication.?;
+            probe.call_count = 0;
+            _ = publishTerminalOutput(std.testing.allocator, slot, bytes, probe);
+        }
+    }
+
+    fn exited(self: *AttachOutputProbe) bool {
+        self.exit_queries += 1;
+        return self.process_exited;
+    }
+};
+
+test "terminal exit-tail drains buffered bytes through publication before retiring exited attach" {
+    const allocator = std.testing.allocator;
+    const tail = "\r\nEXIT-TAIL-DONE";
+    const input = try allocator.alloc(u8, 65536 + tail.len);
+    defer allocator.free(input);
+    @memset(input[0..65536], 'A');
+    @memcpy(input[65536..], tail);
+    const output = try allocator.alloc(u8, input.len);
+    defer allocator.free(output);
+    var slot = Surface{ .cells = try allocator.alloc(c.winghostty_terminal_cell, cell_count) };
+    defer allocator.free(slot.cells);
+    slot.resetOutput();
+    var publication = TerminalOutputProbe{};
+    var probe = AttachOutputProbe{
+        .input = input,
+        .output = output,
+        .terminal = &slot,
+        .publication = &publication,
+    };
+
+    try std.testing.expectEqual(AttachOutputPollResult.keep_attached, pollAttachOutput(&probe));
+    try std.testing.expectEqual(@as(usize, 65536), probe.delivered);
+    try std.testing.expectEqual(@as(usize, 0), probe.exit_queries);
+    try std.testing.expectEqual(AttachOutputPollResult.exited, pollAttachOutput(&probe));
+    try std.testing.expectEqualStrings(input, output[0..probe.delivered]);
+    try std.testing.expectEqual(@as(usize, 1), probe.exit_queries);
+    try std.testing.expectEqual(@as(usize, 17), slot.output_events);
+    try std.testing.expect(slot.output_result.succeeded());
+    try std.testing.expectEqual(@as(usize, 4096), probe.largest_request);
+    const sentinel = tail[2..];
+    for (sentinel, 0..) |byte, index|
+        try std.testing.expectEqual(@as(u32, byte), slot.cells[(rows - 1) * columns + index].codepoint);
+    const text_start = (rows - 1) * (columns + 1);
+    try std.testing.expectEqualStrings(sentinel, publication.text[text_start..][0..sentinel.len]);
+}
+
+test "terminal exit-tail preserves multiple polling budgets and partial reads without replay" {
+    const allocator = std.testing.allocator;
+    const input = try allocator.alloc(u8, 2 * 65536 + 37);
+    defer allocator.free(input);
+    for (input, 0..) |*byte, index| byte.* = @intCast(0x20 + index % 95);
+    const output = try allocator.alloc(u8, input.len);
+    defer allocator.free(output);
+    var probe = AttachOutputProbe{ .input = input, .output = output, .read_limit = 31 };
+    for (0..3) |poll| {
+        const before = probe.delivered;
+        const expected: AttachOutputPollResult = if (poll < 2) .keep_attached else .exited;
+        try std.testing.expectEqual(expected, pollAttachOutput(&probe));
+        try std.testing.expectEqual(if (poll < 2) @as(usize, 65536) else 37, probe.delivered - before);
+    }
+    try std.testing.expectEqualStrings(input, output[0..probe.delivered]);
+    try std.testing.expectEqual(@as(usize, 1), probe.exit_queries);
+    try std.testing.expect(probe.publications > 0);
+    try std.testing.expectEqual(@as(usize, 4096), probe.largest_request);
+}
+
+test "terminal exit-tail retires drained zero short and exact-budget output without an extra poll" {
+    const allocator = std.testing.allocator;
+    const input = try allocator.alloc(u8, 65536);
+    defer allocator.free(input);
+    @memset(input, 'B');
+    const output = try allocator.alloc(u8, input.len);
+    defer allocator.free(output);
+    for ([_]usize{ 0, 17, 65536 }) |length| {
+        var probe = AttachOutputProbe{ .input = input[0..length], .output = output };
+        try std.testing.expectEqual(AttachOutputPollResult.exited, pollAttachOutput(&probe));
+        try std.testing.expectEqual(length, probe.delivered);
+        try std.testing.expectEqualStrings(input[0..length], output[0..probe.delivered]);
+        try std.testing.expectEqual(@as(usize, 1), probe.exit_queries);
+        try std.testing.expect(probe.largest_request <= 4096);
+    }
+}
+
+test "terminal exit-tail keeps running attaches live while output drains or stays idle" {
+    const allocator = std.testing.allocator;
+    const input = try allocator.alloc(u8, 65537);
+    defer allocator.free(input);
+    @memset(input, 'C');
+    const output = try allocator.alloc(u8, input.len);
+    defer allocator.free(output);
+    var probe = AttachOutputProbe{ .input = input, .output = output, .process_exited = false };
+    try std.testing.expectEqual(AttachOutputPollResult.keep_attached, pollAttachOutput(&probe));
+    try std.testing.expectEqual(@as(usize, 65536), probe.delivered);
+    try std.testing.expectEqual(@as(usize, 0), probe.exit_queries);
+    try std.testing.expectEqual(AttachOutputPollResult.keep_attached, pollAttachOutput(&probe));
+    try std.testing.expectEqualStrings(input, output[0..probe.delivered]);
+    const publications = probe.publications;
+    try std.testing.expectEqual(AttachOutputPollResult.keep_attached, pollAttachOutput(&probe));
+    try std.testing.expectEqual(publications, probe.publications);
+    try std.testing.expectEqual(@as(usize, 2), probe.exit_queries);
+}
+
+test "terminal exit-tail preserves fatal peek read and zero-progress outcomes" {
+    const input: [5000]u8 = @splat('D');
+    var output: [5000]u8 = undefined;
+    for (0..4) |failure| {
+        var probe = AttachOutputProbe{ .input = &input, .output = &output, .process_exited = false };
+        switch (failure) {
+            0 => probe.fail_peek_at = 1,
+            1 => probe.fail_peek_at = 2,
+            2 => probe.fail_read = true,
+            3 => probe.zero_read = true,
+            else => unreachable,
+        }
+        try std.testing.expectEqual(AttachOutputPollResult.exited, pollAttachOutput(&probe));
+        const delivered: usize = if (failure == 1) 4096 else 0;
+        try std.testing.expectEqual(delivered, probe.delivered);
+        try std.testing.expectEqualStrings(input[0..delivered], output[0..probe.delivered]);
+        try std.testing.expectEqual(@as(usize, 0), probe.exit_queries);
+        try std.testing.expectEqual(if (failure == 1) @as(usize, 1) else 0, probe.publications);
+    }
 }
