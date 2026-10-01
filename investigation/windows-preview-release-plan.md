@@ -8,14 +8,20 @@ exists now; building a ZIP is a different milestone from proving that someone
 can install it, work with an actual agent, and safely resume their project.
 The critical path is terminal correctness plus a packaged production-daemon
 flight, followed by fixes for any reproduced core bugs. It is not closing all
-35 Partial rows, and it is not just visual polish.
+35 Partial rows (36 after the onboarding demotion below), and it is not just visual polish.
 
 Assessment date: **2026-10-01**. Accepted source floor:
 `0765419a6d1e7ad401422903edf9102dbf0c9a17`, including the landed
 [refresh/navigation fix #549](https://github.com/scgopi/GraphCode/pull/549).
 At that floor, the [parity ledger](ui-parity-matrix.md) contains **98 surfaces:
-63 Validated and 35 Partial**. This plan changes no parity status or evidence.
+63 Validated and 35 Partial**. This plan originally changed no parity status or evidence.
 A newer candidate must be qualified at its own exact source and package hashes.
+
+**2026-10-01 amendment:** a clean-clone setup and manual launch found that
+"Four-page onboarding" was not supported as `Validated`. The ledger now records
+**62 Validated and 36 Partial**. See the row, the new delivery-map entry below,
+and [Known work items from a clean-clone setup](#known-work-items-from-a-clean-clone-setup).
+No other status changed.
 
 The live release API was checked on this date:
 [v0.1.77](https://github.com/scgopi/GraphCode/releases/tag/v0.1.77), published
@@ -80,11 +86,15 @@ policy or macOS policy is changed here.
 
 ## Current evidence and attribution limits
 
-The ledger's validated onboarding/empty states, local ingress, settings,
+The ledger's validated empty states, local ingress, settings,
 sidebar identities, project canvas controls, Quick Chat entry points, workspace
 chrome, explicit connection errors and tray lifecycle support the proposed core
-flow. They are useful existing evidence, not 63 certifications of an installed
+flow. They are useful existing evidence, not 62 certifications of an installed
 production-agent experience; many observations use deterministic fixtures.
+First-run onboarding is not part of that evidence. It currently blocks the
+daemon connection, exposes no UIA tree, and shares its seen marker across
+support directories ([#556](https://github.com/scgopi/GraphCode/issues/556),
+[#554](https://github.com/scgopi/GraphCode/issues/554)).
 
 - **Terminal:** the [Windows shell README](../graphcode-windows/README.md)
   describes a default legacy ASCII path/current 120x40 text grid and an opt-in
@@ -151,7 +161,7 @@ zmx Zig 0.16.0 and Swift 6.3.3. This plan proposes no pin or toolchain changes.
 
 ## Partial-surface delivery map
 
-All **35** current Partial surface names appear once below, in ledger order.
+All **36** current Partial surface names appear once below, in ledger order.
 An alpha disposition is conditional on the gates, not a promotion to parity.
 F means core usability/safety qualification; O means optional functionality;
 P means genuinely cosmetic/discovery refinement; E identifies the missing
@@ -163,6 +173,7 @@ observation. Notes distinguish the parts of mixed rows.
 | Window toolbar | F + O + P + E | Qualify core; defer extras | Reachable Jump and workspace/detail navigation must not overlap or lose focus at the declared viewport/DPI. Populated Needs You and threshold-driven worktree content lack a complete comparison; defer unneeded worktree aggregation and exact chrome, not unreachable core actions. |
 | File/Loop/Terminal menus | F + P + E | Qualify core | Witness core commands and state-aware enablement in graph and terminal contexts with actual keyboard/menu use. Live subsets and hidden HMENU tests are not the complete route. Extra shortcut hints and macOS ordering fidelity can wait after commands work. |
 | Workspace lifecycle | F + O + E | Qualify safety; defer multi-instance features | Default/local reopen must preserve state. New/Rename/Delete and running-instance paging have helper coverage but no complete shown native lifecycle; delete's recycle/daemon/session effects are injected. Qualify exposed destructive behavior in disposable fixtures or guard it before preview; defer live totals and multi-instance automation, not safety. |
+| Four-page onboarding | F + E | Core release gate | Every tester sees this on first launch. Today it runs modally before `client.connect()`, so the shell stays disconnected until it closes ([#556](https://github.com/scgopi/GraphCode/issues/556)). It has no UIA provider, so it is not reachable by assistive technology or the gate (#556). Its seen marker ignores `GRAPHCODE_SUPPORT_DIR` ([#554](https://github.com/scgopi/GraphCode/issues/554)). On a fresh support directory the daemon is never started at all ([#555](https://github.com/scgopi/GraphCode/issues/555)). To qualify: drive install → first launch → onboarding → connected Welcome on the packaged path with native keyboard and UIA. Exact page artwork can follow. |
 | Loop row presentation | F + P + E | Qualify identity; defer refinement | Require readable correct title/state/identity in the agent flow. Elapsed formatting has unit coverage but no rendered-column observation; exact time-column spacing and pixel parity can wait. Incorrect or misleading live state is functional, not decoration. |
 | Cross-project global graph | F + O + E | Qualify navigation; defer richer topology | Local lane selection must retain the intended project during foreign refreshes; #549 fixes a real reset bug at this floor. Two-project production navigation still needs a flight. Defer richer topology/START furniture, filtering and remote/all-project worktree binding; one harness success does not close those residuals. |
 | Notebook grid | P + E | Defer | Grid geometry follows pan/zoom in helper tests, but live line spacing has not been pixel-asserted. Finish direct rendered grid evidence and macOS styling later unless the grid makes content unreadable or impedes hit testing. |
@@ -281,12 +292,43 @@ Do not enable or advertise in-app install/relaunch until its own real
 running-EXE/session-continuity flight passes. This plan neither creates a tag
 or release nor dispatches CI, uploads assets, installs an app or changes pins.
 
+## Known work items from a clean-clone setup
+
+On 2026-10-01 a new contributor followed the documented workflow on a clean
+Windows 11 x64 PC: bootstrap, Swift staging, `windows-shell` and `packaging`
+validation, a local package build, and a manual launch. The package was built
+from `59ebed1`; the onboarding/connect ordering is unchanged at `8ef2184c`.
+That run filed the issues below. They are tracked here so preview
+qualification does not count around them. None is fixed by this document.
+
+| Issue | Lane | Gate affected | Summary |
+|---|---|---|---|
+| [#555](https://github.com/scgopi/GraphCode/issues/555) | F | Clean installation; Reachability and lifecycle | On a fresh support directory the shell never starts its daemon, because the endpoint depends on a rendezvous secret that only the daemon creates. The installed scheduled-task daemon may mask this; source runs and reset profiles do not. |
+| [#556](https://github.com/scgopi/GraphCode/issues/556) | F + E | Reachability and lifecycle | The first-run onboarding modal blocks `client.connect()` and exposes no UIA tree. |
+| [#554](https://github.com/scgopi/GraphCode/issues/554) | F | Safe mutations; test isolation | The onboarding seen marker ignores `GRAPHCODE_SUPPORT_DIR` and is shared across workspaces and tests. |
+| [#558](https://github.com/scgopi/GraphCode/issues/558) | F + E | Reachability and lifecycle | `graphcoded` exits silently with `0xC000001D` when `USERPROFILE` is redirected. The root cause is not yet diagnosed. |
+| [#553](https://github.com/scgopi/GraphCode/issues/553) | E | Exact artifact | `package.ps1`/`release.ps1` have no local untagged build mode. A developer package currently requires `-AllowTagMismatch` against an existing tag, which conflicts with the provenance rule above. |
+| [#560](https://github.com/scgopi/GraphCode/issues/560) | E | All gates using the UIA live gate | Local UIA gate timeout after the Worktrees lane click. Unattributed; not a product verdict. |
+| [#561](https://github.com/scgopi/GraphCode/issues/561) | E | Contributor validation | `WorktreeGitProcess.Tests.ps1` fails from deep checkout paths (MAX_PATH). |
+| [#562](https://github.com/scgopi/GraphCode/issues/562) | E | Safe mutations; test isolation | `windows-shell` validation writes to the real user profile. |
+| [#551](https://github.com/scgopi/GraphCode/issues/551) | Setup | Contributor setup | Bootstrap does not enable `core.longpaths` for provider clones, so the Winghostty clone fails. |
+| [#559](https://github.com/scgopi/GraphCode/issues/559) | Setup | Contributor setup | Zig downloads have no timeout, retry, resume, or mirror. |
+| [#557](https://github.com/scgopi/GraphCode/issues/557) | Setup | Contributor setup | There is no single quick-start build-and-run script. |
+| [#552](https://github.com/scgopi/GraphCode/issues/552) | Setup | Honest tester handoff | There is no Windows quick-start documentation for building and launching. |
+
+Setup items do not block tester qualification, which uses a prebuilt package.
+They do determine how quickly a contributor can reproduce and fix the F-lane
+items. Closing an issue does not promote a ledger row by itself; promotion
+still requires the ledger's runtime evidence.
+
 ## Measuring progress
 
 Track two independent outcomes: **whole-row parity closures** under the ledger's
 unchanged macOS-equivalence/runtime rule, and **observable product bugs fixed or
 core release behaviors newly qualified** with exact source/evidence. The
-unchanged 63/35 split across the last eight ledger commits (September 28-30)
+unchanged 63/35 split across the last eight ledger commits (September 28-30;
+62/36 after the 2026-10-01 onboarding correction, which is a more accurate
+record, not a regression)
 does not mean no progress: narrowed evidence, cancellation/persistence work and
 the landed refresh-navigation fix matter even when a row has other residuals.
 Conversely, PR counts, unit-test totals and harness enqueue counts are not
