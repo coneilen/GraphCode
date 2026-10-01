@@ -42,7 +42,7 @@ const DialogState = struct {
     edge_endpoints: []const EdgeEndpoint = &.{},
     lock_edge_endpoints: bool = true,
     edge_initial: ?Forms.EdgeDraft = null,
-    edge_read_errors: [10]?anyerror = .{null} ** 10,
+    field_read_errors: [10]?anyerror = .{null} ** 10,
     immediate_policy_path: []const u8 = "",
     confirmation_armed: bool = false,
     tile_field_index: ?usize = null,
@@ -1678,14 +1678,14 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             if (notification == c.CBN_SELCHANGE and command >= 9100 and command < 9120) {
                 readValue(value, command - 9100);
                 updateConditionalVisibility(value);
-                setStaticText(value, value.validation, edgeCaptureFailureReason(value) orelse "");
+                setStaticText(value, value.validation, captureFailureReason(value) orelse "");
                 refreshRecap(value);
                 layoutForm(safe_hwnd, value);
                 return 0;
             }
             if ((notification == c.EN_CHANGE or notification == c.BN_CLICKED) and command >= 9100 and command < 9120) {
                 readValue(value, command - 9100);
-                setStaticText(value, value.validation, edgeCaptureFailureReason(value) orelse "");
+                setStaticText(value, value.validation, captureFailureReason(value) orelse "");
                 refreshRecap(value);
             }
             if (value.kind == .worktree_policy and
@@ -2575,8 +2575,12 @@ fn readValues(state: *DialogState) void {
     for (0..state.field_count) |index| readValue(state, index);
 }
 
-const NativeEdgeReader = struct {
+const NativeFieldReader = struct {
     hwnd: c.HWND,
+
+    fn readUncheckedText(self: @This(), buffer: []u16) !usize {
+        return @intCast(c.GetWindowTextW(self.hwnd, buffer.ptr, @intCast(buffer.len)));
+    }
 
     fn textLength(self: @This()) !usize {
         if (c.IsWindow(self.hwnd) == 0) return error.EdgeFieldReadFailed;
@@ -2627,16 +2631,20 @@ fn captureEdgeField(state: *DialogState, index: usize, reader: anytype) !void {
 
 fn refreshEdgeField(state: *DialogState, index: usize, reader: anytype) void {
     captureEdgeField(state, index, reader) catch |err| {
-        state.edge_read_errors[index] = err;
+        state.field_read_errors[index] = err;
         return;
     };
-    state.edge_read_errors[index] = null;
+    state.field_read_errors[index] = null;
 }
 
-fn edgeCaptureFailureReason(state: *const DialogState) ?[]const u8 {
-    if (state.edge_initial == null) return null;
-    for (state.edge_read_errors) |failure| {
-        if (failure) |err| return switch (err) {
+fn captureFailureReason(state: *const DialogState) ?[]const u8 {
+    if (state.edge_initial == null and state.kind != .update) return null;
+    for (state.field_read_errors) |failure| {
+        if (failure) |err| return if (state.kind == .update) switch (err) {
+            error.OutOfMemory => "Out of memory reading details; retry or cancel.",
+            error.EdgeFieldTooLong => "This details field is too long to read safely.",
+            else => "Unable to read a details field completely; retry or cancel.",
+        } else switch (err) {
             error.OutOfMemory => "Out of memory reading edge fields; retry or cancel.",
             error.EdgeFieldTooLong => "This edge field is too long to read safely.",
             else => "Unable to read an edge field completely; retry or cancel.",
@@ -2660,6 +2668,9 @@ const EdgeCaptureProbe = struct {
         @memcpy(buffer[0..count], self.text[0..count]);
         buffer[count] = 0;
         return count;
+    }
+    fn readUncheckedText(self: @This(), buffer: []u16) !usize {
+        return self.readText(buffer);
     }
     fn selected(self: @This()) !usize {
         return self.selection orelse error.EdgeFieldReadFailed;
@@ -2690,7 +2701,7 @@ test "edge editing capture: live long Unicode field is never truncated" {
     refreshEdgeField(state, 5, EdgeCaptureProbe{ .text = &text });
     try std.testing.expectEqual(expected.len, state.values[5].len);
     try std.testing.expectEqualStrings(expected, state.values[5]);
-    try std.testing.expect(state.edge_read_errors[5] == null);
+    try std.testing.expect(state.field_read_errors[5] == null);
 }
 
 test "edge editing capture: allocation failure cannot accept an old value as success" {
@@ -2701,8 +2712,8 @@ test "edge editing capture: allocation failure cannot accept an old value as suc
     var failure = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     state.allocator = failure.allocator();
     refreshEdgeField(state, 5, EdgeCaptureProbe{ .text = std.unicode.utf8ToUtf16LeStringLiteral("new") });
-    try std.testing.expect(state.edge_read_errors[5] != null);
-    try std.testing.expectEqual(error.OutOfMemory, state.edge_read_errors[5].?);
+    try std.testing.expect(state.field_read_errors[5] != null);
+    try std.testing.expectEqual(error.OutOfMemory, state.field_read_errors[5].?);
     try std.testing.expectEqualStrings("old", state.values[5]);
     try std.testing.expect(validationReason(state) != null);
 }
@@ -2721,12 +2732,12 @@ test "edge editing capture: read failures mismatched lengths and invalid Unicode
         .{ .text = &invalid },
     }) |reader| {
         refreshEdgeField(state, 5, reader);
-        try std.testing.expect(state.edge_read_errors[5] != null);
+        try std.testing.expect(state.field_read_errors[5] != null);
         try std.testing.expect(validationReason(state) != null);
         try std.testing.expectEqualStrings("old", state.values[5]);
     }
     refreshEdgeField(state, 5, EdgeCaptureProbe{ .text = &.{} });
-    try std.testing.expect(state.edge_read_errors[5] == null);
+    try std.testing.expect(state.field_read_errors[5] == null);
     try std.testing.expectEqualStrings("", state.values[5]);
     // A completed read clears its capture error, not normal form validation.
     try std.testing.expect(validationReason(state) != null);
@@ -2741,8 +2752,8 @@ test "edge editing capture: one field recovery cannot clear another unreadable f
     refreshEdgeField(state, 5, failed);
     refreshEdgeField(state, 6, failed);
     refreshEdgeField(state, 5, EdgeCaptureProbe{ .text = std.unicode.utf8ToUtf16LeStringLiteral("new") });
-    try std.testing.expect(state.edge_read_errors[5] == null);
-    try std.testing.expect(state.edge_read_errors[6] != null);
+    try std.testing.expect(state.field_read_errors[5] == null);
+    try std.testing.expect(state.field_read_errors[6] != null);
     try std.testing.expect(validationReason(state) != null);
     refreshEdgeField(state, 6, EdgeCaptureProbe{ .text = &.{} });
     try std.testing.expect(validationReason(state) == null);
@@ -2766,7 +2777,7 @@ test "edge editing capture: enum selection and allocation are checked" {
     var failure = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     state.allocator = failure.allocator();
     refreshEdgeField(state, 2, EdgeCaptureProbe{ .text = &.{}, .selection = 1 });
-    try std.testing.expectEqual(error.OutOfMemory, state.edge_read_errors[2].?);
+    try std.testing.expectEqual(error.OutOfMemory, state.field_read_errors[2].?);
     try std.testing.expectEqualStrings("handoff", state.values[2]);
     state.allocator = allocator;
     refreshEdgeField(state, 2, EdgeCaptureProbe{ .text = &.{}, .selection = 1 });
@@ -2798,8 +2809,12 @@ fn readValue(state: *DialogState, index: usize) void {
         return;
     }
     if (state.edge_initial != null) {
-        if (index >= state.edge_read_errors.len) return;
-        refreshEdgeField(state, index, NativeEdgeReader{ .hwnd = state.edits[index] });
+        if (index >= state.field_read_errors.len) return;
+        refreshEdgeField(state, index, NativeFieldReader{ .hwnd = state.edits[index] });
+        return;
+    }
+    if (state.kind == .update and (state.input_kinds[index] == .edit or state.input_kinds[index] == .readonly)) {
+        refreshTextField(state, index, NativeFieldReader{ .hwnd = state.edits[index] });
         return;
     }
     if (state.edits[index] == null) return;
@@ -2827,14 +2842,20 @@ fn readValue(state: *DialogState, index: usize) void {
             state.allocator.free(state.values[index]);
             state.values[index] = value;
         },
-        .edit, .readonly => {
-            var buffer: [4096]u16 = undefined;
-            const length = c.GetWindowTextW(state.edits[index], &buffer, @intCast(buffer.len));
-            const value = std.unicode.utf16LeToUtf8Alloc(state.allocator, buffer[0..@intCast(length)]) catch return;
-            state.allocator.free(state.values[index]);
-            state.values[index] = value;
-        },
+        .edit, .readonly => refreshTextField(state, index, NativeFieldReader{ .hwnd = state.edits[index] }),
     }
+}
+
+fn refreshTextField(state: *DialogState, index: usize, reader: anytype) void {
+    if (state.kind == .update) {
+        refreshEdgeField(state, index, reader);
+        return;
+    }
+    var buffer: [4096]u16 = undefined;
+    const length = reader.readUncheckedText(&buffer) catch return;
+    const value = std.unicode.utf16LeToUtf8Alloc(state.allocator, buffer[0..length]) catch return;
+    state.allocator.free(state.values[index]);
+    state.values[index] = value;
 }
 
 fn readPromotionValue(state: *DialogState, index: usize) !void {
@@ -2901,7 +2922,7 @@ fn hasDestructiveSelection(state: *const DialogState) bool {
 }
 
 fn validationReason(state: *DialogState) ?[]const u8 {
-    if (edgeCaptureFailureReason(state)) |reason| return reason;
+    if (captureFailureReason(state)) |reason| return reason;
     switch (state.kind) {
         .promotion => {
             const input = promotionInput(state) catch |err| return promotionErrorReason(err);
@@ -4420,6 +4441,105 @@ test "graph form cancellation leaves draft values untouched" {
     try std.testing.expect(state.closed);
     try std.testing.expectEqualStrings("source-id", state.values[0]);
     try std.testing.expectEqualStrings("handoff", state.values[2]);
+}
+
+test "node update text capture: exact long Unicode reaches the owned result" {
+    const allocator = std.testing.allocator;
+    const initial = Forms.NodeUpdate{ .goal_summary = "Old goal", .poll_interval_seconds = 30 };
+    var state = DialogState{ .allocator = allocator, .kind = .update, .parent = null };
+    defer freeValues(&state);
+    try initializeNodeUpdate(&state, initial);
+    configureFields(&state);
+    var text = [_]u16{'x'} ** 5000;
+    for ([_]usize{ 5000, 12, 4094, 4095, 4096 }) |length| {
+        text[length - 2] = 0xd83d;
+        text[length - 1] = 0xde00;
+        const expected = try std.unicode.utf16LeToUtf8Alloc(allocator, text[0..length]);
+        defer allocator.free(expected);
+        refreshTextField(&state, 0, EdgeCaptureProbe{ .text = text[0..length] });
+        try std.testing.expect(validationReason(&state) == null);
+        applyModalCommand(&state, .submit);
+        var result = (try buildNodeUpdate(&state, initial)).?;
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(expected.len, result.goal_summary.?.len);
+        try std.testing.expectEqualStrings(expected, result.goal_summary.?);
+        try std.testing.expectEqualStrings(expected, state.values[0]);
+        text[length - 2] = 'x';
+        text[length - 1] = 'x';
+    }
+}
+
+test "node update text capture: failed reads refuse submission until each field recovers" {
+    const allocator = std.testing.allocator;
+    const initial = Forms.NodeUpdate{ .goal_summary = "Old goal", .goal_predicate = "Old predicate", .poll_interval_seconds = 30 };
+    var state = DialogState{ .allocator = allocator, .kind = .update, .parent = null };
+    defer freeValues(&state);
+    try initializeNodeUpdate(&state, initial);
+    configureFields(&state);
+    refreshTextField(&state, 0, EdgeCaptureProbe{ .text = std.unicode.utf8ToUtf16LeStringLiteral("New goal") });
+    const invalid = [_]u16{0xd83d};
+    for ([_]EdgeCaptureProbe{
+        .{ .text = &.{}, .read_error = true },
+        .{ .text = std.unicode.utf8ToUtf16LeStringLiteral("new"), .length_override = 4 },
+        .{ .text = &invalid },
+        .{ .text = &.{}, .length_override = std.math.maxInt(c_int) },
+    }) |reader| {
+        refreshTextField(&state, 1, reader);
+        try std.testing.expect(validationReason(&state) != null);
+        try std.testing.expectEqualStrings("Old predicate", state.values[1]);
+    }
+    var failure = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    state.allocator = failure.allocator();
+    refreshTextField(&state, 1, EdgeCaptureProbe{ .text = std.unicode.utf8ToUtf16LeStringLiteral("New predicate") });
+    state.allocator = allocator;
+    try std.testing.expect(validationReason(&state) != null);
+    try std.testing.expectEqualStrings("Old predicate", state.values[1]);
+    refreshTextField(&state, 0, EdgeCaptureProbe{ .text = &.{}, .read_error = true });
+    refreshTextField(&state, 1, EdgeCaptureProbe{ .text = &.{} });
+    try std.testing.expect(validationReason(&state) != null);
+    refreshTextField(&state, 0, EdgeCaptureProbe{ .text = std.unicode.utf8ToUtf16LeStringLiteral("New goal") });
+    try std.testing.expect(validationReason(&state) == null);
+    applyModalCommand(&state, .submit);
+    var result = (try buildNodeUpdate(&state, initial)).?;
+    defer result.deinit(allocator);
+    try std.testing.expectEqualStrings("New goal", result.goal_summary.?);
+    try std.testing.expectEqualStrings("", result.goal_predicate.?);
+}
+
+test "node update text capture: cancel and close never transfer attempted edits" {
+    for ([_]ModalCommand{ .cancel, .close }) |command| {
+        const allocator = std.testing.allocator;
+        const initial = Forms.NodeUpdate{ .goal_summary = "Old goal", .poll_interval_seconds = 30 };
+        var state = DialogState{ .allocator = allocator, .kind = .update, .parent = null };
+        defer freeValues(&state);
+        try initializeNodeUpdate(&state, initial);
+        configureFields(&state);
+        refreshTextField(&state, 0, EdgeCaptureProbe{ .text = std.unicode.utf8ToUtf16LeStringLiteral("New goal") });
+        refreshTextField(&state, 1, EdgeCaptureProbe{ .text = &.{}, .read_error = true });
+        applyModalCommand(&state, command);
+        try std.testing.expect((try buildNodeUpdate(&state, initial)) == null);
+        try std.testing.expect(state.closed);
+        try std.testing.expectEqualStrings("Old goal", state.initial_values[0]);
+    }
+}
+
+test "node update text capture: partial allocations unwind before capture and transfer" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const initial = Forms.NodeUpdate{ .goal_summary = "Old goal", .poll_interval_seconds = 30 };
+            var state = DialogState{ .allocator = allocator, .kind = .update, .parent = null };
+            defer freeValues(&state);
+            try initializeNodeUpdate(&state, initial);
+            configureFields(&state);
+            refreshTextField(&state, 0, EdgeCaptureProbe{ .text = std.unicode.utf8ToUtf16LeStringLiteral("New \u{1f600} goal") });
+            if (state.field_read_errors[0]) |err| return err;
+            applyModalCommand(&state, .submit);
+            var result = (try buildNodeUpdate(&state, initial)).?;
+            defer result.deinit(allocator);
+            try std.testing.expectEqualStrings("New \xf0\x9f\x98\x80 goal", result.goal_summary.?);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 test "node update uses its owned baseline after the source graph changes" {
