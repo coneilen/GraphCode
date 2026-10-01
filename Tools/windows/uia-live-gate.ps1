@@ -518,6 +518,27 @@ public static class GraphCodeUiaGateState {
     return PostMessage(window, 0x0204, (UIntPtr)0x0002, point) &&
       PostMessage(window, 0x0205, UIntPtr.Zero, point);
   }
+  public static int[] ClickOwnedScreenRectangle(IntPtr owner, int left, int top, int right, int bottom, bool rightClick) {
+    if (!WindowIsVisible(owner) || right <= left || bottom <= top)
+      throw new InvalidOperationException("Owned rectangle is not visibly hittable");
+    var point = new ScreenPoint { X = (left + right) / 2, Y = (top + bottom) / 2 };
+    IntPtr hit = WindowFromPoint(point);
+    if (hit == IntPtr.Zero || GetAncestor(hit, 2) != owner)
+      throw new InvalidOperationException("Live rectangle is covered by another top-level window");
+    if (!SetCursorPos(point.X, point.Y))
+      throw new InvalidOperationException("Unable to move cursor into owned live rectangle");
+    ScreenPoint actual;
+    if (!GetCursorPos(out actual) || actual.X != point.X || actual.Y != point.Y)
+      throw new InvalidOperationException("Owned live-rectangle cursor position differs");
+    var inputs = new Input[] {
+      new Input { Type = 0, Mouse = new MouseInput { Flags = rightClick ? 0x0008u : 0x0002u } },
+      new Input { Type = 0, Mouse = new MouseInput { Flags = rightClick ? 0x0010u : 0x0004u } }
+    };
+    uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
+    if (sent != inputs.Length)
+      throw new InvalidOperationException(String.Format("Owned rectangle SendInput sent {0}/{1}", sent, inputs.Length));
+    return new int[] { left, top, right, bottom, actual.X, actual.Y, (int)sent, inputs.Length };
+  }
   public sealed class PopupItemHit {
     public int Position, ItemId, Left, Top, Right, Bottom;
     public int ScreenX, ScreenY, ClientX, ClientY, CursorBeforeX, CursorBeforeY;
@@ -2237,6 +2258,2162 @@ function Assert-UiaProviderPathBudget(
   }
 }
 
+function Read-MultiProjectPeerReceipt([string] $jobLog) {
+  $prefix = "UIA_MULTIPROJECT_PEER_RECEIPT="
+  $lines = @($jobLog -split "`n" | Where-Object { $_.Contains($prefix) })
+  if ($lines.Count -ne 1) {
+    throw "MULTIPROJECT_PEER_RECEIPT: expected exactly one complete actual snapshot receipt; observed=$($lines.Count)"
+  }
+  $line = $lines[0]
+  $receipt = ConvertFrom-MultiProjectReceiptJson $line.Substring($line.IndexOf($prefix) + $prefix.Length).TrimEnd("`r")
+  Assert-MultiProjectPeerReceipt $receipt
+  return $receipt
+}
+
+function Assert-MultiProjectReceiptObject($value, [string[]] $keys, [string] $label) {
+  if ($value -isnot [Collections.IDictionary] -or $value.Count -ne $keys.Count -or
+      @($value.Keys | Where-Object { $keys -cnotcontains $_ }).Count -ne 0) {
+    throw "MULTIPROJECT_PEER_RECEIPT: invalid $label object fields"
+  }
+}
+
+function Assert-MultiProjectReceiptId($value) {
+  if ($value -isnot [string] -or $value -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') {
+    throw "MULTIPROJECT_PEER_RECEIPT: invalid actual UUID"
+  }
+}
+
+function ConvertFrom-MultiProjectReceiptJson([string] $json) {
+  if ([Text.Encoding]::UTF8.GetByteCount($json) -le 0 -or [Text.Encoding]::UTF8.GetByteCount($json) -gt 524288) {
+    throw "MULTIPROJECT_PEER_RECEIPT: missing/oversized actual JSON"
+  }
+  $options = New-Object System.Text.Json.JsonDocumentOptions
+  $options.MaxDepth = 16
+  $document = $null
+  try {
+    try { $document = [System.Text.Json.JsonDocument]::Parse($json,$options) }
+    catch [System.Text.Json.JsonException] { throw "MULTIPROJECT_PEER_RECEIPT: invalid/truncated/deep actual JSON" }
+    function Check-MultiProjectReceiptProperties($element) {
+      if ($element.ValueKind -eq [System.Text.Json.JsonValueKind]::Object) {
+        $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($property in $element.EnumerateObject()) {
+          if (-not $seen.Add($property.Name)) { throw "MULTIPROJECT_PEER_RECEIPT: duplicate actual JSON property" }
+          Check-MultiProjectReceiptProperties $property.Value
+        }
+      } elseif ($element.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+        foreach ($item in $element.EnumerateArray()) { Check-MultiProjectReceiptProperties $item }
+      }
+    }
+    if ($document.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual JSON root is not an object"
+    }
+    Check-MultiProjectReceiptProperties $document.RootElement
+    return ConvertFrom-Json -InputObject $json -AsHashtable -Depth 16
+  } finally { if ($document) { $document.Dispose() } }
+}
+
+function Assert-MultiProjectReceiptGraph($graph) {
+  Assert-MultiProjectReceiptObject $graph @("id","project","nodes","edges") "graph"
+  Assert-MultiProjectReceiptId $graph.id
+  Assert-MultiProjectReceiptObject $graph.project @("path","name","remote") "project"
+  if ($graph.project.path -isnot [string] -or -not [IO.Path]::IsPathFullyQualified($graph.project.path) -or
+      $graph.project.name -isnot [string] -or $graph.project.remote -isnot [bool] -or $graph.project.remote -or
+      $graph.nodes -isnot [array] -or $graph.nodes.Count -ne 1 -or $graph.edges -isnot [array] -or $graph.edges.Count -ne 0) {
+    throw "MULTIPROJECT_PEER_RECEIPT: invalid actual ordinary-owner graph"
+  }
+  $node = $graph.nodes[0]
+  Assert-MultiProjectReceiptObject $node @("id","title","loopType","state","activity","presence") "node"
+  Assert-MultiProjectReceiptId $node.id
+  Assert-MultiProjectReceiptObject $node.presence @("presence","confidence") "presence"
+  foreach ($value in @($node.title,$node.loopType,$node.state,$node.activity,$node.presence.presence,$node.presence.confidence)) {
+    if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) { throw "MULTIPROJECT_PEER_RECEIPT: invalid actual node information" }
+  }
+}
+
+function Assert-MultiProjectCompleteReport($report) {
+  Assert-MultiProjectReceiptObject $report @("protocolConnected","correlatedRequests","connectionCount","requestCount","responseCount",
+    "unansweredRequests","unansweredCommands","commands","error","subscriptionSeen","reconnectObserved","graphSent","busyObserved",
+    "appliedRenames","appliedCreates","appliedCreateRequests","appliedEdgeCreates","appliedEdgeUpdates","appliedEdgeCreateRequests",
+    "appliedEdgeUpdateRequests","appliedPromotions","appliedPromotionRequests","receivedGraphCommands","graphNodes","edges",
+    "graphSequence","multiProjectPeer") "whole actual report"
+  if ($report.protocolConnected -isnot [bool] -or -not $report.protocolConnected -or
+      $report.correlatedRequests -isnot [bool] -or -not $report.correlatedRequests -or $null -ne $report.error -or
+      $report.unansweredRequests -isnot [array] -or $report.unansweredRequests.Count -ne 0 -or
+      $report.unansweredCommands -isnot [array] -or $report.unansweredCommands.Count -ne 0) {
+    throw "MULTIPROJECT_PEER_RECEIPT: actual whole-report connection/correlation incomplete"
+  }
+  if (($report.connectionCount -isnot [int] -and $report.connectionCount -isnot [long]) -or
+      $report.connectionCount -le 0 -or $report.graphSent -isnot [bool] -or -not $report.graphSent) {
+    throw "MULTIPROJECT_PEER_RECEIPT: actual connection/publication custody unavailable"
+  }
+  $peer = $report.multiProjectPeer
+  Assert-MultiProjectReceiptObject $peer @("receivedCount","requestCount","responseCount","appliedCount","publicationCount","graphSequence",
+    "received","applied","answered","publications","controls","graphs","unansweredRequests") "complete peer state"
+  foreach ($name in @("received","applied","answered","publications","controls","graphs","unansweredRequests")) {
+    if ($peer[$name] -isnot [array]) { throw "MULTIPROJECT_PEER_RECEIPT: missing/invalid actual $name array" }
+  }
+  foreach ($pair in @(@("receivedCount","received"),@("requestCount","received"),@("responseCount","answered"),
+      @("appliedCount","applied"),@("publicationCount","publications"),@("graphSequence","publications"))) {
+    $value = $peer[$pair[0]]
+    if (($value -isnot [int] -and $value -isnot [long]) -or $value -le 0 -or $value -ne $peer[$pair[1]].Count) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual counts disagree with complete arrays"
+    }
+  }
+  if ($peer.received.Count -gt 128 -or $peer.publications.Count -gt 128 -or $peer.requestCount -ne $peer.responseCount -or
+      $peer.unansweredRequests.Count -ne 0 -or $peer.graphs.Count -ne 2 -or $peer.controls.Count -ne 1 -or $peer.applied.Count -ne 2 -or
+      ($report.requestCount -isnot [int] -and $report.requestCount -isnot [long]) -or
+      ($report.responseCount -isnot [int] -and $report.responseCount -isnot [long]) -or
+      $report.requestCount -ne $peer.requestCount -or $report.responseCount -ne $peer.responseCount) {
+    throw "MULTIPROJECT_PEER_RECEIPT: final actual workflow accounting incomplete"
+  }
+  $owners = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+  $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach ($graph in $peer.graphs) {
+    Assert-MultiProjectReceiptGraph $graph
+    if ($owners.ContainsKey($graph.project.path) -or -not $ids.Add($graph.id) -or -not $ids.Add($graph.nodes[0].id)) {
+      throw "MULTIPROJECT_PEER_RECEIPT: duplicate actual owner/graph/node identity"
+    }
+    $owners.Add($graph.project.path,$graph)
+  }
+  if ($peer.graphs[0].project.name -cne "Alpha" -or $peer.graphs[1].project.name -cne "Beta" -or
+      [string]::Equals($peer.graphs[0].project.path,$peer.graphs[1].project.path,[StringComparison]::OrdinalIgnoreCase)) {
+    throw "MULTIPROJECT_PEER_RECEIPT: exact independent owners unavailable"
+  }
+  $requests = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+  $answers = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+  foreach ($received in $peer.received) {
+    Assert-MultiProjectReceiptObject $received @("requestID","frame","expectedResponse") "received record"
+    $frame = $received.frame
+    Assert-MultiProjectReceiptObject $frame @("version","kind","requestID","command") "request envelope"
+    Assert-MultiProjectReceiptId $frame.requestID
+    if (($frame.version -isnot [int] -and $frame.version -isnot [long]) -or $frame.version -ne 2 -or
+        $frame.kind -isnot [string] -or $frame.kind -cne "request" -or $received.requestID -isnot [string] -or
+        $received.requestID -cne $frame.requestID -or $requests.ContainsKey($frame.requestID) -or
+        $frame.command -isnot [Collections.IDictionary] -or $frame.command.Count -ne 1) {
+      throw "MULTIPROJECT_PEER_RECEIPT: invalid/duplicate actual request envelope"
+    }
+    $verb = @($frame.command.Keys)[0]
+    if ($verb -ceq "graphCommand") {
+      $command = $frame.command.graphCommand
+      Assert-MultiProjectReceiptObject $command @("projectPath","command") "graph command"
+      Assert-MultiProjectReceiptObject $command.command @("renameNode") "inner command"
+      Assert-MultiProjectReceiptObject $command.command.renameNode @("_0","title") "rename"
+      Assert-MultiProjectReceiptId $command.command.renameNode._0
+      if ($command.projectPath -isnot [string] -or -not $owners.ContainsKey($command.projectPath) -or
+          $command.projectPath -cne $peer.graphs[0].project.path -or
+          $command.command.renameNode._0 -cne $owners[$command.projectPath].nodes[0].id -or
+          $command.command.renameNode.title -isnot [string] -or [string]::IsNullOrWhiteSpace($command.command.renameNode.title)) {
+        throw "MULTIPROJECT_PEER_RECEIPT: actual rename owner/value mismatch"
+      }
+    } elseif ($verb -ceq "openProject") {
+      Assert-MultiProjectReceiptObject $frame.command.openProject @("path") "openProject"
+      if ($frame.command.openProject.path -isnot [string] -or -not $owners.ContainsKey($frame.command.openProject.path)) {
+        throw "MULTIPROJECT_PEER_RECEIPT: actual open request owner mismatch"
+      }
+    } elseif ($verb -cin @("listRecentProjects","listQuickChats","restoreOpenProjects","openGlobalGraph")) {
+      Assert-MultiProjectReceiptObject $frame.command[$verb] @() "listing command"
+    } else { throw "MULTIPROJECT_PEER_RECEIPT: unknown actual request verb" }
+    $requests.Add($frame.requestID,$received)
+  }
+  foreach ($answer in $peer.answered) {
+    Assert-MultiProjectReceiptObject $answer @("requestID","response") "answered record"
+    Assert-MultiProjectReceiptId $answer.requestID
+    if (-not $requests.ContainsKey($answer.requestID) -or $answers.ContainsKey($answer.requestID)) {
+      throw "MULTIPROJECT_PEER_RECEIPT: missing/duplicate actual answer correlation"
+    }
+    $response = $answer.response; $request = $requests[$answer.requestID]
+    $verb = @($request.frame.command.Keys)[0]
+    $listing = $verb -cin @("listRecentProjects","listQuickChats")
+    Assert-MultiProjectReceiptObject $response $(if ($listing) { @("version","kind","requestID","event") } else { @("version","kind","requestID","success") }) "response"
+    if (($response.version -isnot [int] -and $response.version -isnot [long]) -or $response.version -ne 2 -or
+        $response.kind -isnot [string] -or $response.kind -cne "response" -or $response.requestID -isnot [string] -or
+        $response.requestID -cne $answer.requestID) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual answered envelope mismatch"
+    }
+    if ($listing) {
+      $eventName = if ($verb -ceq "listRecentProjects") { "recentProjectsListed" } else { "quickChatsListed" }
+      Assert-MultiProjectReceiptObject $response.event @($eventName) "listing event"
+      if ($response.event[$eventName] -isnot [array]) { throw "MULTIPROJECT_PEER_RECEIPT: invalid actual listing payload" }
+      if ($verb -ceq "listRecentProjects" -and
+          (ConvertTo-SketchCanonicalJson $response.event.recentProjectsListed) -cne
+          (ConvertTo-SketchCanonicalJson @($peer.graphs | ForEach-Object { $_.project }))) {
+        throw "MULTIPROJECT_PEER_RECEIPT: actual recent-owner listing differs"
+      }
+      if ($verb -ceq "listQuickChats") {
+        foreach ($chat in $response.event.quickChatsListed) {
+          Assert-MultiProjectReceiptObject $chat @("id","title","backend","createdAt","activity") "quick-chat listing"
+          Assert-MultiProjectReceiptId $chat.id
+          if ($chat.title -isnot [string] -or $chat.backend -isnot [string] -or
+              ($chat.createdAt -isnot [int] -and $chat.createdAt -isnot [long])) {
+            throw "MULTIPROJECT_PEER_RECEIPT: actual quick-chat listing types differ"
+          }
+          if ($null -ne $chat.activity) {
+            Assert-MultiProjectReceiptObject $chat.activity @("sequence","text","presence") "quick-chat activity"
+            Assert-MultiProjectReceiptObject $chat.activity.presence @("presence","confidence") "quick-chat presence"
+          }
+        }
+      }
+    } elseif ($response.success -isnot [bool] -or -not $response.success) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual request not answered successfully"
+    }
+    if (($verb -cin @("graphCommand","listRecentProjects") -and $null -eq $request.expectedResponse) -or
+        ($null -ne $request.expectedResponse -and
+        (ConvertTo-SketchCanonicalJson $response) -cne (ConvertTo-SketchCanonicalJson $request.expectedResponse))) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual response differs from received request expectation"
+    }
+    $answers.Add($answer.requestID,$answer)
+  }
+  $applied = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+  foreach ($application in $peer.applied) {
+    Assert-MultiProjectReceiptObject $application @("requestID","projectPath","nodeID","beforeTitle","title") "application"
+    if ($application.requestID -isnot [string] -or -not $requests.ContainsKey($application.requestID) -or
+        $applied.ContainsKey($application.requestID)) { throw "MULTIPROJECT_PEER_RECEIPT: application correlation missing/duplicated" }
+    $wire = $requests[$application.requestID].frame.command.graphCommand
+    if ($null -eq $wire -or $application.projectPath -cne $wire.projectPath -or
+        $application.projectPath -isnot [string] -or $application.nodeID -isnot [string] -or $application.title -isnot [string] -or
+        $application.nodeID -cne $wire.command.renameNode._0 -or $application.title -cne $wire.command.renameNode.title -or
+        $application.beforeTitle -isnot [string]) { throw "MULTIPROJECT_PEER_RECEIPT: actual application differs from received wire" }
+    $applied.Add($application.requestID,$application)
+  }
+  if (@($peer.received | Where-Object { $_.frame.command.Contains("graphCommand") }).Count -ne 2) {
+    throw "MULTIPROJECT_PEER_RECEIPT: received/applied rename count differs"
+  }
+  $control = $peer.controls[0]
+  Assert-MultiProjectReceiptObject $control @("token","projectPath","nodeID","beforeTitle","title","selection") "control"
+  Assert-MultiProjectReceiptId $control.token
+  Assert-MultiProjectReceiptObject $control.selection @("projectPath","nodeID","source") "control selection"
+  if ($control.projectPath -cne $peer.graphs[0].project.path -or $control.nodeID -cne $peer.graphs[0].nodes[0].id -or
+      $control.selection.projectPath -cne $peer.graphs[1].project.path -or $control.selection.nodeID -cne $peer.graphs[1].nodes[0].id -or
+      $control.selection.source -cne "live-uia" -or $control.title -isnot [string] -or $control.beforeTitle -isnot [string]) {
+    throw "MULTIPROJECT_PEER_RECEIPT: actual control owner/selection mismatch"
+  }
+  $latest = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+  $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  $controlPublications = 0
+  foreach ($publication in $peer.publications) {
+    Assert-MultiProjectReceiptObject $publication @("cause","correlationID","frame") "publication record"
+    $frame = $publication.frame
+    Assert-MultiProjectReceiptObject $frame @("version","kind","sequence","event") "publication envelope"
+    Assert-MultiProjectReceiptObject $frame.event @("graphChanged") "publication event"
+    Assert-MultiProjectReceiptGraph $frame.event.graphChanged
+    $graph = $frame.event.graphChanged; $path = $graph.project.path
+    if (($frame.version -isnot [int] -and $frame.version -isnot [long]) -or $frame.version -ne 2 -or
+        $frame.kind -isnot [string] -or $frame.kind -cne "event" -or
+        $publication.cause -isnot [string] -or $publication.correlationID -isnot [string] -or
+        ($frame.sequence -isnot [int] -and $frame.sequence -isnot [long]) -or
+        $frame.sequence -ne ($seen.Count + 1) -or -not $owners.ContainsKey($path) -or
+        $graph.id -cne $owners[$path].id -or $graph.nodes[0].id -cne $owners[$path].nodes[0].id -or
+        (ConvertTo-SketchCanonicalJson $graph.project) -cne (ConvertTo-SketchCanonicalJson $owners[$path].project) -or
+        -not $seen.Add("$($publication.cause)|$($publication.correlationID)|$path")) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual publication sequence/identity/uniqueness mismatch"
+    }
+    if ($publication.cause -ceq "initial") {
+      if ($publication.correlationID -isnot [string] -or -not $answers.ContainsKey($publication.correlationID) -or
+          -not $requests[$publication.correlationID].frame.command.Contains("listRecentProjects") -or $controlPublications -ne 0) {
+        throw "MULTIPROJECT_PEER_RECEIPT: actual initial publication correlation mismatch"
+      }
+    } elseif ($publication.cause -ceq "control") {
+      $controlPublications++
+      if ($controlPublications -ne 1 -or $latest.Count -ne 2 -or $publication.correlationID -cne $control.token -or
+          $path -cne $control.projectPath -or $graph.nodes[0].title -cne $control.title -or
+          $latest[$path].nodes[0].title -cne $control.beforeTitle) {
+        throw "MULTIPROJECT_PEER_RECEIPT: actual one-shot control publication mismatch"
+      }
+    } elseif ($publication.cause -ceq "rename") {
+      if ($publication.correlationID -isnot [string] -or -not $applied.ContainsKey($publication.correlationID) -or
+          -not $answers.ContainsKey($publication.correlationID) -or $controlPublications -ne 1 -or
+          $path -cne $applied[$publication.correlationID].projectPath -or
+          $graph.nodes[0].title -cne $applied[$publication.correlationID].title -or
+          $latest[$path].nodes[0].title -cne $applied[$publication.correlationID].beforeTitle) {
+        throw "MULTIPROJECT_PEER_RECEIPT: actual rename publication/application mismatch"
+      }
+    } else { throw "MULTIPROJECT_PEER_RECEIPT: unknown actual publication cause" }
+    $latest[$path] = $graph
+  }
+  if ($controlPublications -ne 1 -or @($peer.publications | Where-Object { $_.cause -ceq "rename" }).Count -ne 2 -or
+      $peer.applied[1].beforeTitle -cne $peer.applied[1].title) {
+    throw "MULTIPROJECT_PEER_RECEIPT: actual final unchanged-title/control accounting missing"
+  }
+  foreach ($graph in $peer.graphs) {
+    if (-not $latest.ContainsKey($graph.project.path) -or
+        (ConvertTo-SketchCanonicalJson $graph) -cne (ConvertTo-SketchCanonicalJson $latest[$graph.project.path])) {
+      throw "MULTIPROJECT_PEER_RECEIPT: actual final graph differs from latest publication"
+    }
+  }
+}
+
+function New-MultiProjectPeerReceipt([string] $actualJson) {
+  $report = ConvertFrom-MultiProjectReceiptJson $actualJson
+  Assert-MultiProjectCompleteReport $report
+  # Hash the retained decoded owned-file text, not a projected native marker or an invented file snapshot.
+  $bytes = [Text.Encoding]::UTF8.GetBytes($actualJson)
+  return [ordered]@{ schemaVersion = 1; provenance = "owned-stub-final-file-read"; phase = "final-overview-before-exit"
+    utf8ByteCount = $bytes.Length; utf8Sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+    rawJson = $actualJson; report = $report }
+}
+
+function Assert-MultiProjectPeerReceipt($receipt) {
+  Assert-MultiProjectReceiptObject $receipt @("schemaVersion","provenance","phase","utf8ByteCount","utf8Sha256","rawJson","report") "receipt"
+  if (($receipt.schemaVersion -isnot [int] -and $receipt.schemaVersion -isnot [long]) -or $receipt.schemaVersion -ne 1 -or
+      $receipt.provenance -cne "owned-stub-final-file-read" -or $receipt.phase -cne "final-overview-before-exit" -or
+      ($receipt.utf8ByteCount -isnot [int] -and $receipt.utf8ByteCount -isnot [long]) -or $receipt.utf8Sha256 -isnot [string] -or
+      $receipt.rawJson -isnot [string]) { throw "MULTIPROJECT_PEER_RECEIPT: receipt schema/provenance/types unavailable" }
+  $bytes = [Text.Encoding]::UTF8.GetBytes($receipt.rawJson)
+  if ($bytes.Length -ne $receipt.utf8ByteCount -or
+      [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) -cne $receipt.utf8Sha256) {
+    throw "MULTIPROJECT_PEER_RECEIPT: actual raw UTF8 bytes/hash mismatch"
+  }
+  $actual = ConvertFrom-MultiProjectReceiptJson $receipt.rawJson
+  if ((ConvertTo-SketchCanonicalJson $actual) -cne (ConvertTo-SketchCanonicalJson $receipt.report)) {
+    throw "MULTIPROJECT_PEER_RECEIPT: retained report differs from actual file JSON"
+  }
+  Assert-MultiProjectCompleteReport $actual
+}
+
+function Write-MultiProjectPeerReceipt([string] $actualJson, $settledPeer) {
+  $receipt = New-MultiProjectPeerReceipt $actualJson
+  if ((ConvertTo-SketchCanonicalJson $receipt.report.multiProjectPeer) -cne (ConvertTo-SketchCanonicalJson $settledPeer)) {
+    throw "MULTIPROJECT_PEER_RECEIPT: actual final file differs from existing settled peer state"
+  }
+  $json = ConvertTo-Json -InputObject $receipt -Depth 16 -Compress -WarningAction Stop
+  $null = Read-MultiProjectPeerReceipt ("UIA_MULTIPROJECT_PEER_RECEIPT=" + $json)
+  Write-Host ("UIA_MULTIPROJECT_PEER_RECEIPT=" + $json)
+}
+
+function ConvertTo-MultiProjectStartupXPathLiteral([string] $value) {
+  if (-not $value.Contains("'")) { return "'" + $value + "'" }
+  if (-not $value.Contains('"')) { return '"' + $value + '"' }
+  throw "MULTIPROJECT_STARTUP_EVENTS: unsupported XPath literal; no query"
+}
+
+function New-MultiProjectStartupEventQuery($heldProcess, [string] $executable, [DateTime] $observedUtc) {
+  $processId = $heldProcess.Id
+  $start = $heldProcess.StartTime
+  if (($processId -isnot [int] -and $processId -isnot [long]) -or $processId -le 0 -or $processId -gt [uint32]::MaxValue -or
+      $start -isnot [DateTime] -or $start.Kind -eq [DateTimeKind]::Unspecified -or $observedUtc.Kind -ne [DateTimeKind]::Utc -or
+      -not [IO.Path]::IsPathFullyQualified($executable) -or [IO.Path]::GetFullPath($executable) -cne $executable) {
+    throw "MULTIPROJECT_STARTUP_EVENTS: held identity/path unavailable; no query"
+  }
+  $startUtc = $start.ToUniversalTime()
+  $duration = ($observedUtc - $startUtc).TotalSeconds
+  if ($duration -lt 0 -or $duration -gt 30) { throw "MULTIPROJECT_STARTUP_EVENTS: first-startup identity time window invalid; no query" }
+  $fileTime = $startUtc.ToFileTimeUtc()
+  if ($fileTime -le 0) { throw "MULTIPROJECT_STARTUP_EVENTS: generation unavailable; no query" }
+  $pidForms = @("$processId", ("0x{0:x}" -f $processId), ("0x{0:X}" -f $processId), ("0x{0:x8}" -f $processId))
+  $timeForms = @("$fileTime", ("0x{0:x}" -f $fileTime), ("0x{0:X}" -f $fileTime), ("0x{0:x16}" -f $fileTime))
+  $pidPredicate = (@($pidForms | Sort-Object -Unique | ForEach-Object { "Data[@Name='ProcessId']=" + (ConvertTo-MultiProjectStartupXPathLiteral $_) }) -join " or ")
+  $timePredicate = (@($timeForms | Sort-Object -Unique | ForEach-Object { "Data[@Name='ProcessCreationTime']=" + (ConvertTo-MultiProjectStartupXPathLiteral $_) }) -join " or ")
+  $first = $startUtc.ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+  $last = $observedUtc.ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+  $selector = "*[System[Provider[@Name='Application Error'] and EventID=1000 and TimeCreated[@SystemTime>='$first' and @SystemTime<='$last']] and EventData[($pidPredicate) and ($timePredicate) and Data[@Name='AppPath']=" +
+    (ConvertTo-MultiProjectStartupXPathLiteral $executable) + "]]"
+  $document = New-Object System.Xml.XmlDocument
+  $queryList = $document.CreateElement("QueryList"); $null = $document.AppendChild($queryList)
+  $query = $document.CreateElement("Query"); $query.SetAttribute("Id", "0"); $query.SetAttribute("Path", "Application")
+  $null = $queryList.AppendChild($query)
+  $select = $document.CreateElement("Select"); $select.SetAttribute("Path", "Application"); $select.InnerText = $selector
+  $null = $query.AppendChild($select)
+  return [ordered]@{ processId = $processId; startUtc = $startUtc; fileTime = $fileTime; path = $executable
+    observedUtc = $observedUtc; filterXml = $document.OuterXml; maxEvents = 8 }
+}
+
+function ConvertFrom-MultiProjectEventNumber([string] $value) {
+  if ($value -cmatch '^0x[0-9a-fA-F]{1,16}$') { return [Convert]::ToUInt64($value.Substring(2), 16) }
+  if ($value -cmatch '^[0-9]{1,20}$') { return [UInt64]::Parse($value, [Globalization.CultureInfo]::InvariantCulture) }
+  throw "MULTIPROJECT_STARTUP_EVENTS: invalid structured event number"
+}
+
+function ConvertFrom-MultiProjectOwnedStartupEvent($eventRecord, $identity) {
+  $xml = $eventRecord.ToXml()
+  if ($xml -isnot [string] -or [Text.Encoding]::UTF8.GetByteCount($xml) -gt 65536) {
+    throw "MULTIPROJECT_STARTUP_EVENTS: selected event XML unavailable/oversized"
+  }
+  $settings = New-Object Xml.XmlReaderSettings
+  $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit; $settings.XmlResolver = $null
+  $settings.MaxCharactersInDocument = 65536
+  $reader = [Xml.XmlReader]::Create([IO.StringReader]::new($xml), $settings)
+  $document = New-Object Xml.XmlDocument; $document.XmlResolver = $null
+  try { $document.Load($reader) } finally { $reader.Dispose() }
+  $namespace = New-Object Xml.XmlNamespaceManager($document.NameTable)
+  $namespace.AddNamespace("e", "http://schemas.microsoft.com/win/2004/08/events/event")
+  $system = $document.SelectSingleNode("/e:Event/e:System", $namespace)
+  if ($null -eq $system -or $system.SelectSingleNode("e:Provider", $namespace).GetAttribute("Name") -cne "Application Error" -or
+      $system.SelectSingleNode("e:EventID", $namespace).InnerText -cne "1000") {
+    throw "MULTIPROJECT_STARTUP_EVENTS: selected provider/schema refused before module read"
+  }
+  $time = [DateTimeOffset]::Parse($system.SelectSingleNode("e:TimeCreated", $namespace).GetAttribute("SystemTime"),
+    [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+  if ($time -lt $identity.startUtc -or $time -gt $identity.observedUtc) {
+    throw "MULTIPROJECT_STARTUP_EVENTS: selected event time outside owned window"
+  }
+  $data = [Collections.Generic.Dictionary[string,Xml.XmlElement]]::new([StringComparer]::Ordinal)
+  foreach ($node in $document.SelectNodes("/e:Event/e:EventData/e:Data", $namespace)) {
+    $name = $node.GetAttribute("Name")
+    if ($name.Length -eq 0 -or $data.ContainsKey($name)) { throw "MULTIPROJECT_STARTUP_EVENTS: unnamed/duplicate selected data refused" }
+    $data.Add($name, $node)
+  }
+  if (-not $data.ContainsKey("ProcessId") -or -not $data.ContainsKey("ProcessCreationTime") -or -not $data.ContainsKey("AppPath") -or
+      (ConvertFrom-MultiProjectEventNumber $data["ProcessId"].InnerText) -ne $identity.processId -or
+      (ConvertFrom-MultiProjectEventNumber $data["ProcessCreationTime"].InnerText) -ne $identity.fileTime -or
+      $data["AppPath"].InnerText -cne $identity.path) {
+    throw "MULTIPROJECT_STARTUP_EVENTS: subject PID/generation/exact path refused before module read"
+  }
+  $result = [ordered]@{ provider = "Application Error"; eventId = 1000
+    recordId = ConvertFrom-MultiProjectEventNumber $system.SelectSingleNode("e:EventRecordID", $namespace).InnerText
+    utc = $time.ToString("o"); subjectPID = $identity.processId; processStartUtc = $identity.startUtc.ToString("o")
+    module = [ordered]@{ state = "unavailable"; value = $null }
+    exceptionCode = [ordered]@{ state = "unavailable"; value = $null }
+    faultingOffset = [ordered]@{ state = "unavailable"; value = $null }; rootCauseEstablished = $false }
+  if ($data.ContainsKey("ModuleName")) {
+    $module = $data["ModuleName"].InnerText
+    if ($module -cnotmatch '^[A-Za-z0-9_. -]{1,128}$' -or $module -cin @(".", "..")) {
+      throw "MULTIPROJECT_STARTUP_EVENTS: selected module basename invalid"
+    }
+    $result.module = [ordered]@{ state = "available"; value = $module }
+  }
+  foreach ($pair in @(@("ExceptionCode", "exceptionCode"), @("FaultingOffset", "faultingOffset"))) {
+    if ($data.ContainsKey($pair[0])) {
+      $number = ConvertFrom-MultiProjectEventNumber $data[$pair[0]].InnerText
+      $result[$pair[1]] = [ordered]@{ state = "available"; value = "0x{0:X}" -f $number }
+    }
+  }
+  return $result
+}
+
+function Invoke-MultiProjectOwnedStartupFailure(
+  $heldProcess, [int] $exitCode, [string] $executable, [string] $logDirectory, [scriptblock] $primaryFailure,
+  [scriptblock] $querySource = $null, [scriptblock] $fileSink = $null,
+  [scriptblock] $summarySink = $null, [scriptblock] $warningSink = $null, [DateTime] $observedUtc = [DateTime]::UtcNow
+) {
+  try { & $primaryFailure; throw "MULTIPROJECT_STARTUP_EVENTS: original failure closure did not throw" }
+  catch {
+    $primary = $_
+    $errors = [Collections.Generic.List[object]]::new()
+    $report = [ordered]@{ schemaVersion = 1; state = "unknown"; originalExitCode = $exitCode
+      events = @(); queriedCount = 0; rootCauseEstablished = $false
+      providers = @(@{ name = "Application Error"; state = "not-queried"; readCount = 0 },
+        @{ name = "Windows Error Reporting"; state = "not-queried-subject-schema-unproven"; readCount = 0 },
+        @{ name = "SideBySide"; state = "not-queried-subject-schema-unproven"; readCount = 0 })
+      limits = "Canonical subject PID/FILETIME/exact path only; absence is unknown. One query/8 records/30s window/64KiB records. EventLog RPC has no universal hardwall." }
+    try {
+      $identity = New-MultiProjectStartupEventQuery $heldProcess $executable $observedUtc
+      $report.heldIdentity = [ordered]@{ processId = $identity.processId; startUtc = $identity.startUtc.ToString("o")
+        executable = $identity.path; observationUtc = $identity.observedUtc.ToString("o") }
+      if ($querySource -or ($env:GITHUB_ACTIONS -ceq "true" -and $env:RUNNER_ENVIRONMENT -ceq "github-hosted")) {
+        $query = if ($querySource) { $querySource } else {
+          { param($filterXml, $maxEvents) Get-WinEvent -FilterXml $filterXml -MaxEvents $maxEvents -ErrorAction Stop }
+        }
+        $report.queriedCount = 1; $report.providers[0].state = "queried-canonical-subject-schema"
+        $selected = @()
+        try { $selected = @(& $query $identity.filterXml $identity.maxEvents) }
+        catch {
+          if (-not $_.FullyQualifiedErrorId.StartsWith("NoMatchingEventsFound", [StringComparison]::Ordinal)) { throw }
+        }
+        if ($selected.Count -gt 8) { throw "MULTIPROJECT_STARTUP_EVENTS: transport exceeded owned result bound" }
+        $report.providers[0].readCount = $selected.Count
+        $events = @($selected | ForEach-Object { ConvertFrom-MultiProjectOwnedStartupEvent $_ $identity })
+        $recordIds = [Collections.Generic.HashSet[UInt64]]::new()
+        foreach ($event in $events) {
+          if (-not $recordIds.Add($event.recordId)) { throw "MULTIPROJECT_STARTUP_EVENTS: duplicate selected event record" }
+        }
+        $report.events = $events
+        $report.state = if ($events.Count -gt 0) { "owned-events-observed-cause-unknown" } else { "unknown-no-matching-canonical-events" }
+      } else { $report.state = "refused-non-hosted-query"; $report.providers[0].state = "not-queried-ci-only" }
+    } catch {
+      $report.state = "refused-or-unavailable"
+      $errors.Add((Get-MultiProjectRetentionError $_ "startup-event-query-or-validation"))
+    }
+    try {
+      $json = ConvertTo-Json -InputObject $report -Depth 7 -Compress -WarningAction Stop
+      if ([Text.Encoding]::UTF8.GetByteCount($json) -gt 65536) { throw "MULTIPROJECT_STARTUP_EVENTS: emitted record exceeds bound" }
+      $writer = if ($fileSink) { $fileSink } else {
+        { param($path, $value) [IO.File]::WriteAllText($path, $value, [Text.UTF8Encoding]::new($false)) }
+      }
+      try { & $writer (Join-Path $logDirectory "owned-startup-events.json") $json | Out-Null }
+      catch { $errors.Add((Get-MultiProjectRetentionError $_ "startup-event-file")) }
+      $summary = if ($summarySink) { $summarySink } else { { param($value) Write-Host $value } }
+      try { & $summary ("UIA_OWNED_STARTUP_EVENTS=" + $json) | Out-Null }
+      catch { $errors.Add((Get-MultiProjectRetentionError $_ "startup-event-summary")) }
+    } catch { $errors.Add((Get-MultiProjectRetentionError $_ "startup-event-serialization")) }
+    if ($errors.Count -gt 0) {
+      # Query exceptions may contain arbitrary event/provider payload. Retain types, not their messages.
+      foreach ($error in $errors) { $error.message = "Owned startup diagnostic operation failed; payload withheld." }
+      $warning = if ($warningSink) { $warningSink } else { { param($value) Write-Warning $value -WarningAction Continue } }
+      try { & $warning ("UIA_OWNED_STARTUP_EVENTS_SECONDARY=" + ($errors.ToArray() | ConvertTo-Json -Depth 4 -Compress)) | Out-Null }
+      catch {
+        $error = Get-MultiProjectRetentionError $_ "startup-event-warning"
+        $error.message = "Owned startup diagnostic operation failed; payload withheld."
+        $errors.Add($error)
+      }
+      $primary.Exception.Data["OwnedStartupEventDiagnostics"] = $errors.ToArray()
+    }
+    $primary.Exception.Data["OwnedStartupEvents"] = $report
+    throw
+  }
+}
+
+function Get-MultiProjectAutomationId([string] $kind, [string] $path, [string] $nodeId = "") {
+  $prefix = switch -CaseSensitive ($kind) {
+    "loop" { "loop-row" }
+    "open-project" { "open-project" }
+    "project-card" { "canvas-card" }
+    "overview-card" { "canvas-card" }
+    "overview-worktree-notice" { "canvas-card" }
+    "workspace-loop-bar" { "workspace-loop-bar" }
+    "workspace-toolbar" { "workspace-toolbar" }
+    default { throw "MULTIPROJECT_KIND: unsupported automation identity kind" }
+  }
+  $identity = if ($nodeId) { "${kind}:${path}:$nodeId" } else { "${kind}:$path" }
+  $hash = [System.Numerics.BigInteger]::Parse("1469598103934665603")
+  $modulus64 = [System.Numerics.BigInteger]::Parse("18446744073709551616")
+  $payloadModulus = [System.Numerics.BigInteger]::Parse("1152921504606846976")
+  foreach ($value in [Text.Encoding]::UTF8.GetBytes($identity)) {
+    $hash = (($hash -bxor [System.Numerics.BigInteger]$value) * 1099511628211) % $modulus64
+  }
+  $rowKey = $payloadModulus + ($hash % $payloadModulus)
+  return "$prefix-$rowKey"
+}
+
+function Test-MultiProjectFragmentRoster($actual, $expected, [int] $processId) {
+  if ($processId -le 0 -or $actual -isnot [array] -or $expected -isnot [array] -or
+      $expected.Count -le 0 -or $actual.Count -ne $expected.Count) { return $false }
+  $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach ($item in $actual) {
+    if ($item -isnot [Collections.IDictionary] -or $item.Count -ne 4) { return $false }
+    foreach ($key in $item.Keys) {
+      if (@("automationId", "name", "processId", "bounds") -cnotcontains $key) { return $false }
+    }
+    if ($item.automationId -isnot [string] -or $item.name -isnot [string] -or
+        ($item.processId -isnot [int] -and $item.processId -isnot [long]) -or
+        $item.processId -ne $processId -or -not $seen.Add($item.automationId)) { return $false }
+    $target = @($expected | Where-Object { $_.automationId -ceq $item.automationId })
+    if ($target.Count -ne 1 -or $item.name -cne $target[0].name -or
+        $item.bounds -isnot [array] -or $item.bounds.Count -ne 4) { return $false }
+    foreach ($coordinate in $item.bounds) {
+      if (($coordinate -isnot [int] -and $coordinate -isnot [long] -and
+          $coordinate -isnot [double] -and $coordinate -isnot [single] -and $coordinate -isnot [decimal]) -or
+          [double]::IsNaN([double]$coordinate) -or [double]::IsInfinity([double]$coordinate)) { return $false }
+    }
+    if ($item.bounds[2] -le $item.bounds[0] -or $item.bounds[3] -le $item.bounds[1]) { return $false }
+  }
+  return $true
+}
+
+function Get-MultiProjectExpectedCanvasRoster([string] $surface, $owners, $selectedOwner) {
+  if ($surface -ceq "overview") {
+    return ,@($owners | ForEach-Object {
+      [ordered]@{ automationId = Get-MultiProjectAutomationId "overview-worktree-notice" $_.path
+        name = "Worktrees not inspected"; classification = "source-summary"; identityKind = "overview-worktree-notice"
+        projectPath = $_.path; nodeID = $null }
+      [ordered]@{ automationId = Get-MultiProjectAutomationId "overview-card" $_.path $_.node
+        name = $_.title; classification = "node"; identityKind = "overview-card"; projectPath = $_.path; nodeID = $_.node }
+    })
+  }
+  if ($surface -cnotin @("project", "workspace")) { throw "MULTIPROJECT_SURFACE: unsupported canvas classification" }
+  if ($null -eq $selectedOwner) { return ,@() }
+  return ,@([ordered]@{ automationId = Get-MultiProjectAutomationId "project-card" $selectedOwner.path $selectedOwner.node
+    name = $selectedOwner.title; classification = "node"; identityKind = "project-card"
+    projectPath = $selectedOwner.path; nodeID = $selectedOwner.node })
+}
+
+function Test-MultiProjectObservedRoster([string] $surface, $projection, $expectedOwners, $selectedOwner, [int] $processId) {
+  if ($surface -cnotin @("overview", "project", "workspace")) { throw "MULTIPROJECT_SURFACE: unsupported observed surface" }
+  if ($projection -isnot [Collections.IDictionary] -or $projection.Count -ne 5 -or
+      $expectedOwners -isnot [array] -or $expectedOwners.Count -ne 2) { return $false }
+  foreach ($key in $projection.Keys) {
+    if (@("projectRows", "cards", "foreignCardFragmentCount", "foreignProjectFragmentCount", "canvasBounds") -cnotcontains $key) { return $false }
+  }
+  foreach ($key in @("foreignCardFragmentCount", "foreignProjectFragmentCount")) {
+    if (($projection[$key] -isnot [int] -and $projection[$key] -isnot [long]) -or $projection[$key] -ne 0) { return $false }
+  }
+  $expectedProjects = @($expectedOwners | ForEach-Object {
+    [ordered]@{ automationId = Get-MultiProjectAutomationId "open-project" $_.path; name = $_.name }
+  })
+  $expectedCards = Get-MultiProjectExpectedCanvasRoster $surface $expectedOwners $selectedOwner
+  if (-not (Test-MultiProjectFragmentRoster $projection.projectRows $expectedProjects $processId) -or
+      -not (Test-MultiProjectFragmentRoster $projection.cards $expectedCards $processId)) { return $false }
+  if ($surface -ceq "overview") {
+    if ($projection.canvasBounds -isnot [array] -or $projection.canvasBounds.Count -ne 4) { return $false }
+    foreach ($coordinate in $projection.canvasBounds) {
+      if (($coordinate -isnot [int] -and $coordinate -isnot [long] -and $coordinate -isnot [double]) -or
+          [double]::IsNaN([double]$coordinate) -or [double]::IsInfinity([double]$coordinate)) { return $false }
+    }
+    if ($projection.canvasBounds[2] -le $projection.canvasBounds[0] -or $projection.canvasBounds[3] -le $projection.canvasBounds[1]) { return $false }
+    foreach ($owner in $expectedOwners) {
+      $nodeId = Get-MultiProjectAutomationId "overview-card" $owner.path $owner.node
+      $summaryId = Get-MultiProjectAutomationId "overview-worktree-notice" $owner.path
+      $node = @($projection.cards | Where-Object { $_.automationId -ceq $nodeId })[0]
+      $summary = @($projection.cards | Where-Object { $_.automationId -ceq $summaryId })[0]
+      $scale = ($node.bounds[2] - $node.bounds[0]) / 220
+      if ([Math]::Abs(($node.bounds[3] - $node.bounds[1]) / $scale - 86) -gt 1) { return $false }
+      $geometry = Get-MultiProjectLaneGeometry $projection.canvasBounds $node.bounds
+      for ($index = 0; $index -lt 4; $index++) {
+        if ([Math]::Abs($summary.bounds[$index] - $geometry.summary[$index]) -gt 1) { return $false }
+      }
+    }
+  }
+  return $true
+}
+
+function Test-MultiProjectObservedSurface([string] $surface, [bool] $ownerNodesMatched, $projection, $selectedOwner, [int] $processId) {
+  if ($surface -cnotin @("overview", "project", "workspace")) { throw "MULTIPROJECT_SURFACE: unsupported observed surface" }
+  if (-not $ownerNodesMatched) { return $false }
+  if ($projection -isnot [Collections.IDictionary] -or $projection.Count -ne 3 -or
+      @($projection.Keys | Where-Object { @("loopBars", "toolbars", "foreignWorkspaceFragmentCount") -cnotcontains $_ }).Count -ne 0 -or
+      $projection.loopBars -isnot [array] -or $projection.toolbars -isnot [array] -or
+      ($projection.foreignWorkspaceFragmentCount -isnot [int] -and $projection.foreignWorkspaceFragmentCount -isnot [long]) -or
+      $projection.foreignWorkspaceFragmentCount -ne 0) { return $false }
+  if ($surface -cne "workspace") { return $projection.loopBars.Count -eq 0 -and $projection.toolbars.Count -eq 0 }
+  if ($null -eq $selectedOwner) { return $false }
+  $expectedLoopBars = @([ordered]@{
+    automationId = Get-MultiProjectAutomationId "workspace-loop-bar" $selectedOwner.node
+    name = "Selected loop workspace"
+  })
+  $expectedToolbars = @([ordered]@{
+    automationId = Get-MultiProjectAutomationId "workspace-toolbar" $selectedOwner.path
+    name = $selectedOwner.name
+  })
+  return (Test-MultiProjectFragmentRoster $projection.loopBars $expectedLoopBars $processId) -and
+    (Test-MultiProjectFragmentRoster $projection.toolbars $expectedToolbars $processId)
+}
+
+function Read-MultiProjectElementCache($element, [bool] $includeContent) {
+  $request = New-Object System.Windows.Automation.CacheRequest
+  $request.TreeScope = [System.Windows.Automation.TreeScope]::Element
+  $request.Add([System.Windows.Automation.AutomationElement]::ProcessIdProperty)
+  $request.Add([System.Windows.Automation.AutomationElement]::AutomationIdProperty)
+  if ($includeContent) {
+    $request.Add([System.Windows.Automation.AutomationElement]::NameProperty)
+    $request.Add([System.Windows.Automation.AutomationElement]::BoundingRectangleProperty)
+  }
+  return $element.GetUpdatedCache($request)
+}
+
+function ConvertTo-MultiProjectPropertyState($value, [string] $property, $notSupported) {
+  $state = if ([object]::ReferenceEquals($value, $notSupported)) { "unsupported" }
+    elseif ($null -eq $value) { "unavailable" }
+    elseif ($property -ceq "ProcessId") {
+      if (($value -is [int] -or $value -is [long]) -and $value -gt 0) { "available" }
+      elseif (($value -is [int] -or $value -is [long]) -and $value -eq 0) { "zero" } else { "invalid" }
+    } elseif ($value -isnot [string]) { "invalid" }
+    elseif ($value.Length -eq 0) { "empty" } else { "available" }
+  return [ordered]@{ state = $state
+    value = if ($value -is [string] -or $value -is [int] -or $value -is [long]) { $value } else { $null }
+    valueType = if ($null -ne $value) { $value.GetType().FullName } else { $null } }
+}
+
+function Get-MultiProjectUnavailableException([Management.Automation.ErrorRecord] $errorRecord) {
+  $exception = $errorRecord.Exception
+  for ($depth = 0; $null -ne $exception -and $depth -lt 16; $depth++) {
+    if ($exception -is [System.Windows.Automation.ElementNotAvailableException] -or
+        ($exception -is [Runtime.InteropServices.COMException] -and $exception.HResult -eq [int]0x80040201)) { return $exception }
+    $exception = $exception.InnerException
+  }
+  return $null
+}
+
+function Read-MultiProjectOwnershipSnapshot($element, [scriptblock] $cacheReader = $null) {
+  try {
+    $cached = if ($cacheReader) { & $cacheReader $element $false } else { Read-MultiProjectElementCache $element $false }
+    $pidValue = $cached.GetCachedPropertyValue([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $true)
+    $idValue = $cached.GetCachedPropertyValue([System.Windows.Automation.AutomationElement]::AutomationIdProperty, $true)
+    $pidState = ConvertTo-MultiProjectPropertyState $pidValue "ProcessId" ([System.Windows.Automation.AutomationElement]::NotSupported)
+    $idState = ConvertTo-MultiProjectPropertyState $idValue "AutomationId" ([System.Windows.Automation.AutomationElement]::NotSupported)
+    $runtime = @($cached.GetRuntimeId())
+    $runtimeReady = $runtime.Count -gt 0 -and @($runtime | Where-Object { $_ -isnot [int] }).Count -eq 0
+    return [ordered]@{
+      processId = $pidState.value; automationId = $idState.value
+      pidState = $pidState; idState = $idState
+      runtimeId = @(if ($runtimeReady) { $runtime })
+      runtimeState = if ($runtimeReady) { "available" } else { "unavailable" }
+      state = if ($pidState.state -ceq "available" -and $idState.state -ceq "available" -and $runtimeReady) { "available" } else { "unavailable" }
+      errorType = $null; hresult = $null
+    }
+  } catch {
+    $exception = Get-MultiProjectUnavailableException $_
+    if ($null -eq $exception) { throw }
+    return [ordered]@{ processId = $null; automationId = $null; runtimeId = @(); state = "unavailable"
+      pidState = [ordered]@{ state = "unavailable"; value = $null; valueType = $null }
+      idState = [ordered]@{ state = "unavailable"; value = $null; valueType = $null }; runtimeState = "unavailable"
+      errorType = $exception.GetType().FullName; hresult = $exception.HResult }
+  }
+}
+
+function Confirm-MultiProjectOwnedSnapshot($before, $after, [int] $processId, [string] $phase) {
+  $foreign = ($after.processId -is [int] -or $after.processId -is [long]) -and
+    $after.processId -gt 0 -and $after.processId -ne $processId
+  $changed = $after.state -cne "available" -or $after.processId -ne $processId -or
+    $after.automationId -cne $before.automationId -or
+    (ConvertTo-SketchCanonicalJson $after.runtimeId) -cne (ConvertTo-SketchCanonicalJson $before.runtimeId)
+  if ($foreign -or $changed) {
+    Write-Host ("UIA_MULTIPROJECT_SNAPSHOT_DRIFT=" + ([ordered]@{
+      expectedPID = $processId; phase = $phase; before = $before; after = $after
+      semanticCauseEstablished = $false; wholeObservationDiscarded = $true
+    } | ConvertTo-Json -Depth 5 -Compress))
+    if ($foreign) { throw "MULTIPROJECT_PRIVACY: snapshot verification positive foreign PID=$($after.processId) expectedPID=$processId phase=$phase" }
+    throw "MULTIPROJECT_METADATA: snapshot ID/runtime/ownership drift expectedPID=$processId phase=$phase; discard whole observation"
+  }
+}
+
+function Get-MultiProjectElementEvidence(
+  $element, [int] $processId, $priorMetadata = $null, [string] $phase = "unspecified",
+  [scriptblock] $cacheReader = $null, $capturedSnapshots = $null
+) {
+  $fresh = Read-MultiProjectOwnershipSnapshot $element $cacheReader
+  $diagnostic = [ordered]@{
+    expectedPID = $processId; phase = $phase; fresh = $fresh
+    priorStablePID = if ($priorMetadata) { $priorMetadata.finalPID.value } else { $null }
+    priorIdentity = if ($priorMetadata) { $priorMetadata.automationID.value } else { $null }
+    contentRead = $false; semanticCauseEstablished = $false
+    proofLimit = "CacheRequest is not a provider-wide transaction; runtime ID is row identity, not a graph publication generation. Before/after drift discards the whole observation."
+  }
+  Write-Host ("UIA_MULTIPROJECT_FRESH_OWNERSHIP=" + ($diagnostic | ConvertTo-Json -Depth 5 -Compress))
+  if (($fresh.processId -is [int] -or $fresh.processId -is [long]) -and $fresh.processId -gt 0 -and $fresh.processId -ne $processId) {
+    throw "MULTIPROJECT_PRIVACY: positive foreign PID=$($fresh.processId) expectedPID=$processId phase=$phase; no content read"
+  }
+  if ($fresh.state -cne "available" -or $fresh.processId -ne $processId -or
+      ($priorMetadata -and ($priorMetadata.ownership -cne "owned" -or $priorMetadata.finalPID.value -ne $processId -or
+        $priorMetadata.automationID.value -cne $fresh.automationId))) {
+    throw "MULTIPROJECT_METADATA: fresh owned identity unavailable/drifted expectedPID=$processId phase=$phase; no content read"
+  }
+  $cached = if ($cacheReader) { & $cacheReader $element $true } else { Read-MultiProjectElementCache $element $true }
+  $contentPID = $cached.GetCachedPropertyValue([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $true)
+  $contentID = $cached.GetCachedPropertyValue([System.Windows.Automation.AutomationElement]::AutomationIdProperty, $true)
+  $cachedPIDState = ConvertTo-MultiProjectPropertyState $contentPID "ProcessId" ([System.Windows.Automation.AutomationElement]::NotSupported)
+  $cachedIDState = ConvertTo-MultiProjectPropertyState $contentID "AutomationId" ([System.Windows.Automation.AutomationElement]::NotSupported)
+  $diagnostic.cachedPID = $cachedPIDState; $diagnostic.cachedIdentity = $cachedIDState
+  Write-Host ("UIA_MULTIPROJECT_CACHED_OWNERSHIP=" + ($diagnostic | ConvertTo-Json -Depth 5 -Compress))
+  if ($cachedPIDState.state -ceq "available" -and $contentPID -ne $processId) {
+    throw "MULTIPROJECT_PRIVACY: cached capture changed to positive foreign PID=$contentPID expectedPID=$processId phase=$phase; no content extraction"
+  }
+  if ($cachedPIDState.state -cne "available" -or $cachedIDState.state -cne "available" -or
+      $contentPID -ne $processId -or $contentID -cne $fresh.automationId) {
+    throw "MULTIPROJECT_METADATA: cached owned identity changed before content extraction expectedPID=$processId phase=$phase"
+  }
+  $contentRuntime = @($cached.GetRuntimeId())
+  if ((ConvertTo-SketchCanonicalJson $contentRuntime) -cne (ConvertTo-SketchCanonicalJson $fresh.runtimeId)) {
+    throw "MULTIPROJECT_METADATA: cached runtime identity changed before content extraction expectedPID=$processId phase=$phase"
+  }
+  $rect = $cached.GetCachedPropertyValue([System.Windows.Automation.AutomationElement]::BoundingRectangleProperty, $true)
+  $content = [ordered]@{ processId = $contentPID; automationId = $contentID
+    name = $cached.GetCachedPropertyValue([System.Windows.Automation.AutomationElement]::NameProperty, $true)
+    bounds = @(if ($rect -is [System.Windows.Rect]) { $rect.Left; $rect.Top; $rect.Right; $rect.Bottom }) }
+  $after = Read-MultiProjectOwnershipSnapshot $element $cacheReader
+  $diagnostic.after = $after
+  $diagnostic.contentRead = $true
+  Write-Host ("UIA_MULTIPROJECT_CAPTURE_VERIFY=" + ($diagnostic | ConvertTo-Json -Depth 5 -Compress))
+  Confirm-MultiProjectOwnedSnapshot $fresh $after $processId $phase
+  if (-not (Test-MultiProjectFragmentRoster @($content) @([ordered]@{
+      automationId = $fresh.automationId; name = $content.name
+    }) $processId)) {
+    throw "MULTIPROJECT_METADATA: owned cached content type/bounds invalid expectedPID=$processId phase=$phase; discard whole snapshot"
+  }
+  if ($null -ne $capturedSnapshots) {
+    $capturedSnapshots.Add([ordered]@{ element = $element; snapshot = $fresh; phase = $phase })
+  }
+  return [ordered]@{ automationId = $content.automationId; name = $content.name
+    processId = $content.processId; bounds = $content.bounds }
+}
+
+function Test-MultiProjectAutomationPrefix($value, [string] $prefix) {
+  return $value -is [string] -and $value.Length -gt 0 -and
+    $value.StartsWith($prefix, [StringComparison]::Ordinal)
+}
+
+function Read-MultiProjectMetadataProperty($element, [string] $property) {
+  try {
+    $value = $element.Current.$property
+    $state = if ($null -eq $value) { "unavailable" } elseif ($property -ceq "AutomationId") {
+      if ($value -isnot [string]) { "invalid" } elseif ($value.Length -eq 0) { "empty" } else { "available" }
+    } elseif (($value -is [int] -or $value -is [long]) -and $value -gt 0) { "available" } else { "invalid" }
+    return [ordered]@{ state = $state; value = $value; errorType = $null; hresult = $null }
+  } catch {
+    $exception = Get-MultiProjectUnavailableException $_
+    if ($null -eq $exception) { throw }
+    return [ordered]@{ state = "unavailable"; value = $null
+      errorType = $exception.GetType().FullName; hresult = $exception.HResult }
+  }
+}
+
+function Get-MultiProjectFragmentMetadata($element, [int] $expectedProcessId) {
+  $pidFirst = Read-MultiProjectMetadataProperty $element "ProcessId"
+  $identity = Read-MultiProjectMetadataProperty $element "AutomationId"
+  $pidAfter = Read-MultiProjectMetadataProperty $element "ProcessId"
+  $ownership = if ($pidFirst.state -cne "available" -or $pidAfter.state -cne "available") { "unavailable" }
+    elseif ($pidFirst.value -ne $pidAfter.value) { "changed" }
+    elseif ($pidFirst.value -eq $expectedProcessId) { "owned" } else { "foreign" }
+  $family = "unclassified"
+  if ($identity.state -ceq "available") {
+    if (Test-MultiProjectAutomationPrefix $identity.value "canvas-card-") { $family = "canvas-fragment" }
+    elseif (Test-MultiProjectAutomationPrefix $identity.value "open-project-") { $family = "project-fragment" }
+    elseif ((Test-MultiProjectAutomationPrefix $identity.value "workspace-loop-bar-") -or
+        (Test-MultiProjectAutomationPrefix $identity.value "workspace-toolbar-")) { $family = "workspace-marker" }
+    elseif ($ownership -ceq "owned") {
+      $staticIds = @("canvas-primary-action", "zoom-out", "actual-size", "zoom-in", "fit-canvas",
+        "overview-destination", "quick-chats-destination")
+      $chromePrefixes = @("sidebar-section-", "project-row-", "project-new-loop-", "project-disclosure-",
+        "quick-chats-header-", "quick-chat-new-", "quick-chats-disclosure-", "quick-chat-row-",
+        "header-attention-", "header-worktree-", "header-jump-", "header-toggle-panel-",
+        "workspace-show-graph-", "workspace-stop-", "workspace-toggle-panel-", "workspace-detail-sparkline-",
+        "workspace-detail-start-", "workspace-detail-usage-", "workspace-tab-", "workspace-tab-close-",
+        "workspace-new-tab-", "workspace-split-right-", "workspace-split-down-")
+      if ($staticIds -ccontains $identity.value -or @($chromePrefixes | Where-Object {
+          Test-MultiProjectAutomationPrefix $identity.value $_
+        }).Count -gt 0) { $family = "source-supported-chrome" }
+    }
+  }
+  $ready = $ownership -cin @("owned", "foreign") -and $identity.state -ceq "available" -and
+    $family -cne "unclassified"
+  return [ordered]@{
+    element = $element; firstPID = $pidFirst; finalPID = $pidAfter; automationID = $identity
+    ownership = $ownership; family = $family; observationReady = $ready
+    proofLimit = if ($ready) { $null } else {
+      "Identity/ownership unavailable or unclassified: no native-boundary cause or harmless non-fragment policy established; reacquire without command replay."
+    }
+  }
+}
+
+function Test-MultiProjectMetadataBatch($metadata) {
+  if ($metadata -isnot [array] -or $metadata.Count -le 0) { return $false }
+  return @($metadata | Where-Object { -not $_.observationReady }).Count -eq 0
+}
+
+function Get-MultiProjectRetentionError([Management.Automation.ErrorRecord] $errorRecord, [string] $operation) {
+  $exception=$errorRecord.Exception
+  for($depth=0;$exception.InnerException -and $depth -lt 16;$depth++){ $exception=$exception.InnerException }
+  return [ordered]@{ operation=$operation; errorType=$exception.GetType().FullName; hresult=$exception.HResult; message=$exception.Message }
+}
+
+function Invoke-MultiProjectTypeText(
+  [int] $id, [string] $text, [Collections.Generic.List[string]] $inputEvidence,
+  [scriptblock] $typeSource = $null, [scriptblock] $recordSink = $null,
+  [scriptblock] $failureSink = $null, [scriptblock] $warningSink = $null
+) {
+  $source = if ($typeSource) { $typeSource } else { { param($controlId,$expected) Edge-TypeText $controlId $expected } }
+  $sink = if ($recordSink) { $recordSink } else { { param($message) Write-Host $message } }
+  $failureWriter=if($failureSink){$failureSink}else{{param($message) Write-Host $message}}
+  $warningWriter=if($warningSink){$warningSink}else{{param($message) Write-Warning $message -WarningAction Continue}}
+  $sinkErrors = [Collections.Generic.List[object]]::new()
+  $sourceInvocations = 0; $informationRecords = 0; $retainedRecords = 0
+  try {
+    $sourceInvocations++
+    & $source $id $text 6>&1 | ForEach-Object {
+      if ($_ -is [Management.Automation.InformationRecord]) {
+        $informationRecords++
+        $message = [string]$_.MessageData
+        if ($message.StartsWith("UIA_EDGE_TEXT_STABLE ",[StringComparison]::Ordinal)) { $inputEvidence.Add($message) }
+        try { & $sink $message | Out-Null; $retainedRecords++ }
+        catch { $sinkErrors.Add((Get-MultiProjectRetentionError $_ "attempt-record")) }
+      }
+    }
+  } catch {
+    $primary = $_
+    $summary="UIA_MULTIPROJECT_INPUT_FAILURE=" + ([ordered]@{
+      controlId = $id; expectedText = $text; sourceInvocations = $sourceInvocations
+      producedInformationRecords = $informationRecords; retainedInformationRecords = $retainedRecords
+      nativeAttemptRecordCount = $inputEvidence.Count; nativeAttemptRecordsAvailable = ($inputEvidence.Count -gt 0)
+      primaryErrorType = $primary.Exception.GetType().FullName; primaryMessage = $primary.Exception.Message
+      secondaryRetentionErrors = $sinkErrors.ToArray(); nativeCauseEstablished = $false
+    } | ConvertTo-Json -Depth 4 -Compress)
+    try { & $failureWriter $summary | Out-Null }
+    catch { $sinkErrors.Add((Get-MultiProjectRetentionError $_ "failure-summary")) }
+    if($sinkErrors.Count -gt 0){
+      try {
+        & $warningWriter ("MULTIPROJECT_INPUT_RETENTION_SECONDARY: " + ($sinkErrors.ToArray() | ConvertTo-Json -Depth 4 -Compress)) | Out-Null
+      } catch { $sinkErrors.Add((Get-MultiProjectRetentionError $_ "warning")) }
+      $primary.Exception.Data["MultiProjectInputRetention"]=$sinkErrors.ToArray()
+    }
+    throw
+  }
+  if ($sinkErrors.Count -gt 0) {
+    $retention=[InvalidOperationException]::new("MULTIPROJECT_INPUT_RETENTION: native helper returned but existing attempt records could not be retained")
+    $retention.Data["MultiProjectInputRetention"]=$sinkErrors.ToArray()
+    throw $retention
+  }
+  return [ordered]@{ sourceInvocations = $sourceInvocations; producedInformationRecords = $informationRecords; retainedInformationRecords = $retainedRecords }
+}
+
+function New-MultiProjectEditNativeApi {
+  if(-not("GraphCodeMultiProjectEditNative" -as [type])){
+    Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Diagnostics;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class GraphCodeMultiProjectEditNative {
+  [StructLayout(LayoutKind.Sequential)] private struct Key { public ushort Vk, Scan; public uint Flags, Time; public UIntPtr Extra; }
+  [StructLayout(LayoutKind.Sequential)] private struct Input { public uint Type; public Key Key; public uint Pad0, Pad1; }
+  [StructLayout(LayoutKind.Sequential)] private struct Rect {public int Left,Top,Right,Bottom;}
+  [StructLayout(LayoutKind.Sequential)] private struct GuiInfo {
+    public int Size; public uint Flags; public IntPtr Active,Focus,Capture,MenuOwner,MoveSize,Caret; public Rect CaretRect;
+  }
+  [DllImport("user32.dll", SetLastError=true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
+  [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", SetLastError=true)]
+  private static extern IntPtr Message(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
+  [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", CharSet=CharSet.Unicode, SetLastError=true)]
+  private static extern IntPtr TextMessage(IntPtr window, uint message, UIntPtr wparam, StringBuilder text, uint flags, uint timeout, out UIntPtr result);
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+  [DllImport("user32.dll",SetLastError=true)] private static extern bool GetGUIThreadInfo(uint thread,ref GuiInfo info);
+  private static uint Remaining(int budget, Stopwatch watch) {
+    long value=budget-watch.ElapsedMilliseconds;
+    if(value<=0) throw new TimeoutException("N3e edit transaction deadline expired");
+    return (uint)value;
+  }
+  private static UIntPtr ReadMessage(IntPtr window,uint message,UIntPtr first,IntPtr last,int budget,Stopwatch watch) {
+    UIntPtr result;
+    if(Message(window,message,first,last,0x23,Remaining(budget,watch),out result)==IntPtr.Zero)
+      throw new Win32Exception(Marshal.GetLastWin32Error(),"N3e edit message unavailable/timed out");
+    return result;
+  }
+  public static string Buffer(IntPtr edit,int budget) {
+    var watch=Stopwatch.StartNew();
+    int length=checked((int)ReadMessage(edit,0x000E,UIntPtr.Zero,IntPtr.Zero,budget,watch).ToUInt64());
+    if(length<0 || length>65536) throw new InvalidOperationException("N3e edit buffer exceeds bound");
+    var text=new StringBuilder(length+1); UIntPtr result;
+    if(TextMessage(edit,0x000D,(UIntPtr)text.Capacity,text,0x23,Remaining(budget,watch),out result)==IntPtr.Zero)
+      throw new Win32Exception(Marshal.GetLastWin32Error(),"N3e WM_GETTEXT unavailable/timed out");
+    return text.ToString();
+  }
+  public static int[] Selection(IntPtr edit,int budget) {
+    var watch=Stopwatch.StartNew(); IntPtr memory=Marshal.AllocHGlobal(8);
+    try {
+      Marshal.WriteInt32(memory,-1); Marshal.WriteInt32(memory,4,-1);
+      ReadMessage(edit,0x00B0,(UIntPtr)memory.ToInt64(),IntPtr.Add(memory,4),budget,watch);
+      return new[]{Marshal.ReadInt32(memory),Marshal.ReadInt32(memory,4)};
+    } finally {Marshal.FreeHGlobal(memory);}
+  }
+  public static void SelectAll(IntPtr edit,int budget) {
+    ReadMessage(edit,0x00B1,UIntPtr.Zero,new IntPtr(-1),budget,Stopwatch.StartNew());
+  }
+  public static IntPtr FocusOf(IntPtr modal) {
+    uint pid; uint thread=GetWindowThreadProcessId(modal,out pid);
+    var info=new GuiInfo{Size=Marshal.SizeOf(typeof(GuiInfo))};
+    if(thread==0 || !GetGUIThreadInfo(thread,ref info)) throw new Win32Exception(Marshal.GetLastWin32Error(),"N3e GetGUIThreadInfo");
+    return info.Focus;
+  }
+  public static int[] Unicode(string text) {
+    var inputs=new Input[text.Length*2]; int index=0;
+    foreach(char value in text){
+      inputs[index++]=new Input{Type=1,Key=new Key{Scan=value,Flags=4}};
+      inputs[index++]=new Input{Type=1,Key=new Key{Scan=value,Flags=6}};
+    }
+    uint sent=SendInput((uint)inputs.Length,inputs,Marshal.SizeOf(typeof(Input)));
+    return new[]{checked((int)sent),inputs.Length};
+  }
+}
+'@
+  }
+  $api=New-MultiProjectRenameNativeApi
+  $api | Add-Member NoteProperty Watch ([Diagnostics.Stopwatch]::StartNew())
+  $api | Add-Member ScriptMethod Clock {return $this.Watch.ElapsedMilliseconds}
+  $api | Add-Member ScriptMethod Title {param($modal,$remaining) [GraphCodeMultiProjectEditNative]::Buffer($modal,$remaining)} -Force
+  $api | Add-Member ScriptMethod FocusHandle {param($modal) [GraphCodeMultiProjectEditNative]::FocusOf($modal)}
+  $api | Add-Member ScriptMethod FocusInsertion {
+    param($modal,$point)
+    return ,@([GraphCodeUiaGateState]::ClickOwnedScreenRectangle($modal,$point[0],$point[1],$point[0]+1,$point[1]+1,$false))
+  }
+  $api | Add-Member ScriptMethod FocusMouse {
+    param($modal,$edit,$point,$expectedProcessId,$started)
+    $null=Get-MultiProjectEditRemaining $this $started
+    $owner=$this.ProcessId($modal)
+    $editOwner=$this.ProcessId($edit)
+    if(($owner -isnot [int] -and $owner -isnot [uint32] -and $owner -isnot [long]) -or $owner -ne $expectedProcessId -or
+      ($editOwner -isnot [int] -and $editOwner -isnot [uint32] -and $editOwner -isnot [long]) -or $editOwner -ne $expectedProcessId){
+      throw "MULTIPROJECT_EDIT_OWNER: expected modal/edit PID changed before focus content/input"
+    }
+    $hit=$this.Hit($modal,$point[0],$point[1])
+    $foreground=$this.Foreground($modal);$visible=$this.Visible($edit);$enabled=$this.Enabled($edit)
+    $controlId=$this.ControlId($edit);$root=$this.Root($edit);$held=$this.Control($modal,9904)
+    if($hit.root -isnot [IntPtr] -or $hit.root -ne $modal -or $hit.child -isnot [IntPtr] -or $hit.child -ne $edit -or
+      ($hit.processId -isnot [int] -and $hit.processId -isnot [uint32] -and $hit.processId -isnot [long]) -or
+      $hit.processId -ne $expectedProcessId -or $held -isnot [IntPtr] -or $held -ne $edit -or
+      $root -isnot [IntPtr] -or $root -ne $modal -or $controlId -isnot [int] -or $controlId -ne 9904 -or
+      $foreground -isnot [bool] -or -not $foreground -or $visible -isnot [bool] -or -not $visible -or
+      $enabled -isnot [bool] -or -not $enabled){
+      throw "MULTIPROJECT_EDIT_FOCUS: measured edit focus target changed before single mouse insertion"
+    }
+    $title=$this.Title($modal,(Get-MultiProjectEditRemaining $this $started))
+    if($title -isnot [string] -or $title -cne "Rename Loop"){throw "MULTIPROJECT_EDIT_FOCUS: owned focus modal title changed"}
+    $owner=$this.ProcessId($modal);$editOwner=$this.ProcessId($edit)
+    if(($owner -isnot [int] -and $owner -isnot [uint32] -and $owner -isnot [long]) -or $owner -ne $expectedProcessId -or
+      ($editOwner -isnot [int] -and $editOwner -isnot [uint32] -and $editOwner -isnot [long]) -or $editOwner -ne $expectedProcessId){
+      throw "MULTIPROJECT_EDIT_OWNER: expected PID changed during bounded focus title query"
+    }
+    $null=Get-MultiProjectEditRemaining $this $started
+    return ,@($this.FocusInsertion($modal,$point))
+  }
+  $api | Add-Member ScriptMethod EditBuffer {param($edit,$remaining) [GraphCodeMultiProjectEditNative]::Buffer($edit,$remaining)}
+  $api | Add-Member ScriptMethod Selection {param($edit,$remaining) [GraphCodeMultiProjectEditNative]::Selection($edit,$remaining)}
+  $api | Add-Member ScriptMethod SelectAll {param($edit,$remaining) [GraphCodeMultiProjectEditNative]::SelectAll($edit,$remaining)}
+  $api | Add-Member ScriptMethod Delete {return ,@(([GraphCodeUiaGateState]::SendKeyInput(0x2E,1)*2),2)}
+  $api | Add-Member ScriptMethod Unicode {param($text) return ,@([GraphCodeMultiProjectEditNative]::Unicode($text))}
+  $api | Add-Member ScriptMethod Observe {param($remaining) Start-Sleep -Milliseconds ([Math]::Min(25,$remaining))}
+  return $api
+}
+
+function Get-MultiProjectEditRemaining($api,[long]$started) {
+  $elapsed=[long]$api.Clock()-$started
+  if($elapsed -lt 0 -or $elapsed -ge 5000){throw "MULTIPROJECT_EDIT_DEADLINE: total owned transaction reached5000ms"}
+  return [int](5000-$elapsed)
+}
+
+function Assert-MultiProjectEditOwned($api,[IntPtr]$modal,[int]$processId,[long]$started,$known=$null,[switch]$Focused) {
+  $null=Get-MultiProjectEditRemaining $api $started
+  $actualPid=$api.ProcessId($modal)
+  if(($actualPid -isnot [int] -and $actualPid -isnot [uint32] -and $actualPid -isnot [long]) -or $actualPid -ne $processId -or $processId -le 0){
+    throw "MULTIPROJECT_EDIT_OWNER: modal PID unavailable/foreign before content"
+  }
+  $field=Read-MultiProjectRenameField $api $modal 9904 $processId
+  $title=$api.Title($modal,(Get-MultiProjectEditRemaining $api $started))
+  $foreground=$api.Foreground($modal);$visible=$api.Visible($modal);$enabled=$api.Enabled($modal)
+  if($title -isnot [string] -or $title -cne "Rename Loop" -or
+    -not(Test-MultiProjectRenameField $field $modal 9904 $processId) -or $foreground -isnot [bool] -or -not $foreground -or
+    $visible -isnot [bool] -or -not $visible -or $enabled -isnot [bool] -or -not $enabled -or
+    ($null -ne $known -and $field.handle -ne $known.handle)){
+    throw "MULTIPROJECT_EDIT_OWNER: exact owned enabled visible title/control/foreground changed"
+  }
+  if($Focused){
+    $focus=$api.FocusHandle($modal)
+    if($focus -isnot [IntPtr] -or $focus -ne [IntPtr]$field.handle -or $api.ProcessId($focus) -ne $processId){
+      throw "MULTIPROJECT_EDIT_FOCUS: observed GUI edit focus/PID unavailable/changed"
+    }
+  }
+  $null=Get-MultiProjectEditRemaining $api $started
+  return $field
+}
+
+function Invoke-MultiProjectSequencedEdit(
+  [IntPtr]$modal,[int]$processId,[string]$expectedPrefill,[string]$text,$nativeApi=$null,[scriptblock]$phaseSink=$null
+) {
+  $api=if($null -ne $nativeApi){$nativeApi}else{New-MultiProjectEditNativeApi}
+  $phaseWriter=if($phaseSink){$phaseSink}else{{param($message) Write-Host $message}}
+  $started=[long]$api.Clock()
+  $record=[ordered]@{phase="initial";expectedPrefill=$expectedPrefill;expectedText=$text;clear=@();typed=@()
+    focusBatches=0;focusReceipt=@();focusSentEvents=0;focusExpectedEvents=0;clearBatches=0;unicodeBatches=0;observations=@();observableNonemptyToEmpty=$false
+    nativeQueueAckClaimed=$false;historicalLeadingALossEstablished=$false;maximumMilliseconds=5000
+    boundLimit="Target-thread messages use remaining time; one shared stage budget. SendInput has no kernel/scheduler timeout guarantee."}
+  try{
+    if([string]::IsNullOrEmpty($expectedPrefill)){throw "MULTIPROJECT_EDIT_PREFILL: known nonempty prefill required"}
+    $field=Assert-MultiProjectEditOwned $api $modal $processId $started
+    $record.initialOwnedTarget=$field
+    $edit=[IntPtr]$field.handle
+    $initial=$api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started))
+    $record.initialBuffer=$initial
+    if($initial -isnot [string] -or $initial -cne $expectedPrefill){throw "MULTIPROJECT_EDIT_PREFILL: fresh buffer differs from known nonempty prefill"}
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field
+    $focus=$api.FocusHandle($modal)
+    $record.focusAlreadyOwned=$focus -is [IntPtr] -and $focus -eq $edit -and $api.ProcessId($focus) -eq $processId
+    $record.focusInitialHandle=if($focus -is [IntPtr]){$focus.ToInt64()}else{$null}
+    $focusObservations=[Collections.Generic.List[object]]::new()
+    if($record.focusAlreadyOwned){$record.focusObservedHandle=$focus.ToInt64()}
+    if(-not $record.focusAlreadyOwned){
+      $client=@($api.ClientBounds($modal));$work=@($api.WorkBounds($modal))
+      if(-not(Test-MultiProjectRenameRectangle $client) -or -not(Test-MultiProjectRenameRectangle $work)){
+        throw "MULTIPROJECT_EDIT_FOCUS: measured client/work focus bounds unavailable"
+      }
+      $clip=Get-MultiProjectClippedRectangle $field.bounds $client
+      $clip=Get-MultiProjectClippedRectangle $clip $work
+      $record.focusClippedBounds=$clip
+      $focusSamples=[Collections.Generic.List[object]]::new();$point=$null
+      foreach($candidate in @(@(0.5,0.5),@(0.25,0.25),@(0.75,0.25),@(0.25,0.75),@(0.75,0.75))){
+        $null=Get-MultiProjectEditRemaining $api $started
+        $x=[int][Math]::Floor($clip[0]+($clip[2]-$clip[0]-1)*$candidate[0])
+        $y=[int][Math]::Floor($clip[1]+($clip[3]-$clip[1]-1)*$candidate[1])
+        $hit=$api.Hit($modal,$x,$y)
+        $valid=$hit.root -is [IntPtr] -and $hit.root -eq $modal -and $hit.child -is [IntPtr] -and
+          $hit.child -eq $edit -and ($hit.processId -is [int] -or $hit.processId -is [uint32] -or $hit.processId -is [long]) -and
+          $hit.processId -eq $processId
+        $focusSamples.Add([ordered]@{point=@($x,$y);root=if($hit.root -is [IntPtr]){$hit.root.ToInt64()}else{$null}
+          pid=$hit.processId;child=if($hit.child -is [IntPtr]){$hit.child.ToInt64()}else{$null};hitTarget=$valid})
+        if($valid){$point=@($x,$y);break}
+      }
+      $record.focusHitSamples=$focusSamples.ToArray()
+      if($null -eq $point){throw "MULTIPROJECT_EDIT_FOCUS: no measured uncovered owned edit point"}
+      $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field
+      $null=Get-MultiProjectEditRemaining $api $started
+      $record.focusBatches++
+      $record.focusExpectedEvents=2;$record.focusSentEvents=$null
+      $record.focusReceipt=@($api.FocusMouse($modal,$edit,$point,$processId,$started))
+      if($record.focusReceipt.Count -eq 8){$record.focusSentEvents=$record.focusReceipt[6]}
+      if($record.focusReceipt.Count -ne 8 -or @($record.focusReceipt|Where-Object{$_ -isnot [int]}).Count -ne 0 -or
+        $record.focusReceipt[6] -ne 2 -or $record.focusReceipt[7] -ne 2 -or
+        $record.focusReceipt[4] -ne $point[0] -or $record.focusReceipt[5] -ne $point[1]){
+        throw "MULTIPROJECT_EDIT_COUNTS: single focus mouse insertion receipt incomplete"
+      }
+      $null=Get-MultiProjectEditRemaining $api $started
+      $focus=$api.FocusHandle($modal)
+      while($focus -isnot [IntPtr] -or $focus -ne $edit -or $api.ProcessId($focus) -ne $processId){
+        $focusObservations.Add([ordered]@{handle=if($focus -is [IntPtr]){$focus.ToInt64()}else{$null};ownedEditFocused=$false
+          elapsed=[long]$api.Clock()-$started})
+        $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field
+        $api.Observe((Get-MultiProjectEditRemaining $api $started))
+        $focus=$api.FocusHandle($modal)
+      }
+      $record.focusObservedHandle=$focus.ToInt64()
+      $focusObservations.Add([ordered]@{handle=$focus.ToInt64();pid=$api.ProcessId($focus);ownedEditFocused=$true
+        elapsed=[long]$api.Clock()-$started})
+    }
+    $record.focusObservations=$focusObservations.ToArray()
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+    $focused=$api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started))
+    if($focused -isnot [string] -or $focused -cne $expectedPrefill){throw "MULTIPROJECT_EDIT_PREFILL: nonempty prefill changed while focusing"}
+    $api.SelectAll($edit,(Get-MultiProjectEditRemaining $api $started))
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+    $selection=@($api.Selection($edit,(Get-MultiProjectEditRemaining $api $started)))
+    $record.selectedSpan=$selection
+    if($selection.Count -ne 2 -or $selection[0] -isnot [int] -or $selection[1] -isnot [int] -or
+      $selection[0] -ne 0 -or $selection[1] -ne $expectedPrefill.Length){
+      throw "MULTIPROJECT_EDIT_SELECTION: actual select-all span not0..knownUTF16length"
+    }
+    $selectedBuffer=$api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started))
+    if($selectedBuffer -isnot [string] -or $selectedBuffer -cne $expectedPrefill){throw "MULTIPROJECT_EDIT_PREFILL: selected nonempty source buffer changed"}
+    & $phaseWriter ("UIA_MULTIPROJECT_EDIT_PHASE="+($record|ConvertTo-Json -Depth 6 -Compress)) | Out-Null
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+    $null=Get-MultiProjectEditRemaining $api $started
+    $record.phase="clear";$record.clearBatches++
+    $record.clear=@($api.Delete())
+    if($record.clear.Count -ne 2 -or $record.clear[0] -isnot [int] -or $record.clear[1] -isnot [int] -or
+      $record.clear[0] -ne 2 -or $record.clear[1] -ne 2){throw "MULTIPROJECT_EDIT_COUNTS: clear insertion receipt not2/2"}
+    $observations=[Collections.Generic.List[object]]::new();$emptyStreak=0
+    while($emptyStreak -lt 3){
+      $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+      $buffer=$api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started))
+      $span=@($api.Selection($edit,(Get-MultiProjectEditRemaining $api $started)))
+      $empty=$buffer -is [string] -and $buffer -ceq "" -and $span.Count -eq 2 -and
+        $span[0] -is [int] -and $span[1] -is [int] -and $span[0] -eq 0 -and $span[1] -eq 0
+      $observations.Add([ordered]@{phase="clear";buffer=$buffer;selection=$span;exactEmpty=$empty;elapsed=[long]$api.Clock()-$started})
+      if($empty){$emptyStreak++}else{$emptyStreak=0}
+      if($emptyStreak -lt 3){$api.Observe((Get-MultiProjectEditRemaining $api $started))}
+    }
+    $record.observableNonemptyToEmpty=$true
+    $record.observations=$observations.ToArray()
+    & $phaseWriter ("UIA_MULTIPROJECT_EDIT_PHASE="+($record|ConvertTo-Json -Depth 6 -Compress)) | Out-Null
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+    $beforeType=$api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started))
+    $span=@($api.Selection($edit,(Get-MultiProjectEditRemaining $api $started)))
+    if($beforeType -isnot [string] -or $beforeType -cne "" -or $span.Count -ne 2 -or
+      $span[0] -isnot [int] -or $span[1] -isnot [int] -or $span[0] -ne 0 -or $span[1] -ne 0){
+      throw "MULTIPROJECT_EDIT_CLEAR: completed empty transition rebound before Unicode"
+    }
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+    $null=Get-MultiProjectEditRemaining $api $started
+    $record.phase="unicode";$record.unicodeBatches++
+    $record.typed=@($api.Unicode($text))
+    if($record.typed.Count -ne 2 -or $record.typed[0] -isnot [int] -or $record.typed[1] -isnot [int] -or
+      $record.typed[0] -ne 2*$text.Length -or $record.typed[1] -ne 2*$text.Length){
+      throw "MULTIPROJECT_EDIT_COUNTS: single Unicode insertion receipt incomplete"
+    }
+    $finalStreak=0
+    while($finalStreak -lt 3){
+      $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+      $actual=$api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started))
+      $exact=$actual -is [string] -and $actual -ceq $text
+      $observations.Add([ordered]@{phase="final";buffer=$actual;exactExpected=$exact;elapsed=[long]$api.Clock()-$started})
+      if($exact){$finalStreak++}else{$finalStreak=0}
+      if($finalStreak -lt 3){$api.Observe((Get-MultiProjectEditRemaining $api $started))}
+    }
+    $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
+    $record.phase="complete";$record.observations=$observations.ToArray();$record.elapsedMilliseconds=[long]$api.Clock()-$started
+    & $phaseWriter ("UIA_MULTIPROJECT_EDIT_PHASE="+($record|ConvertTo-Json -Depth 6 -Compress)) | Out-Null
+    & $phaseWriter "UIA_EDGE_TEXT_STABLE id=9904 attempt=1 before='$initial' after='$actual' expected='$text' modal=True foreground=True stable=True inputAttempted=True inputCountsFull=True clearSent=$($record.clear[0])/$($record.clear[1]) textSent=$($record.typed[0])/$($record.typed[1]) control=0x$('{0:x}' -f $edit.ToInt64())" | Out-Null
+    return $actual
+  }catch{
+    $primary=$_
+    try{
+      $record.failure=Get-MultiProjectRetentionError $primary "sequenced-edit"
+      $record.elapsedMilliseconds=[long]$api.Clock()-$started
+      & $phaseWriter ("UIA_MULTIPROJECT_EDIT_REFUSAL="+($record|ConvertTo-Json -Depth 6 -Compress)) | Out-Null
+    }
+    catch{$primary.Exception.Data["MultiProjectEditDiagnostic"]=Get-MultiProjectRetentionError $_ "sequenced-edit-refusal"}
+    throw
+  }
+}
+
+function New-MultiProjectRenameNativeApi {
+  if (-not ("GraphCodeMultiProjectRenameNative" -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class GraphCodeMultiProjectRenameNative {
+  [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo {
+    public int Size; public Rect Monitor, Work; public uint Flags;
+  }
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr window, uint flags);
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point point);
+  [DllImport("user32.dll")] private static extern IntPtr RealChildWindowFromPoint(IntPtr window, Point point);
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool GetClientRect(IntPtr window, out Rect rect);
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool ClientToScreen(IntPtr window, ref Point point);
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool ScreenToClient(IntPtr window, ref Point point);
+  [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+  public static int[] ClientBounds(IntPtr window) {
+    Rect rect;
+    if (!GetClientRect(window, out rect)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename GetClientRect");
+    var first = new Point { X=rect.Left, Y=rect.Top };
+    var last = new Point { X=rect.Right, Y=rect.Bottom };
+    if (!ClientToScreen(window, ref first) || !ClientToScreen(window, ref last))
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename ClientToScreen");
+    return new[] { first.X, first.Y, last.X, last.Y };
+  }
+  public static int[] WorkBounds(IntPtr window) {
+    var info = new MonitorInfo { Size=Marshal.SizeOf(typeof(MonitorInfo)) };
+    if (!GetMonitorInfo(MonitorFromWindow(window, 2), ref info))
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename GetMonitorInfo");
+    return new[] { info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom };
+  }
+  public static IntPtr ChildAt(IntPtr window, int x, int y) {
+    var point = new Point { X=x, Y=y };
+    if (!ScreenToClient(window, ref point)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename ScreenToClient");
+    return RealChildWindowFromPoint(window, point);
+  }
+}
+'@
+  }
+  $api = New-Object PSObject
+  $api | Add-Member ScriptMethod ProcessId { param($window) [GraphCodeUiaGateState]::WindowProcessId($window) }
+  $api | Add-Member ScriptMethod Title { param($window) [GraphCodeUiaGateState]::WindowTextOf($window) }
+  $api | Add-Member ScriptMethod Visible { param($window) [GraphCodeUiaGateState]::WindowIsVisible($window) }
+  $api | Add-Member ScriptMethod Enabled { param($window) [GraphCodeUiaGateState]::WindowIsEnabled($window) }
+  $api | Add-Member ScriptMethod Root { param($window) [GraphCodeMultiProjectRenameNative]::GetAncestor($window, 2) }
+  $api | Add-Member ScriptMethod Control { param($window,$id) [GraphCodeUiaGateState]::ControlById($window,$id) }
+  $api | Add-Member ScriptMethod ControlId { param($window) [GraphCodeUiaGateState]::ControlIdOf($window) }
+  $api | Add-Member ScriptMethod Bounds { param($window) [GraphCodeUiaGateState]::WindowBounds($window) }
+  $api | Add-Member ScriptMethod ClientBounds { param($window) [GraphCodeMultiProjectRenameNative]::ClientBounds($window) }
+  $api | Add-Member ScriptMethod WorkBounds { param($window) [GraphCodeMultiProjectRenameNative]::WorkBounds($window) }
+  $api | Add-Member ScriptMethod Foreground { param($window) [GraphCodeUiaGateState]::IsForegroundWindow($window) }
+  $api | Add-Member ScriptMethod Buffer { param($window,$id) [GraphCodeUiaGateState]::EditTextById($window,$id) }
+  $api | Add-Member ScriptMethod Pause { Start-Sleep -Milliseconds 150 }
+  $api | Add-Member ScriptMethod Hit {
+    param($window,$x,$y)
+    $point = New-Object GraphCodeMultiProjectRenameNative+Point
+    $point.X = $x; $point.Y = $y
+    $hit = [GraphCodeMultiProjectRenameNative]::WindowFromPoint($point)
+    $root = [GraphCodeMultiProjectRenameNative]::GetAncestor($hit, 2)
+    return [ordered]@{ root = $root; processId = [GraphCodeUiaGateState]::WindowProcessId($root)
+      child = if ($root -eq $window) { [GraphCodeMultiProjectRenameNative]::ChildAt($window,$x,$y) } else { [IntPtr]::Zero } }
+  }
+  $api | Add-Member ScriptMethod SendMouse {
+    param($window,$point)
+    return ,@([GraphCodeUiaGateState]::ClickOwnedScreenRectangle($window,$point[0],$point[1],$point[0]+1,$point[1]+1,$false))
+  }
+  $api | Add-Member ScriptMethod Click {
+    param($window,$control,$id,$processId,$point)
+    $hit = $this.Hit($window,$point[0],$point[1])
+    if ($this.ProcessId($window) -ne $processId -or $this.ProcessId($control) -ne $processId -or
+        $this.Control($window,$id) -ne $control -or $this.ControlId($control) -ne $id -or
+        $this.Root($control) -ne $window -or -not $this.Visible($control) -or -not $this.Enabled($control) -or
+        $this.Title($window) -cne "Rename Loop" -or
+        -not $this.Foreground($window) -or $hit.root -ne $window -or $hit.child -ne $control -or $hit.processId -ne $processId) {
+      throw "MULTIPROJECT_RENAME_GUARD: native target changed immediately before input"
+    }
+    return ,@($this.SendMouse($window,$point))
+  }
+  return $api
+}
+
+function Test-MultiProjectRenameRectangle($rect) {
+  if ($rect -isnot [array] -or $rect.Count -ne 4) { return $false }
+  foreach ($value in $rect) {
+    if (($value -isnot [int] -and $value -isnot [long] -and $value -isnot [double]) -or
+        [double]::IsNaN($value) -or [double]::IsInfinity($value)) { return $false }
+  }
+  return $rect[2] -gt $rect[0] -and $rect[3] -gt $rect[1]
+}
+
+function Read-MultiProjectRenameField($api, [IntPtr] $modal, [int] $id, [int] $expectedPID) {
+  $handle = $api.Control($modal,$id)
+  $result = [ordered]@{ expectedId = $id; handle = $null; state = "unavailable"
+    processId = $null; pidState = "not-read"; controlId = $null; topOwner = $null
+    visible = $null; enabled = $null; bounds = @(); rectState = "not-read" }
+  if ($handle -isnot [IntPtr]) { $result.state = "invalid-handle"; return $result }
+  $result.handle = $handle.ToInt64()
+  if ($handle -eq [IntPtr]::Zero) { $result.state = "missing"; return $result }
+  $pidValue = $api.ProcessId($handle)
+  $result.processId = $pidValue
+  if (($pidValue -isnot [int] -and $pidValue -isnot [uint32] -and $pidValue -isnot [long]) -or $pidValue -le 0) {
+    $result.state = "pid-unavailable"; $result.pidState = "unavailable-or-invalid"; return $result
+  }
+  $result.pidState = "available"
+  if ($pidValue -ne $expectedPID) { $result.state = "foreign"; return $result }
+  $result.controlId = $api.ControlId($handle)
+  $root = $api.Root($handle)
+  $result.topOwner = if ($root -is [IntPtr]) { $root.ToInt64() } else { $null }
+  $result.visible = $api.Visible($handle)
+  $result.enabled = $api.Enabled($handle)
+  $result.bounds = @($api.Bounds($handle))
+  $result.rectState = if (Test-MultiProjectRenameRectangle $result.bounds) { "available" } else { "unavailable-or-invalid" }
+  $result.state = "available"
+  return $result
+}
+
+function Test-MultiProjectRenameField($field, [IntPtr] $modal, [int] $id, [int] $processId) {
+  return $field.state -ceq "available" -and $field.handle -is [long] -and $field.handle -gt 0 -and
+    ($field.processId -is [int] -or $field.processId -is [uint32] -or $field.processId -is [long]) -and
+    $field.processId -eq $processId -and $field.controlId -is [int] -and $field.controlId -eq $id -and
+    $field.topOwner -is [long] -and $field.topOwner -eq $modal.ToInt64() -and
+    $field.visible -is [bool] -and $field.visible -and $field.enabled -is [bool] -and $field.enabled -and
+    (Test-MultiProjectRenameRectangle $field.bounds)
+}
+
+function Invoke-MultiProjectRenameAction(
+  [IntPtr] $modal, [int] $processId, [string] $expectedText, [array] $inputEvidence,
+  [switch] $Cancel, $nativeApi = $null
+) {
+  $api = if ($null -ne $nativeApi) { $nativeApi } else { New-MultiProjectRenameNativeApi }
+  $buttonId = if ($Cancel) { 9808 } else { 9800 }
+  $diagnostic = [ordered]@{
+    expected = [ordered]@{ modalPID = $processId; title = "Rename Loop"; modal = $modal.ToInt64(); buttonId = $buttonId
+      editId = 9904; buffer = $expectedText; clearInputCount = 2; textInputCount = 2 * $expectedText.Length }
+    observed = [ordered]@{ modalPID = $null; title = $null; titleState = "not-read"
+      modalVisible = $null; modalEnabled = $null; clientBounds = @(); workBounds = @(); button = $null; edit = $null }
+    inputAttempted = $false; actualPriorButton1ReturnEstablished = $false
+  }
+  try {
+    $observed = $diagnostic.observed
+    $observed.modalPID = $api.ProcessId($modal)
+    if (($observed.modalPID -is [int] -or $observed.modalPID -is [uint32] -or $observed.modalPID -is [long]) -and
+        $observed.modalPID -eq $processId -and $processId -gt 0 -and $modal -ne [IntPtr]::Zero) {
+      $observed.title = $api.Title($modal); $observed.titleState = "read-after-owned-PID"
+      $observed.modalVisible = $api.Visible($modal); $observed.modalEnabled = $api.Enabled($modal)
+      $observed.clientBounds = @($api.ClientBounds($modal)); $observed.workBounds = @($api.WorkBounds($modal))
+      $observed.button = Read-MultiProjectRenameField $api $modal $buttonId $processId
+      $observed.edit = Read-MultiProjectRenameField $api $modal 9904 $processId
+    }
+    Write-Host ("UIA_MULTIPROJECT_RENAME_NATIVE_TARGET=" + ($diagnostic | ConvertTo-Json -Depth 7 -Compress))
+    if ($observed.title -isnot [string] -or $observed.title -cne "Rename Loop" -or
+        $observed.modalVisible -isnot [bool] -or -not $observed.modalVisible -or
+        $observed.modalEnabled -isnot [bool] -or -not $observed.modalEnabled -or
+        -not (Test-MultiProjectRenameRectangle $observed.clientBounds) -or
+        -not (Test-MultiProjectRenameRectangle $observed.workBounds) -or
+        -not (Test-MultiProjectRenameField $observed.button $modal $buttonId $processId) -or
+        -not (Test-MultiProjectRenameField $observed.edit $modal 9904 $processId)) {
+      throw "MULTIPROJECT_RENAME_GUARD: exact owned visible enabled Rename modal/button/edit unavailable; no input"
+    }
+    $clip = Get-MultiProjectClippedRectangle $observed.button.bounds $observed.clientBounds
+    $clip = Get-MultiProjectClippedRectangle $clip $observed.workBounds
+    $diagnostic.clippedButtonBounds = $clip
+    $proof = @($inputEvidence | Where-Object {
+      $_ -is [string] -and $_.StartsWith("UIA_EDGE_TEXT_STABLE ",[StringComparison]::Ordinal) -and
+        $_ -match 'id=9904(?: |$)' -and $_ -match 'inputAttempted=True(?: |$)' -and
+        $_ -match 'inputCountsFull=True(?: |$)' -and $_ -match 'clearSent=2/2(?: |$)' -and
+        $_ -match ("textSent=" + (2 * $expectedText.Length) + "/" + (2 * $expectedText.Length) + "(?: |$)")
+    })
+    $observed.foreground = $api.Foreground($modal)
+    $observed.firstBuffer = $api.Buffer($modal,9904)
+    $api.Pause()
+    $observed.secondBuffer = $api.Buffer($modal,9904)
+    $diagnostic.fullTypingProofCount = $proof.Count
+    if ($proof.Count -le 0 -or $observed.foreground -isnot [bool] -or -not $observed.foreground -or
+        $observed.firstBuffer -isnot [string] -or $observed.secondBuffer -isnot [string] -or
+        $observed.firstBuffer -cne $expectedText -or $observed.secondBuffer -cne $expectedText) {
+      Write-Host ("UIA_MULTIPROJECT_RENAME_NATIVE_TARGET=" + ($diagnostic | ConvertTo-Json -Depth 7 -Compress))
+      throw "MULTIPROJECT_RENAME_GUARD: full SendInput proof/owned foreground/stable exact buffer missing; no input"
+    }
+    $samples = [Collections.Generic.List[object]]::new()
+    $point = $null
+    foreach ($candidate in @(@(0.5,0.5),@(0.25,0.25),@(0.75,0.25),@(0.25,0.75),@(0.75,0.75))) {
+      $x = [int][Math]::Floor($clip[0] + ($clip[2]-$clip[0]-1) * $candidate[0])
+      $y = [int][Math]::Floor($clip[1] + ($clip[3]-$clip[1]-1) * $candidate[1])
+      $hit = $api.Hit($modal,$x,$y)
+      $valid = $hit.root -is [IntPtr] -and $hit.root -eq $modal -and $hit.child -is [IntPtr] -and
+        $hit.child.ToInt64() -eq $observed.button.handle -and
+        ($hit.processId -is [int] -or $hit.processId -is [uint32] -or $hit.processId -is [long]) -and $hit.processId -eq $processId
+      $samples.Add([ordered]@{ point = @($x,$y); hitRoot = if ($hit.root -is [IntPtr]) { $hit.root.ToInt64() } else { $null }
+        hitPID = $hit.processId; child = if ($hit.child -is [IntPtr]) { $hit.child.ToInt64() } else { $null }; hitTarget = $valid })
+      if ($valid) { $point = @($x,$y); break }
+    }
+    $diagnostic.hitSamples = $samples.ToArray()
+    $beforeInput = [ordered]@{ modalPID = $api.ProcessId($modal); title = $null; titleState = "not-read"
+      visible = $null; enabled = $null; button = $null; edit = $null; clientBounds = @(); workBounds = @(); foreground = $null }
+    if (($beforeInput.modalPID -is [int] -or $beforeInput.modalPID -is [uint32] -or $beforeInput.modalPID -is [long]) -and
+        $beforeInput.modalPID -eq $processId) {
+      $beforeInput.title = $api.Title($modal); $beforeInput.titleState = "read-after-owned-PID"
+      $beforeInput.visible = $api.Visible($modal); $beforeInput.enabled = $api.Enabled($modal)
+      $beforeInput.button = Read-MultiProjectRenameField $api $modal $buttonId $processId
+      $beforeInput.edit = Read-MultiProjectRenameField $api $modal 9904 $processId
+      $beforeInput.clientBounds = @($api.ClientBounds($modal)); $beforeInput.workBounds = @($api.WorkBounds($modal))
+      $beforeInput.foreground = $api.Foreground($modal)
+    }
+    $freshButton = $beforeInput.button; $freshEdit = $beforeInput.edit
+    $diagnostic.beforeInput = $beforeInput
+    Write-Host ("UIA_MULTIPROJECT_RENAME_NATIVE_TARGET=" + ($diagnostic | ConvertTo-Json -Depth 7 -Compress))
+    if ($null -eq $point -or -not (Test-MultiProjectRenameField $freshButton $modal $buttonId $processId) -or
+        -not (Test-MultiProjectRenameField $freshEdit $modal 9904 $processId) -or
+        $freshButton.handle -ne $observed.button.handle -or $freshEdit.handle -ne $observed.edit.handle -or
+        (ConvertTo-SketchCanonicalJson $freshButton.bounds) -cne (ConvertTo-SketchCanonicalJson $observed.button.bounds) -or
+        (ConvertTo-SketchCanonicalJson $freshEdit.bounds) -cne (ConvertTo-SketchCanonicalJson $observed.edit.bounds) -or
+        $beforeInput.title -isnot [string] -or $beforeInput.title -cne "Rename Loop" -or
+        $beforeInput.visible -isnot [bool] -or -not $beforeInput.visible -or
+        $beforeInput.enabled -isnot [bool] -or -not $beforeInput.enabled -or
+        (ConvertTo-SketchCanonicalJson $beforeInput.clientBounds) -cne (ConvertTo-SketchCanonicalJson $observed.clientBounds) -or
+        (ConvertTo-SketchCanonicalJson $beforeInput.workBounds) -cne (ConvertTo-SketchCanonicalJson $observed.workBounds) -or
+        $beforeInput.foreground -isnot [bool] -or -not $beforeInput.foreground) {
+      throw "MULTIPROJECT_RENAME_GUARD: occluded/stale/unowned native Rename target; no input"
+    }
+    $diagnostic.nativeCallStarted = $true
+    $diagnostic.inputAttempted = $null
+    $click = @($api.Click($modal,[IntPtr]$observed.button.handle,$buttonId,$processId,$point))
+    $diagnostic.inputAttempted = $true; $diagnostic.returnedClick = $click
+    Write-Host ("UIA_MULTIPROJECT_RENAME_NATIVE_ACTION=" + ($diagnostic | ConvertTo-Json -Depth 7 -Compress))
+    if ($click.Count -ne 8 -or @($click | Where-Object { $_ -isnot [int] }).Count -ne 0 -or
+        $click[6] -ne 2 -or $click[7] -ne 2 -or $click[4] -ne $point[0] -or $click[5] -ne $point[1]) {
+      throw "MULTIPROJECT_RENAME_INPUT: native click returned incomplete counts/point; no replay"
+    }
+    return [ordered]@{ method = "mouse"; buttonId = $buttonId; point = $point; sent = $click[6]; expected = $click[7]
+      clippedBounds = $clip; nativeTarget = $diagnostic; enterFallbackUsed = $false }
+  } catch {
+    $exception = $_.Exception
+    for ($depth = 0; $exception.InnerException -and $depth -lt 16; $depth++) { $exception = $exception.InnerException }
+    $diagnostic.failure = [ordered]@{ errorType = $exception.GetType().FullName; hresult = $exception.HResult
+      nativeErrorCode = if ($exception -is [ComponentModel.Win32Exception]) { $exception.NativeErrorCode } else { $null } }
+    Write-Host ("UIA_MULTIPROJECT_RENAME_NATIVE_FAILURE=" + ($diagnostic | ConvertTo-Json -Depth 7 -Compress))
+    throw
+  }
+}
+
+function Get-MultiProjectLaneGeometry([double[]] $canvas, [double[]] $card) {
+  if ($canvas.Count -ne 4 -or $card.Count -ne 4 -or $canvas[2] -le $canvas[0] -or
+      $canvas[3] -le $canvas[1] -or $card[2] -le $card[0] -or $card[3] -le $card[1]) {
+    throw "MULTIPROJECT_BOUNDS: positive live canvas/card rectangles required"
+  }
+  $scale = ($card[2] - $card[0]) / 220
+  if ([Math]::Abs(($card[3] - $card[1]) / $scale - 86) -gt 1) {
+    throw "MULTIPROJECT_BOUNDS: overview-card scale differs from source geometry"
+  }
+  $laneLeft = $canvas[0] + 24 * $scale
+  $laneTop = $card[1] - 46 * $scale
+  $laneRight = $laneLeft + [Math]::Max(760, ($canvas[2] - $canvas[0]) / $scale - 48) * $scale
+  return [ordered]@{
+    provenance = "GraphCanvas source-derived one-root lane; not a native UIA caption fragment"
+    scale = $scale
+    band = @($laneLeft, $laneTop, $laneRight, ($laneTop + 176 * $scale))
+    open = @(($laneRight - 132 * $scale), ($laneTop + 10 * $scale), ($laneRight - 76 * $scale), ($laneTop + 30 * $scale))
+    summary = @(($laneRight - 426 * $scale), ($laneTop + 10 * $scale), ($laneRight - 140 * $scale), ($laneTop + 30 * $scale))
+  }
+}
+
+function Get-MultiProjectClippedRectangle([double[]] $rect, [double[]] $canvas) {
+  if ($rect.Count -ne 4 -or $canvas.Count -ne 4) { throw "MULTIPROJECT_BOUNDS: require two measured rectangles" }
+  $clipped = @([Math]::Max($rect[0], $canvas[0]), [Math]::Max($rect[1], $canvas[1]),
+    [Math]::Min($rect[2], $canvas[2]), [Math]::Min($rect[3], $canvas[3]))
+  if ($clipped[2] -le $clipped[0] -or $clipped[3] -le $clipped[1]) {
+    throw "MULTIPROJECT_BOUNDS: source target is outside the visible canvas"
+  }
+  return ,$clipped
+}
+
+function Get-MultiProjectPeerCounts($peer) {
+  return [ordered]@{
+    receivedCount = $peer.receivedCount; requestCount = $peer.requestCount
+    responseCount = $peer.responseCount; appliedCount = $peer.appliedCount
+    publicationCount = $peer.publicationCount; graphSequence = $peer.graphSequence
+  }
+}
+
+function Test-MultiProjectRenameReceipt($before, $after, [string] $path, [string] $nodeId, [string] $title) {
+  foreach ($key in @("receivedCount", "requestCount", "responseCount", "appliedCount", "publicationCount", "graphSequence")) {
+    if (($before.$key -isnot [int] -and $before.$key -isnot [long]) -or
+        ($after.$key -isnot [int] -and $after.$key -isnot [long]) -or $after.$key -ne $before.$key + 1) {
+      return $false
+    }
+  }
+  if ($before.requestCount -le 0 -or $before.publicationCount -lt 2 -or
+      $before.requestCount -ne $before.responseCount -or @($after.unansweredRequests).Count -ne 0) { return $false }
+  $applied = @($after.applied)
+  $received = @($after.received)
+  $answered = @($after.answered)
+  $publications = @($after.publications)
+  if ($applied.Count -ne $after.appliedCount -or $received.Count -ne $after.receivedCount -or
+      $answered.Count -ne $after.responseCount -or $publications.Count -ne $after.publicationCount) { return $false }
+  $requestId = $applied[-1].requestID
+  if ($requestId -isnot [string] -or $requestId -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') { return $false }
+  $receipt = @($received | Where-Object { $_.requestID -ceq $requestId })
+  $answer = @($answered | Where-Object { $_.requestID -ceq $requestId })
+  $publication = @($publications | Where-Object { $_.correlationID -ceq $requestId -and $_.cause -ceq "rename" })
+  if ($receipt.Count -ne 1 -or $answer.Count -ne 1 -or $publication.Count -ne 1) { return $false }
+  $expected = [ordered]@{ version = 2; kind = "request"; requestID = $requestId
+    command = [ordered]@{ graphCommand = [ordered]@{ projectPath = $path
+      command = [ordered]@{ renameNode = [ordered]@{ _0 = $nodeId; title = $title } } } } }
+  $expectedResponse = [ordered]@{ version = 2; kind = "response"; requestID = $requestId; success = $true }
+  if ((ConvertTo-SketchCanonicalJson $receipt[0].frame) -cne (ConvertTo-SketchCanonicalJson $expected) -or
+      (ConvertTo-SketchCanonicalJson $answer[0].response) -cne (ConvertTo-SketchCanonicalJson $expectedResponse)) { return $false }
+  $graph = $publication[0].frame.event.graphChanged
+  $owners = @($after.graphs | Where-Object { $_.project.path -ceq $path })
+  $beforeOwners = @($before.graphs | Where-Object { $_.project.path -ceq $path })
+  if ($owners.Count -ne 1 -or $beforeOwners.Count -ne 1) { return $false }
+  $expectedApplication = [ordered]@{ requestID = $requestId; projectPath = $path; nodeID = $nodeId
+    beforeTitle = $beforeOwners[0].nodes[0].title; title = $title }
+  $expectedPublication = [ordered]@{ cause = "rename"; correlationID = $requestId
+    frame = [ordered]@{ version = 2; kind = "event"; sequence = $after.graphSequence
+      event = [ordered]@{ graphChanged = $owners[0] } } }
+  if ((ConvertTo-SketchCanonicalJson $applied[-1]) -cne (ConvertTo-SketchCanonicalJson $expectedApplication) -or
+      (ConvertTo-SketchCanonicalJson $publication[0]) -cne (ConvertTo-SketchCanonicalJson $expectedPublication)) { return $false }
+  return $graph.project.path -ceq $path -and
+    $graph.nodes.Count -eq 1 -and $graph.nodes[0].id -ceq $nodeId -and $graph.nodes[0].title -ceq $title -and
+    $applied[-1].projectPath -ceq $path -and $applied[-1].nodeID -ceq $nodeId -and $applied[-1].title -ceq $title -and
+    $publication[0].frame.sequence -eq $after.graphSequence -and
+    (ConvertTo-SketchCanonicalJson $graph) -ceq (ConvertTo-SketchCanonicalJson $owners[0])
+}
+
+function Initialize-MultiProjectProcessJob([string] $sourcePath) {
+  if ("StandaloneProcessJob" -as [type]) { return }
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$null, [ref]$errors)
+  if ($errors.Count -ne 0) { throw "MULTIPROJECT_JOB: approved standalone ownership source does not parse" }
+  $definitions = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+      $node.Value.Contains("public static class StandaloneProcessJob")
+  }, $true))
+  if ($definitions.Count -ne 1) { throw "MULTIPROJECT_JOB: exact approved job ownership definition missing" }
+  Add-Type $definitions[0].Value
+}
+
+function Wait-MultiProjectCapture($capture, [int] $timeoutMilliseconds = 5000) {
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
+  if (-not $capture.rootProcess.WaitForExit($remaining)) {
+    throw "MULTIPROJECT_CAPTURE_EXIT: pid=$($capture.rootPID) start=$($capture.rootStartUtcTicks) job=$($capture.job.ToInt64())"
+  }
+  $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
+  try {
+    $drained = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($capture.stdout, $capture.stderr), $remaining)
+  } catch {
+    throw "MULTIPROJECT_CAPTURE_DRAIN: pid=$($capture.rootPID) start=$($capture.rootStartUtcTicks) job=$($capture.job.ToInt64()) stdout=$($capture.stdout.Status) stderr=$($capture.stderr.Status) failure=$($_.Exception.Message)"
+  }
+  if (-not $drained) {
+    throw "MULTIPROJECT_CAPTURE_DRAIN: pid=$($capture.rootPID) start=$($capture.rootStartUtcTicks) job=$($capture.job.ToInt64()) stdout=$($capture.stdout.Status) stderr=$($capture.stderr.Status)"
+  }
+}
+
+function Complete-MultiProjectCapture($capture, [string] $logDirectory, [int] $timeoutMilliseconds = 5000, $primaryError = $null) {
+  if ($null -eq $capture) { return }
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  $errors = [Collections.Generic.List[string]]::new()
+  $identity = "pid=$($capture.rootPID) start=$($capture.rootStartUtcTicks) target=$($capture.targetPID) targetStart=$($capture.targetStartUtcTicks) job=$($capture.job.ToInt64())"
+  $exited = $false
+  $empty = $false
+  $drained = $false
+  try {
+    if ($capture.assigned) {
+      [StandaloneProcessJob]::Terminate($capture.job)
+      $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
+      [StandaloneProcessJob]::WaitForEmpty($capture.job, $remaining)
+      $empty = [StandaloneProcessJob]::Active($capture.job) -eq 0
+      if (-not $empty) { throw "owned job census is not empty" }
+    } elseif ($capture.rootProcess -and -not $capture.rootProcess.HasExited) {
+      if ($capture.rootProcess.StartTime.ToUniversalTime().Ticks -ne $capture.rootStartUtcTicks) {
+        throw "unassigned root identity changed"
+      }
+      Stop-Process -Id $capture.rootPID -Force
+    }
+    $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
+    $exited = $capture.rootProcess.WaitForExit($remaining)
+    if (-not $exited) { throw "root did not exit within shared teardown deadline" }
+    if ($capture.process -and $capture.process -ne $capture.rootProcess) {
+      $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
+      if (-not $capture.process.WaitForExit($remaining)) { throw "retained target did not exit within shared teardown deadline" }
+    }
+  } catch { $errors.Add("owned exit/quiescence: $($_.Exception.Message)") }
+  try {
+    if ($capture.stdout -and $capture.stderr) {
+      $remaining = [Math]::Max(0, $timeoutMilliseconds - [int]$clock.ElapsedMilliseconds)
+      $drained = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($capture.stdout, $capture.stderr), $remaining)
+      if (-not $drained) { throw "stdout=$($capture.stdout.Status) stderr=$($capture.stderr.Status) shared pipe-drain deadline exceeded" }
+      foreach ($stream in @("stdout", "stderr")) {
+        $task = $capture[$stream]
+        if ($task.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion) { throw "$stream reader did not successfully complete" }
+        try {
+          $task.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $logDirectory ($capture.stem + "-$stream.log"))
+        } catch { $errors.Add("$stream capture persistence: $($_.Exception.Message)") }
+      }
+    }
+  } catch { $errors.Add("redirected pipe drain: $($_.Exception.Message)") }
+  foreach ($stream in @("StandardOutput", "StandardError")) {
+    try { if ($capture.rootProcess) { $capture.rootProcess.$stream.Dispose() } }
+    catch { $errors.Add("disposing $stream reader: $($_.Exception.Message)") }
+  }
+  try {
+    if ($capture.job -ne [IntPtr]::Zero) { [StandaloneProcessJob]::Close($capture.job) }
+  } catch { $errors.Add("closing owned job: $($_.Exception.Message)") }
+  try {
+    if ($capture.process -and $capture.process -ne $capture.rootProcess) { $capture.process.Dispose() }
+  } catch { $errors.Add("disposing retained target: $($_.Exception.Message)") }
+  try { if ($capture.rootProcess) { $capture.rootProcess.Dispose() } }
+  catch { $errors.Add("disposing retained root: $($_.Exception.Message)") }
+  $diagnostic = [ordered]@{
+    identity = $identity; rootExited = $exited; ownedJobEmpty = $empty
+    redirectedReadersDrained = $drained; deadlineMilliseconds = $timeoutMilliseconds
+    elapsedMilliseconds = $clock.ElapsedMilliseconds; failures = $errors.ToArray()
+  }
+  if ($primaryError) {
+    $primaryError.Exception.Data["MultiProjectCapture:$($capture.stem)"] = $diagnostic
+  }
+  Write-Host ("MULTIPROJECT_CAPTURE_TEARDOWN=" + ($diagnostic | ConvertTo-Json -Depth 8 -Compress))
+  if ($errors.Count -gt 0) {
+    $message = "MULTIPROJECT_TEARDOWN: $identity; $($errors -join '; ')"
+    if ($primaryError) {
+      $primaryError.Exception.Data["MultiProjectTeardown:$($capture.stem)"] = $message
+      Write-Warning $message -WarningAction Continue
+    } else { throw $message }
+  }
+  return $diagnostic
+}
+
+function Start-MultiProjectOwnedProcess(
+  [string] $file, [string[]] $arguments, [hashtable] $environment, [string] $stem,
+  [string] $jobSourcePath = (Join-Path $PSScriptRoot "Tests\Packaging.Standalone.Tests.ps1"),
+  [switch] $Visible
+) {
+  Initialize-MultiProjectProcessJob $jobSourcePath
+  $gate = Join-Path $environment.TEMP ("mp-start-" + [guid]::NewGuid().ToString("N"))
+  $identityPath = $gate + ".identity"
+  $launch = @{ gate = $gate; identity = $identityPath; file = $file; arguments = @($arguments); visible = [bool]$Visible } |
+    ConvertTo-Json -Depth 8 -Compress
+  $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($launch))
+  $command = @'
+$ErrorActionPreference = "Stop"
+$launch = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("LAUNCH_PAYLOAD")) | ConvertFrom-Json
+$deadline = [DateTime]::UtcNow.AddSeconds(10)
+while (-not [IO.File]::Exists($launch.gate)) {
+  if ([DateTime]::UtcNow -ge $deadline) { throw "Owned launch assignment gate timed out" }
+  [Threading.Thread]::Sleep(10)
+}
+$start = [Diagnostics.ProcessStartInfo]::new($launch.file)
+$start.UseShellExecute = $false
+$start.CreateNoWindow = -not $launch.visible
+foreach ($argument in $launch.arguments) { $start.ArgumentList.Add([string]$argument) }
+$target = [Diagnostics.Process]::Start($start)
+try {
+  $null = $target.Handle
+  $temporaryIdentity = $launch.identity + ".pending"
+  @{ pid = $target.Id; startUtcTicks = $target.StartTime.ToUniversalTime().Ticks } |
+    ConvertTo-Json -Compress | Set-Content -LiteralPath $temporaryIdentity
+  [IO.File]::Move($temporaryIdentity, $launch.identity)
+  if (-not $target.WaitForExit(600000)) { throw "Owned target exceeded ten-minute launch lifetime" }
+  exit $target.ExitCode
+} finally { $target.Dispose() }
+'@
+  $command = $command.Replace("LAUNCH_PAYLOAD", $payload)
+  $start = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh).Source)
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $true
+  $start.RedirectStandardOutput = $true
+  $start.RedirectStandardError = $true
+  $start.WorkingDirectory = $environment.TEMP
+  $start.Environment.Clear()
+  foreach ($name in @("SystemRoot", "WINDIR", "PATH", "PSModulePath", "USERPROFILE", "APPDATA", "SystemDrive", "ComSpec", "USERNAME", "HOMEDRIVE", "HOMEPATH")) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if ($null -ne $value) { $start.Environment[$name] = $value }
+  }
+  foreach ($name in $environment.Keys) { $start.Environment[$name] = [string]$environment[$name] }
+  foreach ($argument in @("-NoProfile", "-NonInteractive", "-EncodedCommand",
+      [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)))) { $start.ArgumentList.Add($argument) }
+  $capture = [ordered]@{ process = $null; rootProcess = $null; rootPID = $null; rootStartUtcTicks = $null
+    targetPID = $null; targetStartUtcTicks = $null; job = [StandaloneProcessJob]::Create()
+    assigned = $false; stdout = $null; stderr = $null; stem = $stem }
+  try {
+    $root = [Diagnostics.Process]::Start($start)
+    $capture.rootProcess = $root
+    $capture.rootPID = $root.Id
+    $capture.rootStartUtcTicks = $root.StartTime.ToUniversalTime().Ticks
+    $handle = $root.Handle
+    $capture.stdout = $root.StandardOutput.ReadToEndAsync()
+    $capture.stderr = $root.StandardError.ReadToEndAsync()
+    [StandaloneProcessJob]::Assign($capture.job, $handle)
+    $capture.assigned = $true
+    [IO.File]::WriteAllText($gate, "assigned")
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not [IO.File]::Exists($identityPath)) {
+      if ($root.HasExited -or [DateTime]::UtcNow -ge $deadline) {
+        throw "MULTIPROJECT_START: target identity missing pid=$($capture.rootPID) start=$($capture.rootStartUtcTicks) job=$($capture.job.ToInt64())"
+      }
+      [Threading.Thread]::Sleep(10)
+    }
+    $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+    $target = Get-Process -Id $identity.pid -ErrorAction Stop
+    if ($target.StartTime.ToUniversalTime().Ticks -ne $identity.startUtcTicks) {
+      $target.Dispose()
+      throw "MULTIPROJECT_START: target identity changed before retention"
+    }
+    $null = $target.Handle
+    $capture.process = $target
+    $capture.targetPID = $target.Id
+    $capture.targetStartUtcTicks = $identity.startUtcTicks
+    return $capture
+  } catch {
+    $primary = $_
+    $null = Complete-MultiProjectCapture $capture $environment.TEMP 5000 $primary
+    throw
+  }
+}
+
+function Invoke-MultiProjectRenamePhase {
+  $directory = Assert-UiaSandboxPath $sandboxPath (Join-Path $sandboxPath "mp")
+  $null = New-Item -ItemType Directory -Path $directory
+  $alphaPath = Join-Path $directory "Alpha"
+  $betaPath = Join-Path $directory "Beta"
+  $support = Join-Path $directory "support"
+  $local = Join-Path $directory "local"
+  $temp = Join-Path $directory "temp"
+  $null = New-Item -ItemType Directory -Path $alphaPath, $betaPath, $support, $local, $temp
+  $owners = @(
+    @{ path = $alphaPath; name = "Alpha"; graph = "aaaaaaaa-1111-4111-8111-111111111111"; node = "11111111-1111-4111-8111-111111111111"; title = "Alpha loop" },
+    @{ path = $betaPath; name = "Beta"; graph = "bbbbbbbb-2222-4222-8222-222222222222"; node = "22222222-2222-4222-8222-222222222222"; title = "Beta loop" }
+  )
+  $pipe = "graphcode-uia-mp-$PID"
+  $peerPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "multiproject-peer.json")
+  $controlPath = Join-Path $directory "publish.json"
+  $recorderPath = Join-Path $directory "commands.json"
+  $peerChild = $null
+  $shellChild = $null
+  $multiProcess = $null
+  $multiWindow = [IntPtr]::Zero
+  $multiRoot = $null
+  $navigation = [Collections.Generic.List[object]]::new()
+  $primaryError = $null
+
+  function Read-MultiProjectPeer {
+    for ($retry = 0; $retry -lt 40; $retry++) {
+      if (Test-Path -LiteralPath $peerPath) {
+        $json = Read-DaemonCommandLog $peerPath
+        try {
+          $snapshot = ($json | ConvertFrom-Json -ErrorAction Stop).multiProjectPeer
+          Require ($null -ne $snapshot) "multi-project result omitted its opt-in peer state"
+          return $snapshot
+        }
+        catch {
+          if ($_.FullyQualifiedErrorId -notlike "*ConvertFromJsonCommand*") { throw }
+          Write-Host "UIA_MULTIPROJECT_PEER_READ_RETRY attempt=$($retry + 1)/40 reason=$($_.Exception.Message)"
+        }
+      }
+      Start-Sleep -Milliseconds 50
+    }
+    throw "MULTIPROJECT_PEER: no readable owner/receipt snapshot"
+  }
+  function Wait-MultiProjectPeerSettled {
+    $last = ""
+    $streak = 0
+    for ($retry = 0; $retry -lt 100; $retry++) {
+      $peer = Read-MultiProjectPeer
+      $current = ConvertTo-SketchCanonicalJson (Get-MultiProjectPeerCounts $peer)
+      if ($current -ceq $last) { $streak++ } else { $streak = 0; $last = $current }
+      if ($streak -ge 4 -and $peer.requestCount -gt 0 -and $peer.publicationCount -ge 2 -and
+          $peer.requestCount -eq $peer.responseCount -and @($peer.unansweredRequests).Count -eq 0) { return $peer }
+      Start-Sleep -Milliseconds 100
+    }
+    throw "MULTIPROJECT_PEER: positive counters never settled"
+  }
+  function Invoke-MultiProjectControl([string] $id) {
+    $element = Find-FragmentByIdWithRetry $multiRoot $id $rawWalker
+    Require ($null -ne $element -and $element.Current.ProcessId -eq $multiProcess.Id) "multi-project shown control $id missing"
+    $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  }
+  function Get-MultiProjectObservation([string] $surface, $selectedOwner = $null) {
+    $capturedSnapshots = [Collections.Generic.List[object]]::new()
+    $multiProcess.Refresh()
+    Require (-not $multiProcess.HasExited) "multi-project shell exited during observation"
+    $multiRoot = [System.Windows.Automation.AutomationElement]::FromHandle($multiWindow)
+    $graph = Find-FragmentByIdWithRetry $multiRoot "graph" $rawWalker
+    if ($graph) {
+      $graphOwner = Read-MultiProjectOwnershipSnapshot $graph
+      Write-Host ("UIA_MULTIPROJECT_CONTAINER_OWNERSHIP=" + ([ordered]@{
+        phase = $surface; scope = "graph"; expectedPID = $multiProcess.Id; fresh = $graphOwner
+      } | ConvertTo-Json -Depth 5 -Compress))
+      if (($graphOwner.processId -is [int] -or $graphOwner.processId -is [long]) -and
+          $graphOwner.processId -gt 0 -and $graphOwner.processId -ne $multiProcess.Id) {
+        throw "MULTIPROJECT_PRIVACY: graph container has positive foreign PID"
+      }
+      if ($graphOwner.state -cne "available" -or $graphOwner.processId -ne $multiProcess.Id -or $graphOwner.automationId -cne "graph") {
+        throw "MULTIPROJECT_METADATA: graph container ownership unavailable before child capture"
+      }
+      $capturedSnapshots.Add([ordered]@{ element = $graph; snapshot = $graphOwner; phase = "$surface/graph-container" })
+    }
+    $graphElements = if ($null -ne $graph) { @(Get-DirectChildren $graph $rawWalker) } else { @() }
+    $graphMetadata = @($graphElements | ForEach-Object { Get-MultiProjectFragmentMetadata $_ $multiProcess.Id })
+    $ownedGraphMetadata = @($graphMetadata | Where-Object { $_.ownership -ceq "owned" -and $_.observationReady })
+    $ownedGraphElements = @($ownedGraphMetadata | ForEach-Object { $_.element })
+    $foreignCardCount = @($graphMetadata | Where-Object { $_.ownership -ceq "foreign" -and
+      (Test-MultiProjectAutomationPrefix $_.automationID.value "canvas-card-") }).Count
+    $allCards = @($ownedGraphMetadata | Where-Object { Test-MultiProjectAutomationPrefix $_.automationID.value "canvas-card-" } |
+      ForEach-Object { $_.element })
+    $projectContainer = Find-FragmentByIdWithRetry $multiRoot "projects" $rawWalker
+    if ($projectContainer) {
+      $projectOwner = Read-MultiProjectOwnershipSnapshot $projectContainer
+      Write-Host ("UIA_MULTIPROJECT_CONTAINER_OWNERSHIP=" + ([ordered]@{
+        phase = $surface; scope = "projects"; expectedPID = $multiProcess.Id; fresh = $projectOwner
+      } | ConvertTo-Json -Depth 5 -Compress))
+      if (($projectOwner.processId -is [int] -or $projectOwner.processId -is [long]) -and
+          $projectOwner.processId -gt 0 -and $projectOwner.processId -ne $multiProcess.Id) {
+        throw "MULTIPROJECT_PRIVACY: project container has positive foreign PID"
+      }
+      if ($projectOwner.state -cne "available" -or $projectOwner.processId -ne $multiProcess.Id -or $projectOwner.automationId -cne "projects") {
+        throw "MULTIPROJECT_METADATA: projects container ownership unavailable before child capture"
+      }
+      $capturedSnapshots.Add([ordered]@{ element = $projectContainer; snapshot = $projectOwner; phase = "$surface/projects-container" })
+    }
+    $projectElements = if ($projectContainer) { @(Get-DirectChildren $projectContainer $rawWalker) } else { @() }
+    $projectMetadata = @($projectElements | ForEach-Object { Get-MultiProjectFragmentMetadata $_ $multiProcess.Id })
+    $foreignProjectCount = @($projectMetadata | Where-Object { $_.ownership -ceq "foreign" -and
+      (Test-MultiProjectAutomationPrefix $_.automationID.value "open-project-") }).Count
+    $allProjectRows = @($projectMetadata | Where-Object { $_.ownership -ceq "owned" -and $_.observationReady -and
+      (Test-MultiProjectAutomationPrefix $_.automationID.value "open-project-") } | ForEach-Object { $_.element })
+    $nodeCardKind = if ($surface -ceq "overview") { "overview-card" } else { "project-card" }
+    $expectedNodeCardIds = @($owners | ForEach-Object { Get-MultiProjectAutomationId $nodeCardKind $_.path $_.node })
+    $cards = @($ownedGraphMetadata | Where-Object {
+      $expectedNodeCardIds -ccontains $_.automationID.value
+    } | ForEach-Object { $_.element })
+    $observed = [Collections.Generic.List[object]]::new()
+    $metadataReady = (Test-MultiProjectMetadataBatch $graphMetadata) -and (Test-MultiProjectMetadataBatch $projectMetadata)
+    $matches = $metadataReady -and $cards.Count -eq $(if ($surface -ceq "overview") { 2 } else { 1 })
+    foreach ($owner in $owners) {
+      $projectId = Get-MultiProjectAutomationId "open-project" $owner.path
+      $loopId = Get-MultiProjectAutomationId "loop" $owner.path $owner.node
+      $project = Find-FragmentById $multiRoot $projectId $rawWalker
+      $loop = Find-FragmentById $multiRoot $loopId $rawWalker
+      $projectEvidence = if ($project) {
+        Get-MultiProjectElementEvidence $project $multiProcess.Id (Get-MultiProjectFragmentMetadata $project $multiProcess.Id) "$surface/project-owner" $null $capturedSnapshots
+      } else { $null }
+      $loopEvidence = if ($loop) {
+        Get-MultiProjectElementEvidence $loop $multiProcess.Id (Get-MultiProjectFragmentMetadata $loop $multiProcess.Id) "$surface/sidebar-loop" $null $capturedSnapshots
+      } else { $null }
+      $kind = if ($surface -ceq "overview") { "overview-card" } else { "project-card" }
+      $cardId = Get-MultiProjectAutomationId $kind $owner.path $owner.node
+      $card = @($ownedGraphMetadata | Where-Object { $_.automationID.value -ceq $cardId } | ForEach-Object { $_.element })
+      $cardRequired = $surface -ceq "overview" -or ($null -ne $selectedOwner -and $selectedOwner.path -ceq $owner.path)
+      $selected = $null -ne $selectedOwner -and $selectedOwner.path -ceq $owner.path
+      $projectSelected = $false; $loopSelected = $false
+      if ($null -ne $project) { $projectSelected = $project.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected }
+      if ($null -ne $loop) { $loopSelected = $loop.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected }
+      $matches = $matches -and $null -ne $project -and $null -ne $loop
+      if ($null -ne $project -and $null -ne $loop) {
+        $matches = $matches -and $projectEvidence.automationId -ceq $projectId -and $loopEvidence.automationId -ceq $loopId -and
+          $projectEvidence.name -ceq $owner.name -and $loopEvidence.name -ceq $owner.title
+        $matches = $matches -and $projectEvidence.bounds[2] -gt $projectEvidence.bounds[0] -and
+          $projectEvidence.bounds[3] -gt $projectEvidence.bounds[1] -and
+          $loopEvidence.bounds[2] -gt $loopEvidence.bounds[0] -and $loopEvidence.bounds[3] -gt $loopEvidence.bounds[1]
+        if ($null -ne $selectedOwner) { $matches = $matches -and $projectSelected -eq $selected -and $loopSelected -eq $selected }
+      }
+      $cardEvidence = $null
+      if ($cardRequired) {
+        $matches = $matches -and $card.Count -eq 1
+        if ($card.Count -eq 1) {
+          $priorCard = @($ownedGraphMetadata | Where-Object { $_.automationID.value -ceq $cardId })[0]
+          $capturedCard = Get-MultiProjectElementEvidence $card[0] $multiProcess.Id $priorCard "$surface/node-card" $null $capturedSnapshots
+          $matches = $matches -and $capturedCard.automationId -ceq $cardId -and $capturedCard.name -ceq $owner.title -and
+            $capturedCard.bounds[2] -gt $capturedCard.bounds[0] -and $capturedCard.bounds[3] -gt $capturedCard.bounds[1]
+          if ($surface -cne "overview") {
+            $matches = $matches -and $card[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected
+          }
+          $cardEvidence = [ordered]@{ automationId = $capturedCard.automationId; name = $capturedCard.name; bounds = $capturedCard.bounds }
+        }
+      }
+      $observed.Add([ordered]@{ projectPath = $owner.path; nodeID = $owner.node
+        projectAutomationId = $projectId; sidebarAutomationId = $loopId
+        projectName = if ($projectEvidence) { $projectEvidence.name } else { $null }
+        sidebarName = if ($loopEvidence) { $loopEvidence.name } else { $null }
+        projectBounds = if ($projectEvidence) { $projectEvidence.bounds } else { @() }
+        sidebarBounds = if ($loopEvidence) { $loopEvidence.bounds } else { @() }
+        projectSelected = $projectSelected; loopSelected = $loopSelected; card = $cardEvidence })
+    }
+    $canvasEvidence = if ($graph) { Get-MultiProjectElementEvidence $graph $multiProcess.Id $null "$surface/graph-container-bounds" $null $capturedSnapshots } else { $null }
+    $canvas = if ($canvasEvidence) { $canvasEvidence.bounds } else { @() }
+    $fragmentProjection = [ordered]@{
+      projectRows = @($projectMetadata | Where-Object { $_.ownership -ceq "owned" -and $_.observationReady -and
+        (Test-MultiProjectAutomationPrefix $_.automationID.value "open-project-") } |
+        ForEach-Object { Get-MultiProjectElementEvidence $_.element $multiProcess.Id $_ "$surface/projects" $null $capturedSnapshots })
+      cards = @($ownedGraphMetadata | Where-Object { Test-MultiProjectAutomationPrefix $_.automationID.value "canvas-card-" } |
+        ForEach-Object { Get-MultiProjectElementEvidence $_.element $multiProcess.Id $_ "$surface/canvas" $null $capturedSnapshots })
+      foreignCardFragmentCount = $foreignCardCount; foreignProjectFragmentCount = $foreignProjectCount
+      canvasBounds = $canvas
+    }
+    $workspaceProjection = [ordered]@{
+      loopBars = @($ownedGraphMetadata | Where-Object { Test-MultiProjectAutomationPrefix $_.automationID.value "workspace-loop-bar-" } |
+        ForEach-Object { Get-MultiProjectElementEvidence $_.element $multiProcess.Id $_ "$surface/loop-bar" $null $capturedSnapshots })
+      toolbars = @($ownedGraphMetadata | Where-Object { Test-MultiProjectAutomationPrefix $_.automationID.value "workspace-toolbar-" } |
+        ForEach-Object { Get-MultiProjectElementEvidence $_.element $multiProcess.Id $_ "$surface/toolbar" $null $capturedSnapshots })
+      foreignWorkspaceFragmentCount = @($graphMetadata | Where-Object { $_.ownership -ceq "foreign" -and
+        ((Test-MultiProjectAutomationPrefix $_.automationID.value "workspace-loop-bar-") -or
+         (Test-MultiProjectAutomationPrefix $_.automationID.value "workspace-toolbar-")) }).Count
+    }
+    $matches = $matches -and (Test-MultiProjectObservedRoster $surface $fragmentProjection $owners $selectedOwner $multiProcess.Id)
+    $matches = Test-MultiProjectObservedSurface $surface $matches $workspaceProjection $selectedOwner $multiProcess.Id
+    $expectedProjectIds = @($owners | ForEach-Object { Get-MultiProjectAutomationId "open-project" $_.path })
+    $expectedCanvasRoster = Get-MultiProjectExpectedCanvasRoster $surface $owners $selectedOwner
+    $scopedExpectedCardIds = @($expectedCanvasRoster | ForEach-Object { $_.automationId })
+    $canvasClassification = @($fragmentProjection.cards | ForEach-Object {
+      $fragment = $_
+      $known = @($expectedCanvasRoster | Where-Object { $_.automationId -ceq $fragment.automationId })
+      [ordered]@{ automationId = $fragment.automationId; name = $fragment.name; processId = $fragment.processId; bounds = $fragment.bounds
+        classification = if ($known.Count -eq 1) { $known[0].classification } else { "unexpected" }
+        identityKind = if ($known.Count -eq 1) { $known[0].identityKind } else { $null }
+        projectPath = if ($known.Count -eq 1) { $known[0].projectPath } else { $null }
+        nodeID = if ($known.Count -eq 1) { $known[0].nodeID } else { $null } }
+    })
+    foreach ($captured in $capturedSnapshots) {
+      $after = Read-MultiProjectOwnershipSnapshot $captured.element
+      Confirm-MultiProjectOwnedSnapshot $captured.snapshot $after $multiProcess.Id "$($captured.phase)/whole-observation"
+    }
+    return [ordered]@{ requestedSurface = $surface; observedSurface = if ($matches) { $surface } else { $null }
+      verifiedOwnedSnapshotCount = $capturedSnapshots.Count
+      metadataReady = $metadataReady
+      observedRawGraphElementCount = $graphMetadata.Count; observedRawProjectElementCount = $projectMetadata.Count
+      unresolvedMetadataCount = @(@($graphMetadata) + @($projectMetadata) | Where-Object { -not $_.observationReady }).Count
+      fragmentMetadata = @(@($graphMetadata) + @($projectMetadata) | ForEach-Object {
+        [ordered]@{ firstPID = $_.firstPID; finalPID = $_.finalPID; automationID = $_.automationID
+          ownership = $_.ownership; family = $_.family; observationReady = $_.observationReady; proofLimit = $_.proofLimit }
+      })
+      matched = $matches; observedOwnerCount = $allProjectRows.Count
+      expectedMatchedOwners = @($observed | Where-Object { $null -ne $_.projectName }).Count
+      totalObservedProjectRowCount = $allProjectRows.Count; totalObservedCardCount = $allCards.Count
+      observedCardCount = $allCards.Count; expectedMatchedCardCount = $cards.Count; owners = $observed.ToArray()
+      expectedNodeCardCount = $(if ($surface -ceq "overview") { 2 } else { 1 })
+      nodeCardCount = @($canvasClassification | Where-Object { $_.classification -ceq "node" }).Count
+      expectedSourceSummaryCount = $(if ($surface -ceq "overview") { 2 } else { 0 })
+      sourceSummaryCount = @($canvasClassification | Where-Object { $_.classification -ceq "source-summary" }).Count
+      canvasFragmentClasses = $canvasClassification
+      sourceSummaryPolicy = "Ordinary uninspected overview exposes one overview-worktree-notice per exact owner plus its node; all canvas-card fragments remain counted and validated. No filesystem worktree inspection is performed."
+      allOwnedProjectIds = @($fragmentProjection.projectRows | ForEach-Object { $_.automationId })
+      allOwnedProjectNames = @($fragmentProjection.projectRows | ForEach-Object { $_.name })
+      allOwnedCardIds = @($fragmentProjection.cards | ForEach-Object { $_.automationId })
+      allOwnedCardNames = @($fragmentProjection.cards | ForEach-Object { $_.name })
+      unexpectedProjectIds = @($fragmentProjection.projectRows | Where-Object { $expectedProjectIds -cnotcontains $_.automationId } | ForEach-Object { $_.automationId })
+      unexpectedCardIds = @($fragmentProjection.cards | Where-Object { $scopedExpectedCardIds -cnotcontains $_.automationId } | ForEach-Object { $_.automationId })
+      foreignProjectFragmentCount = $foreignProjectCount; foreignCardFragmentCount = $foreignCardCount
+      projectRowPolicy = "Exactly two isolated ordinary open-project rows; static Graph destination is not an ordinary project row. Any extra reserved-global row fails; no empty-global UIA lane assertion."
+      workspaceMarkers = $workspaceProjection
+      workspaceProofLimit = "Workspace proof requires both owned markers emitted by App only when surface is workspace and its provider exists; absent chrome is a blocker, not project-card/selection proof."
+      canvasBounds = $canvas }
+  }
+  function Wait-MultiProjectObservation([string] $surface, $selectedOwner = $null) {
+    for ($attempt = 1; $attempt -le 100; $attempt++) {
+      try { $observation = Get-MultiProjectObservation $surface $selectedOwner }
+      catch {
+        if ($null -eq (Get-MultiProjectUnavailableException $_) -and -not $_.Exception.Message.StartsWith("MULTIPROJECT_METADATA:", [StringComparison]::Ordinal)) { throw }
+        Write-Host ("UIA_MULTIPROJECT_METADATA_REACQUIRE=" + ([ordered]@{
+          attempt = $attempt; maximumAttempts = 100; requestedSurface = $surface
+          expectedPID = $multiProcess.Id; errorType = $_.Exception.GetType().FullName
+          hresult = $_.Exception.HResult; error = $_.Exception.Message; semanticCauseEstablished = $false
+        } | ConvertTo-Json -Compress))
+        if ($attempt -eq 100) { throw }
+        Start-Sleep -Milliseconds 100
+        continue
+      }
+      Write-Host ("UIA_MULTIPROJECT_OBSERVATION=" + ($observation | ConvertTo-Json -Depth 6 -Compress))
+      if ($observation.matched) { return $observation }
+      Start-Sleep -Milliseconds 100
+    }
+    $limit = if ($surface -ceq "workspace") { "mandatory owned workspace provider chrome remains unproved" } else { "complete source-supported node/summary roster remains unproved; workspace navigation was not requested" }
+    throw "MULTIPROJECT_IDENTITY: requested=$surface exact owner/node/summary roster and requested markers did not converge; $limit`: $($observation | ConvertTo-Json -Depth 6 -Compress)"
+  }
+  function Click-MultiProjectRectangle([double[]] $rect, [double[]] $canvas, [switch] $RightClick) {
+    $clipped = Get-MultiProjectClippedRectangle $rect $canvas
+    Require (Ensure-ShellForeground $multiWindow "multi-project live rectangle") "multi-project lost foreground"
+    return ,@([GraphCodeUiaGateState]::ClickOwnedScreenRectangle($multiWindow,
+      [int][Math]::Ceiling($clipped[0]), [int][Math]::Ceiling($clipped[1]),
+      [int][Math]::Floor($clipped[2]), [int][Math]::Floor($clipped[3]), [bool]$RightClick))
+  }
+  function Open-MultiProjectLane($owner) {
+    Invoke-MultiProjectControl "overview-destination"
+    Invoke-MultiProjectControl "actual-size"
+    $overview = Wait-MultiProjectObservation "overview"
+    $row = @($overview.owners | Where-Object { $_.projectPath -ceq $owner.path })[0]
+    $geometry = Get-MultiProjectLaneGeometry $overview.canvasBounds $row.card.bounds
+    $click = Click-MultiProjectRectangle $geometry.open $overview.canvasBounds
+    $project = Wait-MultiProjectObservation "project" $owner
+    $navigation.Add([ordered]@{ action = "shown lane Open"; sourceGeometry = $geometry; input = $click; result = $project })
+    return $project
+  }
+  function Open-MultiProjectLoop($owner) {
+    Invoke-MultiProjectControl "overview-destination"
+    Invoke-MultiProjectControl "actual-size"
+    $overview = Wait-MultiProjectObservation "overview"
+    $row = @($overview.owners | Where-Object { $_.projectPath -ceq $owner.path })[0]
+    $click = Click-MultiProjectRectangle $row.card.bounds $overview.canvasBounds
+    $workspace = Wait-MultiProjectObservation "workspace" $owner
+    $navigation.Add([ordered]@{ action = "shown overview loop"; input = $click; result = $workspace })
+    return $workspace
+  }
+  function Invoke-MultiProjectNativeRename($owner, [string] $typedTitle, [switch] $Cancel) {
+    $project = Open-MultiProjectLane $owner
+    $row = @($project.owners | Where-Object { $_.projectPath -ceq $owner.path })[0]
+    $nodeHit = Click-MultiProjectRectangle $row.card.bounds $project.canvasBounds -RightClick
+    $popup = Wait-ForPopupMenu $multiProcess $multiWindow "multi-project Rename"
+    $rename = @(Get-PopupMenuItems $popup | Where-Object { $_.Text -like "Rename...*" -and $_.Enabled })
+    Require ($rename.Count -eq 1) "multi-project node popup lacks one enabled Rename"
+    $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($popup, $multiWindow, [int]$rename[0].Position, $rename[0].Id)
+    Require ($null -ne $click) "multi-project native Rename item was not hit"
+    $renameProcess = $multiProcess
+    $renameShellWindow = $multiWindow
+    $null = Assert-SketchModal "Rename Loop"
+    $modal = $script:edgeWorkflowWindow
+    $nativeDialog = [System.Windows.Automation.AutomationElement]::FromHandle($modal)
+    $content = @($nativeDialog.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name }) -join "`n"
+    Require ($content -match "(?m)^Title$" -and $content.Contains("Choose the title shown for this loop throughout the graph.")) `
+      "multi-project native Rename omitted its shown Title label/explanation"
+    $prefill = Sketch-Field 9904 "rename prefill"
+    Require ($prefill -ceq $owner.title) "multi-project Rename prefill belongs to a different loop/title"
+    $inputEvidence = [Collections.Generic.List[string]]::new()
+    $null = Invoke-MultiProjectTypeText 9904 $typedTitle $inputEvidence -typeSource {
+      param($id,$text) Invoke-MultiProjectSequencedEdit $modal $multiProcess.Id $prefill $text
+    }
+    $fullInput = @($inputEvidence | Where-Object {
+      $_ -match 'inputAttempted=True' -and $_ -match 'inputCountsFull=True' -and
+      $_ -match ("textSent=" + (2 * $typedTitle.Length) + "/" + (2 * $typedTitle.Length) + "(?: |$)")
+    })
+    Require ($fullInput.Count -gt 0) "multi-project rename did not record full real clear/text SendInput counts"
+    $submitBuffer = Sketch-Field 9904 "rename stable immediately before submit"
+    Require ($submitBuffer -ceq $typedTitle) "multi-project Rename buffer differs at submit"
+    $action = Invoke-MultiProjectRenameAction $modal $multiProcess.Id $typedTitle $inputEvidence.ToArray() -Cancel:$Cancel
+    Wait-EdgeClosed "Rename Loop"
+    return [ordered]@{ pid = $multiProcess.Id; title = "Rename Loop"; controlID = 9904; nativeOwner = $modal.ToInt64()
+      prefill = $prefill; typedTitle = $typedTitle; stableSubmitBuffer = $submitBuffer
+      nodeHit = $nodeHit; inputAttempts = $inputEvidence.ToArray(); action = $action; projectCardAutomationId = $row.card.automationId }
+  }
+
+  try {
+    $environment = @{ TEMP = $temp; TMP = $temp; LOCALAPPDATA = $local }
+    $peerChild = Start-MultiProjectOwnedProcess (Get-Command pwsh).Source @("-NoProfile", "-File",
+      (Join-Path $PSScriptRoot "Stub-Daemon.ps1"), "-PipeName", $pipe, "-ResultPath", $peerPath,
+      "-SeedMultiProjects", "-ProjectAPath", $alphaPath, "-ProjectBPath", $betaPath,
+      "-PublicationControlPath", $controlPath) $environment "multiproject-stub"
+    $environment.GRAPHCODE_UIA_GATE = "1"
+    $environment.GRAPHCODE_GATE_CWD = $alphaPath
+    $environment.GRAPHCODE_ZMX = $env:GRAPHCODE_ZMX
+    $environment.GRAPHCODE_SUPPORT_DIR = $support
+    $environment.GRAPHCODE_UIA_RESET_SIDEBAR = "1"
+    $environment.GRAPHCODE_DAEMON_PIPE = "\\.\pipe\$pipe"
+    $environment.GRAPHCODE_UIA_DAEMON_COMMAND_LOG = $recorderPath
+    $shellChild = Start-MultiProjectOwnedProcess $Shell $ArgumentList $environment "multiproject-shell" -Visible
+    $multiProcess = $shellChild.process
+    for ($retry = 0; $retry -lt 160; $retry++) {
+      $multiProcess.Refresh()
+      Require (-not $multiProcess.HasExited) "multi-project shell exited before root acquisition"
+      if ($multiProcess.MainWindowHandle -ne [IntPtr]::Zero) {
+        $multiWindow = $multiProcess.MainWindowHandle
+        $candidate = [System.Windows.Automation.AutomationElement]::FromHandle($multiWindow)
+        if ($candidate.Current.AutomationId -ceq "graphcode-root") { $multiRoot = $candidate; break }
+      }
+      Start-Sleep -Milliseconds 100
+    }
+    Require ($null -ne $multiRoot -and [GraphCodeUiaGateState]::WindowProcessId($multiWindow) -eq $multiProcess.Id) "multi-project root lacks exact owned PID"
+    $initialPeer = Wait-MultiProjectPeerSettled
+    Require ($initialPeer.graphs.Count -eq 2) "multi-project peer published a different owner count"
+    foreach ($owner in $owners) {
+      $fixture = @($initialPeer.graphs | Where-Object { $_.project.path -ceq $owner.path })
+      Require ($fixture.Count -eq 1 -and $fixture[0].id -ceq $owner.graph -and $fixture[0].project.name -ceq $owner.name -and
+        $fixture[0].nodes.Count -eq 1 -and $fixture[0].nodes[0].id -ceq $owner.node -and
+        $fixture[0].nodes[0].title -ceq $owner.title) "multi-project peer fixture owner/graph/node/title differs"
+    }
+    Invoke-MultiProjectControl "overview-destination"
+    Invoke-MultiProjectControl "actual-size"
+    $initialOverview = Wait-MultiProjectObservation "overview"
+    foreach ($owner in $owners) {
+      $null = Open-MultiProjectLane $owner
+      $null = Open-MultiProjectLoop $owner
+    }
+    $betaBefore = Wait-MultiProjectObservation "workspace" $owners[1]
+    $beforeControl = Wait-MultiProjectPeerSettled
+    $token = [guid]::NewGuid().ToString()
+    $control = [ordered]@{ token = $token; projectPath = $alphaPath; nodeID = $owners[0].node; title = "Alpha interleaved"
+      selection = [ordered]@{ projectPath = $betaPath; nodeID = $owners[1].node; source = "live-uia" } }
+    $temporary = $controlPath + ".pending"
+    $control | ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath $temporary -NoNewline
+    Move-Item -LiteralPath $temporary -Destination $controlPath
+    for ($retry = 0; $retry -lt 100; $retry++) {
+      $afterControl = Read-MultiProjectPeer
+      if ($afterControl.graphSequence -eq $beforeControl.graphSequence + 1) { break }
+      Start-Sleep -Milliseconds 100
+    }
+    Require ($afterControl.graphSequence -eq $beforeControl.graphSequence + 1 -and
+      $afterControl.controls.Count -eq 1 -and $afterControl.controls[0].token -ceq $token -and
+      $afterControl.requestCount -eq $beforeControl.requestCount -and $afterControl.responseCount -eq $beforeControl.responseCount -and
+      $afterControl.appliedCount -eq $beforeControl.appliedCount) "multi-project control was not published exactly once without a protocol mutation"
+    $owners[0].title = "Alpha interleaved"
+    $betaAfter = Wait-MultiProjectObservation "workspace" $owners[1]
+    Invoke-MultiProjectControl "overview-destination"
+    $interleavedOverview = Wait-MultiProjectObservation "overview"
+    $beforeRename = Wait-MultiProjectPeerSettled
+    $nativeRename = Invoke-MultiProjectNativeRename $owners[0] "  Alpha renamed  "
+    for ($retry = 0; $retry -lt 100; $retry++) {
+      $afterRename = Read-MultiProjectPeer
+      if (Test-MultiProjectRenameReceipt $beforeRename $afterRename $alphaPath $owners[0].node "Alpha renamed") { break }
+      Start-Sleep -Milliseconds 100
+    }
+    Require (Test-MultiProjectRenameReceipt $beforeRename $afterRename $alphaPath $owners[0].node "Alpha renamed") "multi-project rename lacks exact owner/request/reply/application/publication correlation"
+    $owners[0].title = "Alpha renamed"
+    $renamedProject = Wait-MultiProjectObservation "project" $owners[0]
+    Invoke-MultiProjectControl "overview-destination"
+    $renamedOverview = Wait-MultiProjectObservation "overview"
+    $noMutation = [Collections.Generic.List[object]]::new()
+    foreach ($case in @(@{ name = "cancel"; text = "Cancelled Alpha title"; cancel = $true }, @{ name = "blank"; text = "   "; cancel = $false })) {
+      $before = Wait-MultiProjectPeerSettled
+      $native = Invoke-MultiProjectNativeRename $owners[0] $case.text -Cancel:$case.cancel
+      $after = Wait-MultiProjectPeerSettled
+      Require ((ConvertTo-SketchCanonicalJson (Get-MultiProjectPeerCounts $before)) -ceq
+        (ConvertTo-SketchCanonicalJson (Get-MultiProjectPeerCounts $after)) -and
+        (ConvertTo-SketchCanonicalJson $before.graphs) -ceq (ConvertTo-SketchCanonicalJson $after.graphs) -and
+        @($after.unansweredRequests).Count -eq 0) "multi-project $($case.name) changed positive peer counters/graphs"
+      $observed = Wait-MultiProjectObservation "project" $owners[0]
+      $noMutation.Add([ordered]@{ action = $case.name; native = $native; before = Get-MultiProjectPeerCounts $before
+        after = Get-MultiProjectPeerCounts $after; surfaces = $observed })
+    }
+    $beforeUnchanged = Wait-MultiProjectPeerSettled
+    $unchangedNative = Invoke-MultiProjectNativeRename $owners[0] "Alpha renamed"
+    for ($retry = 0; $retry -lt 100; $retry++) {
+      $afterUnchanged = Read-MultiProjectPeer
+      if (Test-MultiProjectRenameReceipt $beforeUnchanged $afterUnchanged $alphaPath $owners[0].node "Alpha renamed") { break }
+      Start-Sleep -Milliseconds 100
+    }
+    Require (Test-MultiProjectRenameReceipt $beforeUnchanged $afterUnchanged $alphaPath $owners[0].node "Alpha renamed") "Windows unchanged-title rename was incorrectly treated as a no-op"
+    Invoke-MultiProjectControl "overview-destination"
+    $finalOverview = Wait-MultiProjectObservation "overview"
+    Write-MultiProjectPeerReceipt (Read-DaemonCommandLog $peerPath) $afterUnchanged
+    Require ([GraphCodeUiaGateState]::PostCommand($multiWindow, 0x5002)) "multi-project shell rejected Exit"
+    Require ($multiProcess.WaitForExit(5000) -and $multiProcess.ExitCode -eq 0) "multi-project owned shell did not exit cleanly"
+    return [ordered]@{
+      fixtures = @($owners | ForEach-Object { [ordered]@{ path = $_.path; name = $_.name; graphID = $_.graph; nodeID = $_.node } })
+      initialPeerCounts = Get-MultiProjectPeerCounts $initialPeer
+      initialOverview = $initialOverview; navigation = $navigation.ToArray()
+      interleaved = [ordered]@{ beforeSelection = $betaBefore; afterSelection = $betaAfter
+        control = $control; beforePeer = Get-MultiProjectPeerCounts $beforeControl
+        afterPeer = Get-MultiProjectPeerCounts $afterControl; overview = $interleavedOverview }
+      rename = [ordered]@{ native = $nativeRename; receivedWire = $afterRename.received[-1].frame.command
+        requestID = $afterRename.applied[-1].requestID; answered = $true; before = Get-MultiProjectPeerCounts $beforeRename
+        after = Get-MultiProjectPeerCounts $afterRename; project = $renamedProject; overview = $renamedOverview }
+      noMutation = $noMutation.ToArray()
+      unchangedTitle = [ordered]@{ native = $unchangedNative; dispatched = $true; macOSSourceSuppresses = $true
+        before = Get-MultiProjectPeerCounts $beforeUnchanged; after = Get-MultiProjectPeerCounts $afterUnchanged }
+      finalOverview = $finalOverview
+      limits = "Observed two owner/card groups; lane/Open geometry is source-derived, not a UIA caption. Header is project title; loop bar is Selected loop workspace; tabs independently named. Stub evidence does not prove production daemon persistence, glyphs, physical input devices, global-lane filtering, richer topology, worktrees, Edit Details or macOS runtime."
+    }
+  } catch {
+    $primaryError = $_
+    throw
+  } finally {
+    $cleanupFailures = [Collections.Generic.List[string]]::new()
+    foreach ($child in @($peerChild, $shellChild)) {
+      if ($null -ne $child) {
+        try { $null = Complete-MultiProjectCapture $child $logDirectory 5000 $primaryError }
+        catch { $cleanupFailures.Add($_.Exception.Message) }
+      }
+    }
+    if ($cleanupFailures.Count -gt 0) {
+      $message = "MULTIPROJECT_PHASE_TEARDOWN: $($cleanupFailures -join '; ')"
+      if ($primaryError) {
+        $primaryError.Exception.Data["MultiProjectPhaseTeardown"] = $message
+        Write-Warning $message -WarningAction Continue
+      } else { throw $message }
+    }
+  }
+}
+
 $oldZmx = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX")
 $oldCwd = [Environment]::GetEnvironmentVariable("GRAPHCODE_GATE_CWD")
 $oldGate = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_GATE")
@@ -2376,7 +4553,9 @@ try {
           try { Write-Host "UIA_STARTUP_DIAGNOSTIC_ERROR=diagnostic output failed" } catch {}
         }
       }
-      throw "shell exited with code $startupExitCode"
+      Invoke-MultiProjectOwnedStartupFailure $process $startupExitCode $Shell $logDirectory {
+        throw "shell exited with code $startupExitCode"
+      }
     }
     if ($process.MainWindowHandle -ne 0) {
       $candidate = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
@@ -7800,6 +9979,9 @@ try {
 
   Write-Host ("UIA_SKETCH_CUSTODY_EVIDENCE=" + ($sketchCustodyEvidence | ConvertTo-Json -Depth 8 -Compress))
 
+  $multiProjectRenameEvidence = Invoke-MultiProjectRenamePhase
+  Write-Host ("UIA_MULTIPROJECT_RENAME_EVIDENCE=" + ($multiProjectRenameEvidence | ConvertTo-Json -Depth 8 -Compress))
+
   [pscustomobject]@{
     name = $rootName
     automationId = $rootAutomationId
@@ -7871,6 +10053,7 @@ try {
     edgeWorkflow = $edgeWorkflowEvidence
     nodeCreationSheet = $nodeCreationSheetEvidence
     sketchCustody = $sketchCustodyEvidence
+    multiProjectRename = $multiProjectRenameEvidence
     contextMenuItemCount = $projectMenuItems.Count
     contextMenuMoveProjectText = $moveProjectItem.Text
     contextMenuMoveProjectEnabled = $moveProjectItem.Enabled
