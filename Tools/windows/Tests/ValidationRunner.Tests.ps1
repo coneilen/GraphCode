@@ -55,6 +55,277 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     return [ordered]@{ token = $token; projectPath = $alpha; nodeID = $a; title = "Alpha interleaved"
       selection = [ordered]@{ projectPath = $beta; nodeID = $b; source = "synthetic-client" } }
   }
+  $productionRenameClick = (New-MultiProjectRenameNativeApi).PSObject.Methods["Click"].Script
+  function New-MultiRenameNativeMock {
+    $controls = @{}
+    foreach ($id in @(9800,9808,9904)) {
+      $controls["$id"] = @{ handle = [IntPtr]$id; processId = 4242; id = $id; root = [IntPtr]42
+        visible = $true; enabled = $true; bounds = @(300,300,380,328) }
+    }
+    $controls["9904"].bounds = @(30,100,500,124)
+    $api = [pscustomobject]@{ state = @{
+      modalPID = 4242; title = "Rename Loop"; visible = $true; enabled = $true
+      client = @(10,40,600,400); work = @(0,0,1920,1080); foreground = $true
+      buffer = "  Alpha renamed  "; secondBuffer = "  Alpha renamed  "; controls = $controls
+      hitRoot = [IntPtr]42; hitPID = 4242; hitChild = [IntPtr]9800; late = $null; inputSent = 2; inputExpected = 2
+    }; inputCalls = 0; bufferReads = 0; hitReads = 0
+      order = [Collections.Generic.List[string]]::new(); requested = [Collections.Generic.List[int]]::new() }
+    $api | Add-Member ScriptMethod ProcessId {
+      param($window)
+      $this.order.Add("PID:$window")
+      if ($window -eq [IntPtr]42) { return $this.state.modalPID }
+      return $this.state.controls["$window"].processId
+    }
+    $api | Add-Member ScriptMethod Title { param($window) $this.order.Add("TITLE:$window"); return $this.state.title }
+    $api | Add-Member ScriptMethod Visible {
+      param($window)
+      if ($window -eq [IntPtr]42) { return $this.state.visible }
+      return $this.state.controls["$window"].visible
+    }
+    $api | Add-Member ScriptMethod Enabled {
+      param($window)
+      if ($window -eq [IntPtr]42) { return $this.state.enabled }
+      return $this.state.controls["$window"].enabled
+    }
+    $api | Add-Member ScriptMethod Root { param($window) return $this.state.controls["$window"].root }
+    $api | Add-Member ScriptMethod Control {
+      param($window,$id)
+      $this.requested.Add($id); $this.order.Add("CONTROL:$id")
+      if (-not $this.state.controls.ContainsKey("$id")) { return [IntPtr]::Zero }
+      return $this.state.controls["$id"].handle
+    }
+    $api | Add-Member ScriptMethod ControlId { param($window) return $this.state.controls["$window"].id }
+    $api | Add-Member ScriptMethod Bounds { param($window) return $this.state.controls["$window"].bounds }
+    $api | Add-Member ScriptMethod ClientBounds {
+      param($window)
+      if ($this.state.ContainsKey("staleClient") -and $this.state.staleClient) {
+        throw [ComponentModel.Win32Exception]::new(6,"controlled stale native client")
+      }
+      return $this.state.client
+    }
+    $api | Add-Member ScriptMethod WorkBounds { param($window) return $this.state.work }
+    $api | Add-Member ScriptMethod Foreground { param($window) return $this.state.foreground }
+    $api | Add-Member ScriptMethod Buffer {
+      param($window,$id)
+      $this.order.Add("BUFFER:$id"); $this.bufferReads++
+      if ($this.bufferReads -eq 1) { return $this.state.buffer }
+      return $this.state.secondBuffer
+    }
+    $api | Add-Member ScriptMethod Pause { if ($this.state.late) { & $this.state.late $this.state } }
+    $api | Add-Member ScriptMethod Hit {
+      param($window,$x,$y)
+      $this.hitReads++
+      if ($this.state.ContainsKey("finalDrift") -and $this.hitReads -eq 2) {
+        & $this.state.finalDrift $this.state
+      }
+      $child = if ($this.state.ContainsKey("coveredFirst") -and $this.state.coveredFirst -and $this.hitReads -eq 1) {
+        [IntPtr]9904
+      } else { $this.state.hitChild }
+      return @{ root = $this.state.hitRoot; processId = $this.state.hitPID; child = $child }
+    }
+    $api | Add-Member ScriptMethod SendMouse {
+      param($window,$point)
+      $this.order.Add("INPUT:mouse"); $this.inputCalls++
+      return ,@($point[0],$point[1],($point[0]+1),($point[1]+1),$point[0],$point[1],$this.state.inputSent,$this.state.inputExpected)
+    }
+    $api | Add-Member ScriptMethod Click $productionRenameClick
+    return $api
+  }
+  $renameText = "  Alpha renamed  "
+  $renameProof = @("UIA_EDGE_TEXT_STABLE id=9904 inputAttempted=True inputCountsFull=True clearSent=2/2 textSent=34/34")
+  foreach ($cancelRoute in @($false,$true)) {
+    Invoke-MultiCase ("actual new Rename caller uses native " + $(if ($cancelRoute) { "Cancel9808" } else { "OK9800" })) {
+      $api = New-MultiRenameNativeMock
+      if ($cancelRoute) { $api.state.hitChild = [IntPtr]9808 }
+      function New-MultiProjectRenameNativeApi { return $api }
+      $callerAst = [Management.Automation.Language.Parser]::ParseInput($gateSource,[ref]$null,[ref]$null).Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq "Invoke-MultiProjectNativeRename"
+      },$true)
+      $statement = $callerAst.Find({ param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$action'
+      },$true)
+      Assert-MultiCase ($null -ne $statement) "actual new caller has no action assignment"
+      $modal = [IntPtr]42; $multiProcess = [pscustomobject]@{ Id = 4242 }
+      $typedTitle = $renameText; $Cancel = $cancelRoute
+      $inputEvidence = [Collections.Generic.List[string]]::new(); $inputEvidence.Add($renameProof[0])
+      . ([scriptblock]::Create($statement.Extent.Text))
+      $expectedButton = if ($cancelRoute) { 9808 } else { 9800 }
+      Assert-MultiCase ($action.buttonId -eq $expectedButton -and $action.sent -eq 2 -and $action.expected -eq 2 -and
+        $api.inputCalls -eq 1 -and -not ($api.requested -contains 1) -and $api.requested -contains 9904 -and
+        $action.nativeTarget.observed.button.controlId -eq $expectedButton -and
+        $action.nativeTarget.observed.button.topOwner -eq 42 -and
+        ($api.order -join "|").StartsWith("PID:42|TITLE:42|CONTROL:",[StringComparison]::Ordinal)) `
+        "actual new caller retained legacy button1, lost typed actual target, or entered input before owned capture"
+      return [ordered]@{ buttonID = $action.buttonId; inputCalls = $api.inputCalls; compiledProxy = $false; nativeProof = $false }
+    }
+  }
+  Invoke-MultiCase "Rename clips actual button to modal client and work rectangles" {
+    $api = New-MultiRenameNativeMock
+    $api.state.controls["9800"].bounds = @(580,380,680,430)
+    $action = Invoke-MultiProjectRenameAction ([IntPtr]42) 4242 $renameText $renameProof -nativeApi $api
+    Assert-MultiCase (($action.clippedBounds -join ",") -ceq "580,380,600,400" -and
+      $action.point[0] -ge 580 -and $action.point[0] -lt 600 -and $action.point[1] -ge 380 -and $action.point[1] -lt 400) `
+      "input point used un-clipped footer/outside bounds"
+    return "Measured native-client/work clipping predicate only; mock input transport"
+  }
+  Invoke-MultiCase "Rename uses measured uncovered point without reading covering captions" {
+    $api = New-MultiRenameNativeMock; $api.state.coveredFirst = $true
+    $action = Invoke-MultiProjectRenameAction ([IntPtr]42) 4242 $renameText $renameProof -nativeApi $api
+    Assert-MultiCase ($action.nativeTarget.hitSamples.Count -eq 2 -and
+      -not $action.nativeTarget.hitSamples[0].hitTarget -and $action.nativeTarget.hitSamples[1].hitTarget -and
+      $api.inputCalls -eq 1) "covered first point clicked or uncovered owned target not measured"
+    return "Only PID/root/child hit metadata, no covering names; no Enter fallback"
+  }
+  foreach ($mutation in @("missing-button", "zero-handle", "invalid-handle", "hidden-button", "disabled-button",
+      "wrong-id", "id-type", "foreign-button", "pid-zero", "pid-type", "wrong-top-owner", "owner-type",
+      "missing-edit", "foreign-edit", "wrong-edit-id", "edit-disabled", "modal-foreign", "modal-zero",
+      "modal-pid-type", "wrong-title", "title-type", "modal-hidden", "modal-disabled", "visibility-type",
+      "bounds-missing", "bounds-zero", "bounds-negative-width", "bounds-type", "bounds-nan", "outside-client",
+      "outside-work", "client-zero", "work-invalid", "foreground-false", "foreground-type", "buffer-wrong",
+      "buffer-changing", "buffer-type", "proof-empty", "proof-wrong-id", "proof-short", "proof-clear-short",
+      "proof-not-attempted", "fully-occluded", "foreign-hit", "hit-pid-type", "hit-root-wrong", "hit-child-type",
+      "late-hidden", "late-disabled", "late-foreign", "late-id-drift", "late-owner-drift", "late-bounds-drift",
+      "late-modal-foreign", "late-title-drift", "late-client-drift", "late-work-drift", "late-foreground")) {
+    Invoke-MultiCase ("Rename native guard rejects " + $mutation) -Negative {
+      $api = New-MultiRenameNativeMock; $proof = @($renameProof)
+      $button = $api.state.controls["9800"]
+      switch ($mutation) {
+        "missing-button" { $api.state.controls.Remove("9800") }
+        "zero-handle" { $button.handle = [IntPtr]::Zero }
+        "invalid-handle" { $button.handle = "9800" }
+        "hidden-button" { $button.visible = $false }
+        "disabled-button" { $button.enabled = $false }
+        "wrong-id" { $button.id = 1 }
+        "id-type" { $button.id = "9800" }
+        "foreign-button" { $button.processId = 7777 }
+        "pid-zero" { $button.processId = 0 }
+        "pid-type" { $button.processId = "4242" }
+        "wrong-top-owner" { $button.root = [IntPtr]99 }
+        "owner-type" { $button.root = "42" }
+        "missing-edit" { $api.state.controls.Remove("9904") }
+        "foreign-edit" { $api.state.controls["9904"].processId = 7777 }
+        "wrong-edit-id" { $api.state.controls["9904"].id = 9105 }
+        "edit-disabled" { $api.state.controls["9904"].enabled = $false }
+        "modal-foreign" { $api.state.modalPID = 7777 }
+        "modal-zero" { $api.state.modalPID = 0 }
+        "modal-pid-type" { $api.state.modalPID = "4242" }
+        "wrong-title" { $api.state.title = "New Loop" }
+        "title-type" { $api.state.title = 1 }
+        "modal-hidden" { $api.state.visible = $false }
+        "modal-disabled" { $api.state.enabled = $false }
+        "visibility-type" { $button.visible = "True" }
+        "bounds-missing" { $button.bounds = @() }
+        "bounds-zero" { $button.bounds = @(300,300,300,328) }
+        "bounds-negative-width" { $button.bounds = @(300,300,299,328) }
+        "bounds-type" { $button.bounds[0] = "300" }
+        "bounds-nan" { $button.bounds[0] = [double]::NaN }
+        "outside-client" { $button.bounds = @(700,700,780,728) }
+        "outside-work" { $api.state.work = @(0,0,200,200) }
+        "client-zero" { $api.state.client = @(10,40,10,400) }
+        "work-invalid" { $api.state.work[0] = "0" }
+        "foreground-false" { $api.state.foreground = $false }
+        "foreground-type" { $api.state.foreground = "True" }
+        "buffer-wrong" { $api.state.buffer = "Wrong"; $api.state.secondBuffer = "Wrong" }
+        "buffer-changing" { $api.state.secondBuffer = "Changed" }
+        "buffer-type" { $api.state.buffer = 1 }
+        "proof-empty" { $proof = @() }
+        "proof-wrong-id" { $proof[0] = $proof[0].Replace("id=9904","id=9105") }
+        "proof-short" { $proof[0] = $proof[0].Replace("34/34","33/34") }
+        "proof-clear-short" { $proof[0] = $proof[0].Replace("2/2","1/2") }
+        "proof-not-attempted" { $proof[0] = $proof[0].Replace("inputAttempted=True","inputAttempted=False") }
+        "fully-occluded" { $api.state.hitChild = [IntPtr]9904 }
+        "foreign-hit" { $api.state.hitPID = 7777 }
+        "hit-pid-type" { $api.state.hitPID = "4242" }
+        "hit-root-wrong" { $api.state.hitRoot = [IntPtr]99 }
+        "hit-child-type" { $api.state.hitChild = "9800" }
+        "late-hidden" { $api.state.late = { param($state) $state.controls["9800"].visible = $false } }
+        "late-disabled" { $api.state.late = { param($state) $state.controls["9800"].enabled = $false } }
+        "late-foreign" { $api.state.late = { param($state) $state.controls["9800"].processId = 7777 } }
+        "late-id-drift" { $api.state.late = { param($state) $state.controls["9800"].id = 1 } }
+        "late-owner-drift" { $api.state.late = { param($state) $state.controls["9800"].root = [IntPtr]99 } }
+        "late-bounds-drift" { $api.state.late = { param($state) $state.controls["9800"].bounds = @(310,300,390,328) } }
+        "late-modal-foreign" { $api.state.late = { param($state) $state.modalPID = 7777 } }
+        "late-title-drift" { $api.state.late = { param($state) $state.title = "New Loop" } }
+        "late-client-drift" { $api.state.late = { param($state) $state.client = @(10,40,590,400) } }
+        "late-work-drift" { $api.state.late = { param($state) $state.work = @(0,0,1900,1080) } }
+        "late-foreground" { $api.state.late = { param($state) $state.foreground = $false } }
+      }
+      $prefix = if ($mutation -cin @("outside-client","outside-work")) { "MULTIPROJECT_BOUNDS:" } else { "MULTIPROJECT_RENAME_GUARD:" }
+      $diagnosticRecords = @(& {
+        $script:renameGuardRejection = Reject-MultiCase {
+          Invoke-MultiProjectRenameAction ([IntPtr]42) 4242 $renameText $proof -nativeApi $api
+        } $prefix
+      } 6>&1)
+      $typedDiagnostics = @($diagnosticRecords | Where-Object {
+        $_ -is [Management.Automation.InformationRecord] -and
+          ([string]$_.MessageData).StartsWith("UIA_MULTIPROJECT_RENAME_NATIVE_TARGET=",[StringComparison]::Ordinal)
+      } |
+        ForEach-Object { ([string]$_.MessageData).Substring("UIA_MULTIPROJECT_RENAME_NATIVE_TARGET=".Length) | ConvertFrom-Json })
+      Assert-MultiCase ($api.inputCalls -eq 0 -and -not ($api.order | Where-Object { $_.StartsWith("INPUT:") }) -and
+        $typedDiagnostics.Count -gt 0 -and $typedDiagnostics[0].expected.buttonId -eq 9800 -and
+        -not $typedDiagnostics[0].inputAttempted) "rejected native Rename guard sent input or lost typed actual diagnostic: $mutation"
+      if ($mutation -cin @("modal-foreign","modal-zero","modal-pid-type")) {
+        Assert-MultiCase (-not ($api.order -contains "TITLE:42") -and $api.requested.Count -eq 0) "foreign/unavailable modal content read"
+      }
+      if ($mutation -cin @("missing-button","zero-handle")) {
+        Assert-MultiCase ($typedDiagnostics[0].observed.button.handle -eq 0 -and
+          $null -eq $typedDiagnostics[0].observed.button.controlId) "invented actual missing button ID/handle"
+      }
+      return [ordered]@{ rejection = $script:renameGuardRejection; inputCalls = $api.inputCalls; typedDiagnostics = $typedDiagnostics.Count }
+    }
+  }
+  foreach ($mutation in @("short-count","typed-count")) {
+    Invoke-MultiCase ("Rename actual input receipt rejects " + $mutation) -Negative {
+      $api = New-MultiRenameNativeMock
+      $api.state.inputSent = if ($mutation -ceq "short-count") { 1 } else { "2" }
+      $rejection = Reject-MultiCase {
+        Invoke-MultiProjectRenameAction ([IntPtr]42) 4242 $renameText $renameProof -nativeApi $api
+      } "MULTIPROJECT_RENAME_INPUT:"
+      Assert-MultiCase ($api.inputCalls -eq 1) "incomplete input was replayed"
+      return "Actual mocked return/count rejection after one allowed mock input; no replay: $rejection"
+    }
+  }
+  foreach ($mutation in @("foreign-button","wrong-title","covered-point")) {
+    Invoke-MultiCase ("production Rename Click rejects final " + $mutation) -Negative {
+      $api = New-MultiRenameNativeMock
+      $api.state.finalDrift = switch ($mutation) {
+        "foreign-button" { { param($state) $state.controls["9800"].processId = 7777 } }
+        "wrong-title" { { param($state) $state.title = "Different modal" } }
+        "covered-point" { { param($state) $state.hitChild = [IntPtr]9904 } }
+      }
+      try { Invoke-MultiProjectRenameAction ([IntPtr]42) 4242 $renameText $renameProof -nativeApi $api | Out-Null }
+      catch {
+        Assert-MultiCase ($_.Exception.ToString().Contains("native target changed immediately before input") -and
+          $api.inputCalls -eq 0 -and $api.hitReads -eq 2) "production Click adapter entered primitive input after last-moment drift"
+        return "Actual production ScriptMethod guard, PS primitive mock and zero input; native return unavailable"
+      }
+      throw "RED: final production-native guard accepted $mutation"
+    }
+  }
+  Invoke-MultiCase "Rename stale native read retains exact error and unavailable actual fields" -Negative {
+    $api = New-MultiRenameNativeMock; $api.state.staleClient = $true
+    $records = @(& {
+      try { Invoke-MultiProjectRenameAction ([IntPtr]42) 4242 $renameText $renameProof -nativeApi $api | Out-Null }
+      catch {
+        Assert-MultiCase ($_.Exception.ToString().Contains("controlled stale native client")) "primary stale error replaced"
+      }
+    } 6>&1)
+    $failures = @($records | Where-Object { $_ -is [Management.Automation.InformationRecord] -and
+        ([string]$_.MessageData).StartsWith("UIA_MULTIPROJECT_RENAME_NATIVE_FAILURE=",[StringComparison]::Ordinal) } |
+      ForEach-Object { ([string]$_.MessageData).Substring("UIA_MULTIPROJECT_RENAME_NATIVE_FAILURE=".Length) | ConvertFrom-Json })
+    Assert-MultiCase ($api.inputCalls -eq 0 -and $failures.Count -eq 1 -and
+      $failures[0].failure.errorType -ceq "System.ComponentModel.Win32Exception" -and
+      $failures[0].failure.nativeErrorCode -eq 6 -and -not $failures[0].inputAttempted -and
+      $null -eq $failures[0].observed.button) "stale error hid unavailable actual fields or sent input"
+    return "Typed original native read failure, unavailable button metadata and zero input; no native OS invocation"
+  }
+  Invoke-MultiCase "Rename production native bindings compile without native invocation" {
+    $api = New-MultiProjectRenameNativeApi
+    Assert-MultiCase ($null -ne ("GraphCodeMultiProjectRenameNative" -as [type]) -and
+      $null -ne $api.PSObject.Methods["ClientBounds"] -and $null -ne $api.PSObject.Methods["Hit"]) "production adapter did not compile"
+    return "Real interop declarations compile only; no PInvoke, HWND, native input or compiled test proxy"
+  }
   function New-MultiMetadataMock($processIdValue, $identity, $afterPid = $null, [switch] $Unavailable) {
     $global:multiMetadataAccessOrder = [Collections.Generic.List[string]]::new()
     $global:multiMetadataPidReads = 0
@@ -913,6 +1184,28 @@ if ($mode -eq "abrupt") { [Environment]::Exit(23) }
     executed = $results.Count; positive = $positive; negative = $negative; artifacts = $scratch
     liveAppSelectionProved = $false
   } | ConvertTo-Json -Compress))
+}
+
+function Assert-MultiProjectRenameSubmitContract([string] $source, [string] $dialogSource, [string] $formSource) {
+  $ast = [Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)
+  $caller = $ast.Find({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq "Invoke-MultiProjectNativeRename"
+  },$true)
+  if (-not $caller -or -not $caller.Extent.Text.Contains("Invoke-MultiProjectRenameAction") -or
+      $caller.Extent.Text.Contains("Sketch-Submit") -or $caller.Extent.Text.Contains("Sketch-Cancel")) {
+    throw "RED: NEW Rename caller still submits through the wrong native form family"
+  }
+  if ($dialogSource -notmatch 'const ok_id = 9800;' -or $dialogSource -notmatch 'const cancel_id = 9808;' -or
+      $dialogSource -notmatch '9904 \+ index \* 8' -or $formSource -notmatch 'const ok_id = 1;') {
+    throw "RED: independently sourced Rename versus Sketch native control goldens drifted"
+  }
+  foreach ($required in @("function Invoke-MultiProjectRenameAction", "function Read-MultiProjectRenameField",
+      "function Test-MultiProjectRenameField", "UIA_MULTIPROJECT_RENAME_NATIVE_TARGET=",
+      "UIA_MULTIPROJECT_RENAME_NATIVE_FAILURE=", "UIA_MULTIPROJECT_RENAME_NATIVE_ACTION=",
+      '$buttonId = if ($Cancel) { 9808 } else { 9800 }', "ClientBounds", "WorkBounds", "topOwner", "rectState",
+      "hitSamples", "beforeInput", "enterFallbackUsed = `$false", "actualPriorButton1ReturnEstablished = `$false")) {
+    if (-not $source.Contains($required)) { throw "RED: strict native Rename family route lacks $required" }
+  }
 }
 
 function Assert-MultiProjectFreshCaptureContract([string] $source) {
@@ -2243,6 +2536,9 @@ Start-Sleep -Seconds 60
     if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: bounded multi-project capture lacks $required" }
   }
   Assert-MultiProjectFreshCaptureContract $uiaLiveGateSource
+  Assert-MultiProjectRenameSubmitContract $uiaLiveGateSource `
+    ([IO.File]::ReadAllText((Join-Path $repoRoot "graphcode-windows\src\WindowsNativeDialogs.zig"))) `
+    ([IO.File]::ReadAllText((Join-Path $repoRoot "graphcode-windows\src\NativeForms.zig")))
   Test-MultiProjectProtocolContracts $stubDaemonSource $uiaLiveGateSource `
     (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") $pwsh
   if ($stubDaemonSource -notmatch '\$ApplyGraphCommands' -or

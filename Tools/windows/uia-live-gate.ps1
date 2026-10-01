@@ -2584,6 +2584,252 @@ function Test-MultiProjectMetadataBatch($metadata) {
   return @($metadata | Where-Object { -not $_.observationReady }).Count -eq 0
 }
 
+function New-MultiProjectRenameNativeApi {
+  if (-not ("GraphCodeMultiProjectRenameNative" -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class GraphCodeMultiProjectRenameNative {
+  [StructLayout(LayoutKind.Sequential)] public struct Point { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo {
+    public int Size; public Rect Monitor, Work; public uint Flags;
+  }
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr window, uint flags);
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point point);
+  [DllImport("user32.dll")] private static extern IntPtr RealChildWindowFromPoint(IntPtr window, Point point);
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool GetClientRect(IntPtr window, out Rect rect);
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool ClientToScreen(IntPtr window, ref Point point);
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool ScreenToClient(IntPtr window, ref Point point);
+  [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+  public static int[] ClientBounds(IntPtr window) {
+    Rect rect;
+    if (!GetClientRect(window, out rect)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename GetClientRect");
+    var first = new Point { X=rect.Left, Y=rect.Top };
+    var last = new Point { X=rect.Right, Y=rect.Bottom };
+    if (!ClientToScreen(window, ref first) || !ClientToScreen(window, ref last))
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename ClientToScreen");
+    return new[] { first.X, first.Y, last.X, last.Y };
+  }
+  public static int[] WorkBounds(IntPtr window) {
+    var info = new MonitorInfo { Size=Marshal.SizeOf(typeof(MonitorInfo)) };
+    if (!GetMonitorInfo(MonitorFromWindow(window, 2), ref info))
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename GetMonitorInfo");
+    return new[] { info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom };
+  }
+  public static IntPtr ChildAt(IntPtr window, int x, int y) {
+    var point = new Point { X=x, Y=y };
+    if (!ScreenToClient(window, ref point)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename ScreenToClient");
+    return RealChildWindowFromPoint(window, point);
+  }
+}
+'@
+  }
+  $api = New-Object PSObject
+  $api | Add-Member ScriptMethod ProcessId { param($window) [GraphCodeUiaGateState]::WindowProcessId($window) }
+  $api | Add-Member ScriptMethod Title { param($window) [GraphCodeUiaGateState]::WindowTextOf($window) }
+  $api | Add-Member ScriptMethod Visible { param($window) [GraphCodeUiaGateState]::WindowIsVisible($window) }
+  $api | Add-Member ScriptMethod Enabled { param($window) [GraphCodeUiaGateState]::WindowIsEnabled($window) }
+  $api | Add-Member ScriptMethod Root { param($window) [GraphCodeMultiProjectRenameNative]::GetAncestor($window, 2) }
+  $api | Add-Member ScriptMethod Control { param($window,$id) [GraphCodeUiaGateState]::ControlById($window,$id) }
+  $api | Add-Member ScriptMethod ControlId { param($window) [GraphCodeUiaGateState]::ControlIdOf($window) }
+  $api | Add-Member ScriptMethod Bounds { param($window) [GraphCodeUiaGateState]::WindowBounds($window) }
+  $api | Add-Member ScriptMethod ClientBounds { param($window) [GraphCodeMultiProjectRenameNative]::ClientBounds($window) }
+  $api | Add-Member ScriptMethod WorkBounds { param($window) [GraphCodeMultiProjectRenameNative]::WorkBounds($window) }
+  $api | Add-Member ScriptMethod Foreground { param($window) [GraphCodeUiaGateState]::IsForegroundWindow($window) }
+  $api | Add-Member ScriptMethod Buffer { param($window,$id) [GraphCodeUiaGateState]::EditTextById($window,$id) }
+  $api | Add-Member ScriptMethod Pause { Start-Sleep -Milliseconds 150 }
+  $api | Add-Member ScriptMethod Hit {
+    param($window,$x,$y)
+    $point = New-Object GraphCodeMultiProjectRenameNative+Point
+    $point.X = $x; $point.Y = $y
+    $hit = [GraphCodeMultiProjectRenameNative]::WindowFromPoint($point)
+    $root = [GraphCodeMultiProjectRenameNative]::GetAncestor($hit, 2)
+    return [ordered]@{ root = $root; processId = [GraphCodeUiaGateState]::WindowProcessId($root)
+      child = if ($root -eq $window) { [GraphCodeMultiProjectRenameNative]::ChildAt($window,$x,$y) } else { [IntPtr]::Zero } }
+  }
+  $api | Add-Member ScriptMethod SendMouse {
+    param($window,$point)
+    return ,@([GraphCodeUiaGateState]::ClickOwnedScreenRectangle($window,$point[0],$point[1],$point[0]+1,$point[1]+1,$false))
+  }
+  $api | Add-Member ScriptMethod Click {
+    param($window,$control,$id,$processId,$point)
+    $hit = $this.Hit($window,$point[0],$point[1])
+    if ($this.ProcessId($window) -ne $processId -or $this.ProcessId($control) -ne $processId -or
+        $this.Control($window,$id) -ne $control -or $this.ControlId($control) -ne $id -or
+        $this.Root($control) -ne $window -or -not $this.Visible($control) -or -not $this.Enabled($control) -or
+        $this.Title($window) -cne "Rename Loop" -or
+        -not $this.Foreground($window) -or $hit.root -ne $window -or $hit.child -ne $control -or $hit.processId -ne $processId) {
+      throw "MULTIPROJECT_RENAME_GUARD: native target changed immediately before input"
+    }
+    return ,@($this.SendMouse($window,$point))
+  }
+  return $api
+}
+
+function Test-MultiProjectRenameRectangle($rect) {
+  if ($rect -isnot [array] -or $rect.Count -ne 4) { return $false }
+  foreach ($value in $rect) {
+    if (($value -isnot [int] -and $value -isnot [long] -and $value -isnot [double]) -or
+        [double]::IsNaN($value) -or [double]::IsInfinity($value)) { return $false }
+  }
+  return $rect[2] -gt $rect[0] -and $rect[3] -gt $rect[1]
+}
+
+function Read-MultiProjectRenameField($api, [IntPtr] $modal, [int] $id, [int] $expectedPID) {
+  $handle = $api.Control($modal,$id)
+  $result = [ordered]@{ expectedId = $id; handle = $null; state = "unavailable"
+    processId = $null; pidState = "not-read"; controlId = $null; topOwner = $null
+    visible = $null; enabled = $null; bounds = @(); rectState = "not-read" }
+  if ($handle -isnot [IntPtr]) { $result.state = "invalid-handle"; return $result }
+  $result.handle = $handle.ToInt64()
+  if ($handle -eq [IntPtr]::Zero) { $result.state = "missing"; return $result }
+  $pidValue = $api.ProcessId($handle)
+  $result.processId = $pidValue
+  if (($pidValue -isnot [int] -and $pidValue -isnot [uint32] -and $pidValue -isnot [long]) -or $pidValue -le 0) {
+    $result.state = "pid-unavailable"; $result.pidState = "unavailable-or-invalid"; return $result
+  }
+  $result.pidState = "available"
+  if ($pidValue -ne $expectedPID) { $result.state = "foreign"; return $result }
+  $result.controlId = $api.ControlId($handle)
+  $root = $api.Root($handle)
+  $result.topOwner = if ($root -is [IntPtr]) { $root.ToInt64() } else { $null }
+  $result.visible = $api.Visible($handle)
+  $result.enabled = $api.Enabled($handle)
+  $result.bounds = @($api.Bounds($handle))
+  $result.rectState = if (Test-MultiProjectRenameRectangle $result.bounds) { "available" } else { "unavailable-or-invalid" }
+  $result.state = "available"
+  return $result
+}
+
+function Test-MultiProjectRenameField($field, [IntPtr] $modal, [int] $id, [int] $processId) {
+  return $field.state -ceq "available" -and $field.handle -is [long] -and $field.handle -gt 0 -and
+    ($field.processId -is [int] -or $field.processId -is [uint32] -or $field.processId -is [long]) -and
+    $field.processId -eq $processId -and $field.controlId -is [int] -and $field.controlId -eq $id -and
+    $field.topOwner -is [long] -and $field.topOwner -eq $modal.ToInt64() -and
+    $field.visible -is [bool] -and $field.visible -and $field.enabled -is [bool] -and $field.enabled -and
+    (Test-MultiProjectRenameRectangle $field.bounds)
+}
+
+function Invoke-MultiProjectRenameAction(
+  [IntPtr] $modal, [int] $processId, [string] $expectedText, [array] $inputEvidence,
+  [switch] $Cancel, $nativeApi = $null
+) {
+  $api = if ($null -ne $nativeApi) { $nativeApi } else { New-MultiProjectRenameNativeApi }
+  $buttonId = if ($Cancel) { 9808 } else { 9800 }
+  $diagnostic = [ordered]@{
+    expected = [ordered]@{ modalPID = $processId; title = "Rename Loop"; modal = $modal.ToInt64(); buttonId = $buttonId
+      editId = 9904; buffer = $expectedText; clearInputCount = 2; textInputCount = 2 * $expectedText.Length }
+    observed = [ordered]@{ modalPID = $null; title = $null; titleState = "not-read"
+      modalVisible = $null; modalEnabled = $null; clientBounds = @(); workBounds = @(); button = $null; edit = $null }
+    inputAttempted = $false; actualPriorButton1ReturnEstablished = $false
+  }
+  try {
+    $observed = $diagnostic.observed
+    $observed.modalPID = $api.ProcessId($modal)
+    if (($observed.modalPID -is [int] -or $observed.modalPID -is [uint32] -or $observed.modalPID -is [long]) -and
+        $observed.modalPID -eq $processId -and $processId -gt 0 -and $modal -ne [IntPtr]::Zero) {
+      $observed.title = $api.Title($modal); $observed.titleState = "read-after-owned-PID"
+      $observed.modalVisible = $api.Visible($modal); $observed.modalEnabled = $api.Enabled($modal)
+      $observed.clientBounds = @($api.ClientBounds($modal)); $observed.workBounds = @($api.WorkBounds($modal))
+      $observed.button = Read-MultiProjectRenameField $api $modal $buttonId $processId
+      $observed.edit = Read-MultiProjectRenameField $api $modal 9904 $processId
+    }
+    Write-Host ("UIA_MULTIPROJECT_RENAME_NATIVE_TARGET=" + ($diagnostic | ConvertTo-Json -Depth 7 -Compress))
+    if ($observed.title -isnot [string] -or $observed.title -cne "Rename Loop" -or
+        $observed.modalVisible -isnot [bool] -or -not $observed.modalVisible -or
+        $observed.modalEnabled -isnot [bool] -or -not $observed.modalEnabled -or
+        -not (Test-MultiProjectRenameRectangle $observed.clientBounds) -or
+        -not (Test-MultiProjectRenameRectangle $observed.workBounds) -or
+        -not (Test-MultiProjectRenameField $observed.button $modal $buttonId $processId) -or
+        -not (Test-MultiProjectRenameField $observed.edit $modal 9904 $processId)) {
+      throw "MULTIPROJECT_RENAME_GUARD: exact owned visible enabled Rename modal/button/edit unavailable; no input"
+    }
+    $clip = Get-MultiProjectClippedRectangle $observed.button.bounds $observed.clientBounds
+    $clip = Get-MultiProjectClippedRectangle $clip $observed.workBounds
+    $diagnostic.clippedButtonBounds = $clip
+    $proof = @($inputEvidence | Where-Object {
+      $_ -is [string] -and $_.StartsWith("UIA_EDGE_TEXT_STABLE ",[StringComparison]::Ordinal) -and
+        $_ -match 'id=9904(?: |$)' -and $_ -match 'inputAttempted=True(?: |$)' -and
+        $_ -match 'inputCountsFull=True(?: |$)' -and $_ -match 'clearSent=2/2(?: |$)' -and
+        $_ -match ("textSent=" + (2 * $expectedText.Length) + "/" + (2 * $expectedText.Length) + "(?: |$)")
+    })
+    $observed.foreground = $api.Foreground($modal)
+    $observed.firstBuffer = $api.Buffer($modal,9904)
+    $api.Pause()
+    $observed.secondBuffer = $api.Buffer($modal,9904)
+    $diagnostic.fullTypingProofCount = $proof.Count
+    if ($proof.Count -le 0 -or $observed.foreground -isnot [bool] -or -not $observed.foreground -or
+        $observed.firstBuffer -isnot [string] -or $observed.secondBuffer -isnot [string] -or
+        $observed.firstBuffer -cne $expectedText -or $observed.secondBuffer -cne $expectedText) {
+      Write-Host ("UIA_MULTIPROJECT_RENAME_NATIVE_TARGET=" + ($diagnostic | ConvertTo-Json -Depth 7 -Compress))
+      throw "MULTIPROJECT_RENAME_GUARD: full SendInput proof/owned foreground/stable exact buffer missing; no input"
+    }
+    $samples = [Collections.Generic.List[object]]::new()
+    $point = $null
+    foreach ($candidate in @(@(0.5,0.5),@(0.25,0.25),@(0.75,0.25),@(0.25,0.75),@(0.75,0.75))) {
+      $x = [int][Math]::Floor($clip[0] + ($clip[2]-$clip[0]-1) * $candidate[0])
+      $y = [int][Math]::Floor($clip[1] + ($clip[3]-$clip[1]-1) * $candidate[1])
+      $hit = $api.Hit($modal,$x,$y)
+      $valid = $hit.root -is [IntPtr] -and $hit.root -eq $modal -and $hit.child -is [IntPtr] -and
+        $hit.child.ToInt64() -eq $observed.button.handle -and
+        ($hit.processId -is [int] -or $hit.processId -is [uint32] -or $hit.processId -is [long]) -and $hit.processId -eq $processId
+      $samples.Add([ordered]@{ point = @($x,$y); hitRoot = if ($hit.root -is [IntPtr]) { $hit.root.ToInt64() } else { $null }
+        hitPID = $hit.processId; child = if ($hit.child -is [IntPtr]) { $hit.child.ToInt64() } else { $null }; hitTarget = $valid })
+      if ($valid) { $point = @($x,$y); break }
+    }
+    $diagnostic.hitSamples = $samples.ToArray()
+    $beforeInput = [ordered]@{ modalPID = $api.ProcessId($modal); title = $null; titleState = "not-read"
+      visible = $null; enabled = $null; button = $null; edit = $null; clientBounds = @(); workBounds = @(); foreground = $null }
+    if (($beforeInput.modalPID -is [int] -or $beforeInput.modalPID -is [uint32] -or $beforeInput.modalPID -is [long]) -and
+        $beforeInput.modalPID -eq $processId) {
+      $beforeInput.title = $api.Title($modal); $beforeInput.titleState = "read-after-owned-PID"
+      $beforeInput.visible = $api.Visible($modal); $beforeInput.enabled = $api.Enabled($modal)
+      $beforeInput.button = Read-MultiProjectRenameField $api $modal $buttonId $processId
+      $beforeInput.edit = Read-MultiProjectRenameField $api $modal 9904 $processId
+      $beforeInput.clientBounds = @($api.ClientBounds($modal)); $beforeInput.workBounds = @($api.WorkBounds($modal))
+      $beforeInput.foreground = $api.Foreground($modal)
+    }
+    $freshButton = $beforeInput.button; $freshEdit = $beforeInput.edit
+    $diagnostic.beforeInput = $beforeInput
+    Write-Host ("UIA_MULTIPROJECT_RENAME_NATIVE_TARGET=" + ($diagnostic | ConvertTo-Json -Depth 7 -Compress))
+    if ($null -eq $point -or -not (Test-MultiProjectRenameField $freshButton $modal $buttonId $processId) -or
+        -not (Test-MultiProjectRenameField $freshEdit $modal 9904 $processId) -or
+        $freshButton.handle -ne $observed.button.handle -or $freshEdit.handle -ne $observed.edit.handle -or
+        (ConvertTo-SketchCanonicalJson $freshButton.bounds) -cne (ConvertTo-SketchCanonicalJson $observed.button.bounds) -or
+        (ConvertTo-SketchCanonicalJson $freshEdit.bounds) -cne (ConvertTo-SketchCanonicalJson $observed.edit.bounds) -or
+        $beforeInput.title -isnot [string] -or $beforeInput.title -cne "Rename Loop" -or
+        $beforeInput.visible -isnot [bool] -or -not $beforeInput.visible -or
+        $beforeInput.enabled -isnot [bool] -or -not $beforeInput.enabled -or
+        (ConvertTo-SketchCanonicalJson $beforeInput.clientBounds) -cne (ConvertTo-SketchCanonicalJson $observed.clientBounds) -or
+        (ConvertTo-SketchCanonicalJson $beforeInput.workBounds) -cne (ConvertTo-SketchCanonicalJson $observed.workBounds) -or
+        $beforeInput.foreground -isnot [bool] -or -not $beforeInput.foreground) {
+      throw "MULTIPROJECT_RENAME_GUARD: occluded/stale/unowned native Rename target; no input"
+    }
+    $diagnostic.nativeCallStarted = $true
+    $diagnostic.inputAttempted = $null
+    $click = @($api.Click($modal,[IntPtr]$observed.button.handle,$buttonId,$processId,$point))
+    $diagnostic.inputAttempted = $true; $diagnostic.returnedClick = $click
+    Write-Host ("UIA_MULTIPROJECT_RENAME_NATIVE_ACTION=" + ($diagnostic | ConvertTo-Json -Depth 7 -Compress))
+    if ($click.Count -ne 8 -or @($click | Where-Object { $_ -isnot [int] }).Count -ne 0 -or
+        $click[6] -ne 2 -or $click[7] -ne 2 -or $click[4] -ne $point[0] -or $click[5] -ne $point[1]) {
+      throw "MULTIPROJECT_RENAME_INPUT: native click returned incomplete counts/point; no replay"
+    }
+    return [ordered]@{ method = "mouse"; buttonId = $buttonId; point = $point; sent = $click[6]; expected = $click[7]
+      clippedBounds = $clip; nativeTarget = $diagnostic; enterFallbackUsed = $false }
+  } catch {
+    $exception = $_.Exception
+    for ($depth = 0; $exception.InnerException -and $depth -lt 16; $depth++) { $exception = $exception.InnerException }
+    $diagnostic.failure = [ordered]@{ errorType = $exception.GetType().FullName; hresult = $exception.HResult
+      nativeErrorCode = if ($exception -is [ComponentModel.Win32Exception]) { $exception.NativeErrorCode } else { $null } }
+    Write-Host ("UIA_MULTIPROJECT_RENAME_NATIVE_FAILURE=" + ($diagnostic | ConvertTo-Json -Depth 7 -Compress))
+    throw
+  }
+}
+
 function Get-MultiProjectLaneGeometry([double[]] $canvas, [double[]] $card) {
   if ($canvas.Count -ne 4 -or $card.Count -ne 4 -or $canvas[2] -le $canvas[0] -or
       $canvas[3] -le $canvas[1] -or $card[2] -le $card[0] -or $card[3] -le $card[1]) {
@@ -3183,7 +3429,7 @@ function Invoke-MultiProjectRenamePhase {
     Require ($fullInput.Count -gt 0) "multi-project rename did not record full real clear/text SendInput counts"
     $submitBuffer = Sketch-Field 9904 "rename stable immediately before submit"
     Require ($submitBuffer -ceq $typedTitle) "multi-project Rename buffer differs at submit"
-    $action = if ($Cancel) { Sketch-Cancel "Rename Loop" } else { Sketch-Submit "Rename Loop OK" 9904 }
+    $action = Invoke-MultiProjectRenameAction $modal $multiProcess.Id $typedTitle $inputEvidence.ToArray() -Cancel:$Cancel
     Wait-EdgeClosed "Rename Loop"
     return [ordered]@{ pid = $multiProcess.Id; title = "Rename Loop"; controlID = 9904; nativeOwner = $modal.ToInt64()
       prefill = $prefill; typedTitle = $typedTitle; stableSubmitBuffer = $submitBuffer
