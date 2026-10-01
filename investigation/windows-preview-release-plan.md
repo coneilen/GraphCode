@@ -388,6 +388,47 @@ status comment; no issue had enough evidence to close, reopen, or supersede.
 Closing an issue does not promote a ledger row by itself; promotion still
 requires the ledger's runtime evidence.
 
+## Prioritized implementation dependency map
+
+The first post-audit batch uses independent branches and PRs; it is not a native
+stack because current GraphCode contributions use fork heads and GitHub stacks
+require every head branch in the base repository. Dependent work starts only
+after its lower behavior is accepted, rather than presenting inherited fork
+changes as a layer-only diff.
+
+1. **P0 state and startup foundations, in parallel:** #554 owns onboarding
+   marker path selection; #555 owns missing-secret daemon startup and endpoint
+   acquisition. They have distinct file leases. Neither waits for the broad
+   `App.zig` split in #564.
+2. **P0 first-run connection and accessibility:** #556 follows the accepted
+   #554/#555 behavior because it overlaps `WindowsOnboarding.zig` and the
+   `App.zig` startup sequence. Split its connection ordering and UIA surface
+   only if each remains independently coherent and testable; do not run both
+   writers against those files concurrently.
+3. **P1 safe qualification foundations, in parallel:** #562 isolates every
+   validation launch from the real profile; #553 adds honest local-package
+   provenance while preserving publication refusal; #561 removes the
+   app-managed deep-path failure from the Git-process harness. #551 improves
+   provider bootstrap separately because it accelerates reproduction without
+   blocking a prebuilt tester package.
+4. **Installed production-core flight:** after #554/#555/#556 and the safe
+   #562 launch boundary are accepted, build an exact source-bound candidate
+   using #553's supported route or an authorized exact matching tag. Run the
+   ordinary install → onboarding → connected Welcome → local project → one
+   named real backend → input/output → persisted reopen → safe exit path. This
+   step needs fresh client, desktop, backend/auth/credit, and package-operation
+   permission; existing stub, unit, or hosted-server results cannot substitute.
+5. **Evidence-driven follow-up:** attribute #558 and #560 only on their named
+   current-source reproductions. Resume existing-owner
+   `coneilen/winghostty#11` if credible owned client qualification is
+   unavailable or the flight demonstrates a provider-validation dependency;
+   resume `coneilen/winghostty#10` only if the selected backend/display profile
+   reproduces or materially elevates the glyph-capacity risk.
+
+Independent fixes can merge in any order. The only required sequencing is the
+file/behavior dependency above; no PR count, provider branch, or full parity-row
+closure is an implicit preview prerequisite.
+
 ## Measuring progress
 
 Track two independent outcomes: **whole-row parity closures** under the ledger's
