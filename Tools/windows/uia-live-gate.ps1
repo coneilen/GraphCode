@@ -2264,6 +2264,7 @@ function Get-MultiProjectAutomationId([string] $kind, [string] $path, [string] $
     "open-project" { "open-project" }
     "project-card" { "canvas-card" }
     "overview-card" { "canvas-card" }
+    "overview-worktree-notice" { "canvas-card" }
     "workspace-loop-bar" { "workspace-loop-bar" }
     "workspace-toolbar" { "workspace-toolbar" }
     default { throw "MULTIPROJECT_KIND: unsupported automation identity kind" }
@@ -2304,12 +2305,29 @@ function Test-MultiProjectFragmentRoster($actual, $expected, [int] $processId) {
   return $true
 }
 
+function Get-MultiProjectExpectedCanvasRoster([string] $surface, $owners, $selectedOwner) {
+  if ($surface -ceq "overview") {
+    return ,@($owners | ForEach-Object {
+      [ordered]@{ automationId = Get-MultiProjectAutomationId "overview-worktree-notice" $_.path
+        name = "Worktrees not inspected"; classification = "source-summary"; identityKind = "overview-worktree-notice"
+        projectPath = $_.path; nodeID = $null }
+      [ordered]@{ automationId = Get-MultiProjectAutomationId "overview-card" $_.path $_.node
+        name = $_.title; classification = "node"; identityKind = "overview-card"; projectPath = $_.path; nodeID = $_.node }
+    })
+  }
+  if ($surface -cnotin @("project", "workspace")) { throw "MULTIPROJECT_SURFACE: unsupported canvas classification" }
+  if ($null -eq $selectedOwner) { return ,@() }
+  return ,@([ordered]@{ automationId = Get-MultiProjectAutomationId "project-card" $selectedOwner.path $selectedOwner.node
+    name = $selectedOwner.title; classification = "node"; identityKind = "project-card"
+    projectPath = $selectedOwner.path; nodeID = $selectedOwner.node })
+}
+
 function Test-MultiProjectObservedRoster([string] $surface, $projection, $expectedOwners, $selectedOwner, [int] $processId) {
   if ($surface -cnotin @("overview", "project", "workspace")) { throw "MULTIPROJECT_SURFACE: unsupported observed surface" }
-  if ($projection -isnot [Collections.IDictionary] -or $projection.Count -ne 4 -or
+  if ($projection -isnot [Collections.IDictionary] -or $projection.Count -ne 5 -or
       $expectedOwners -isnot [array] -or $expectedOwners.Count -ne 2) { return $false }
   foreach ($key in $projection.Keys) {
-    if (@("projectRows", "cards", "foreignCardFragmentCount", "foreignProjectFragmentCount") -cnotcontains $key) { return $false }
+    if (@("projectRows", "cards", "foreignCardFragmentCount", "foreignProjectFragmentCount", "canvasBounds") -cnotcontains $key) { return $false }
   }
   foreach ($key in @("foreignCardFragmentCount", "foreignProjectFragmentCount")) {
     if (($projection[$key] -isnot [int] -and $projection[$key] -isnot [long]) -or $projection[$key] -ne 0) { return $false }
@@ -2317,19 +2335,30 @@ function Test-MultiProjectObservedRoster([string] $surface, $projection, $expect
   $expectedProjects = @($expectedOwners | ForEach-Object {
     [ordered]@{ automationId = Get-MultiProjectAutomationId "open-project" $_.path; name = $_.name }
   })
+  $expectedCards = Get-MultiProjectExpectedCanvasRoster $surface $expectedOwners $selectedOwner
+  if (-not (Test-MultiProjectFragmentRoster $projection.projectRows $expectedProjects $processId) -or
+      -not (Test-MultiProjectFragmentRoster $projection.cards $expectedCards $processId)) { return $false }
   if ($surface -ceq "overview") {
-    $expectedCards = @($expectedOwners | ForEach-Object {
-      [ordered]@{ automationId = Get-MultiProjectAutomationId "overview-card" $_.path $_.node; name = $_.title }
-    })
-  } else {
-    if ($null -eq $selectedOwner) { return $false }
-    $expectedCards = @([ordered]@{
-      automationId = Get-MultiProjectAutomationId "project-card" $selectedOwner.path $selectedOwner.node
-      name = $selectedOwner.title
-    })
+    if ($projection.canvasBounds -isnot [array] -or $projection.canvasBounds.Count -ne 4) { return $false }
+    foreach ($coordinate in $projection.canvasBounds) {
+      if (($coordinate -isnot [int] -and $coordinate -isnot [long] -and $coordinate -isnot [double]) -or
+          [double]::IsNaN([double]$coordinate) -or [double]::IsInfinity([double]$coordinate)) { return $false }
+    }
+    if ($projection.canvasBounds[2] -le $projection.canvasBounds[0] -or $projection.canvasBounds[3] -le $projection.canvasBounds[1]) { return $false }
+    foreach ($owner in $expectedOwners) {
+      $nodeId = Get-MultiProjectAutomationId "overview-card" $owner.path $owner.node
+      $summaryId = Get-MultiProjectAutomationId "overview-worktree-notice" $owner.path
+      $node = @($projection.cards | Where-Object { $_.automationId -ceq $nodeId })[0]
+      $summary = @($projection.cards | Where-Object { $_.automationId -ceq $summaryId })[0]
+      $scale = ($node.bounds[2] - $node.bounds[0]) / 220
+      if ([Math]::Abs(($node.bounds[3] - $node.bounds[1]) / $scale - 86) -gt 1) { return $false }
+      $geometry = Get-MultiProjectLaneGeometry $projection.canvasBounds $node.bounds
+      for ($index = 0; $index -lt 4; $index++) {
+        if ([Math]::Abs($summary.bounds[$index] - $geometry.summary[$index]) -gt 1) { return $false }
+      }
+    }
   }
-  return (Test-MultiProjectFragmentRoster $projection.projectRows $expectedProjects $processId) -and
-    (Test-MultiProjectFragmentRoster $projection.cards $expectedCards $processId)
+  return $true
 }
 
 function Test-MultiProjectObservedSurface([string] $surface, [bool] $ownerNodesMatched, $projection, $selectedOwner, [int] $processId) {
@@ -2379,6 +2408,7 @@ function Get-MultiProjectLaneGeometry([double[]] $canvas, [double[]] $card) {
     scale = $scale
     band = @($laneLeft, $laneTop, $laneRight, ($laneTop + 176 * $scale))
     open = @(($laneRight - 132 * $scale), ($laneTop + 10 * $scale), ($laneRight - 76 * $scale), ($laneTop + 30 * $scale))
+    summary = @(($laneRight - 426 * $scale), ($laneTop + 10 * $scale), ($laneRight - 140 * $scale), ($laneTop + 30 * $scale))
   }
 }
 
@@ -2772,6 +2802,7 @@ function Invoke-MultiProjectRenamePhase {
       projectRows = @($allProjectRows | ForEach-Object { Get-MultiProjectElementEvidence $_ $multiProcess.Id })
       cards = @($allCards | ForEach-Object { Get-MultiProjectElementEvidence $_ $multiProcess.Id })
       foreignCardFragmentCount = $foreignCardCount; foreignProjectFragmentCount = $foreignProjectCount
+      canvasBounds = if ($canvas) { @($canvas.Left, $canvas.Top, $canvas.Right, $canvas.Bottom) } else { @() }
     }
     $workspaceProjection = [ordered]@{
       loopBars = @($ownedGraphElements | Where-Object { $_.Current.AutomationId.StartsWith("workspace-loop-bar-", [StringComparison]::Ordinal) } |
@@ -2785,14 +2816,28 @@ function Invoke-MultiProjectRenamePhase {
     $matches = $matches -and (Test-MultiProjectObservedRoster $surface $fragmentProjection $owners $selectedOwner $multiProcess.Id)
     $matches = Test-MultiProjectObservedSurface $surface $matches $workspaceProjection $selectedOwner $multiProcess.Id
     $expectedProjectIds = @($owners | ForEach-Object { Get-MultiProjectAutomationId "open-project" $_.path })
-    $scopedExpectedCardIds = if ($surface -ceq "overview") { $expectedNodeCardIds } elseif ($selectedOwner) {
-      @(Get-MultiProjectAutomationId "project-card" $selectedOwner.path $selectedOwner.node)
-    } else { @() }
+    $expectedCanvasRoster = Get-MultiProjectExpectedCanvasRoster $surface $owners $selectedOwner
+    $scopedExpectedCardIds = @($expectedCanvasRoster | ForEach-Object { $_.automationId })
+    $canvasClassification = @($fragmentProjection.cards | ForEach-Object {
+      $fragment = $_
+      $known = @($expectedCanvasRoster | Where-Object { $_.automationId -ceq $fragment.automationId })
+      [ordered]@{ automationId = $fragment.automationId; name = $fragment.name; processId = $fragment.processId; bounds = $fragment.bounds
+        classification = if ($known.Count -eq 1) { $known[0].classification } else { "unexpected" }
+        identityKind = if ($known.Count -eq 1) { $known[0].identityKind } else { $null }
+        projectPath = if ($known.Count -eq 1) { $known[0].projectPath } else { $null }
+        nodeID = if ($known.Count -eq 1) { $known[0].nodeID } else { $null } }
+    })
     return [ordered]@{ requestedSurface = $surface; observedSurface = if ($matches) { $surface } else { $null }
       matched = $matches; observedOwnerCount = $allProjectRows.Count
       expectedMatchedOwners = @($observed | Where-Object { $null -ne $_.projectName }).Count
       totalObservedProjectRowCount = $allProjectRows.Count; totalObservedCardCount = $allCards.Count
       observedCardCount = $allCards.Count; expectedMatchedCardCount = $cards.Count; owners = $observed.ToArray()
+      expectedNodeCardCount = $(if ($surface -ceq "overview") { 2 } else { 1 })
+      nodeCardCount = @($canvasClassification | Where-Object { $_.classification -ceq "node" }).Count
+      expectedSourceSummaryCount = $(if ($surface -ceq "overview") { 2 } else { 0 })
+      sourceSummaryCount = @($canvasClassification | Where-Object { $_.classification -ceq "source-summary" }).Count
+      canvasFragmentClasses = $canvasClassification
+      sourceSummaryPolicy = "Ordinary uninspected overview exposes one overview-worktree-notice per exact owner plus its node; all canvas-card fragments remain counted and validated. No filesystem worktree inspection is performed."
       allOwnedProjectIds = @($fragmentProjection.projectRows | ForEach-Object { $_.automationId })
       allOwnedProjectNames = @($fragmentProjection.projectRows | ForEach-Object { $_.name })
       allOwnedCardIds = @($fragmentProjection.cards | ForEach-Object { $_.automationId })
@@ -2812,7 +2857,8 @@ function Invoke-MultiProjectRenamePhase {
       if ($observation.matched) { return $observation }
       Start-Sleep -Milliseconds 100
     }
-    throw "MULTIPROJECT_IDENTITY: exact whole owner/card roster and requested surface markers did not converge; missing workspace provider chrome remains unproved: $($observation | ConvertTo-Json -Depth 6 -Compress)"
+    $limit = if ($surface -ceq "workspace") { "mandatory owned workspace provider chrome remains unproved" } else { "complete source-supported node/summary roster remains unproved; workspace navigation was not requested" }
+    throw "MULTIPROJECT_IDENTITY: requested=$surface exact owner/node/summary roster and requested markers did not converge; $limit`: $($observation | ConvertTo-Json -Depth 6 -Compress)"
   }
   function Click-MultiProjectRectangle([double[]] $rect, [double[]] $canvas, [switch] $RightClick) {
     $clipped = Get-MultiProjectClippedRectangle $rect $canvas

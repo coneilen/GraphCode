@@ -105,6 +105,42 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     Assert-MultiCase ((Get-MultiProjectAutomationId "project-card" "graphcode://stub/project" $a) -ceq "canvas-card-1510499067760483540") "provider FNV row-key golden differs"
     return $ids
   }
+  $retainedAlpha = "D:\a\_temp\gu-239af6fb60ce40b5b2846baf38b9a9d7\mp\Alpha"
+  $retainedBeta = "D:\a\_temp\gu-239af6fb60ce40b5b2846baf38b9a9d7\mp\Beta"
+  $retainedOwners = @(
+    @{ path = $retainedAlpha; name = "Alpha"; node = $a; title = "Alpha loop" },
+    @{ path = $retainedBeta; name = "Beta"; node = $b; title = "Beta loop" }
+  )
+  $retainedProjection = [ordered]@{
+    projectRows = @(
+      [ordered]@{ automationId = "open-project-1729193928419568695"; name = "Alpha"; processId = 3140; bounds = @(20,222,240,248) },
+      [ordered]@{ automationId = "open-project-2225278778924952707"; name = "Beta"; processId = 3140; bounds = @(20,308,240,334) }
+    )
+    cards = @(
+      [ordered]@{ automationId = "canvas-card-1669006899659070917"; name = "Worktrees not inspected"; processId = 3140; bounds = @(586,133,872,153) },
+      [ordered]@{ automationId = "canvas-card-1662987038540838399"; name = "Alpha loop"; processId = 3140; bounds = @(270,169,490,255) },
+      [ordered]@{ automationId = "canvas-card-1518601899186967385"; name = "Worktrees not inspected"; processId = 3140; bounds = @(586,329,872,349) },
+      [ordered]@{ automationId = "canvas-card-1884655564485847249"; name = "Beta loop"; processId = 3140; bounds = @(270,365,490,451) }
+    )
+    foreignCardFragmentCount = 0; foreignProjectFragmentCount = 0
+    canvasBounds = @(228,85,1036,780)
+  }
+  Invoke-MultiCase "retained hosted four-fragment source-supported overview" {
+    Assert-MultiCase (Test-MultiProjectObservedRoster "overview" $retainedProjection $retainedOwners $null 3140) `
+      "retained hosted 716 overview rejected legitimate two-node/two-summary complete roster"
+    return "Exact hosted identities/names/node bounds; summary rectangles independently source-derived, not a native bounds measurement"
+  }
+  Invoke-MultiCase "source summary identity independent fixture and hosted goldens" {
+    Assert-MultiCase ((Get-MultiProjectAutomationId "overview-worktree-notice" "A") -ceq
+      "canvas-card-1294898434078301384") "Alpha source summary public hash differs"
+    Assert-MultiCase ((Get-MultiProjectAutomationId "overview-worktree-notice" "B") -ceq
+      "canvas-card-1294901732613186017") "Beta source summary public hash differs"
+    Assert-MultiCase ((Get-MultiProjectAutomationId "overview-worktree-notice" $retainedAlpha) -ceq
+      "canvas-card-1669006899659070917") "retained hosted Alpha summary identity differs"
+    Assert-MultiCase ((Get-MultiProjectAutomationId "overview-worktree-notice" $retainedBeta) -ceq
+      "canvas-card-1518601899186967385") "retained hosted Beta summary identity differs"
+    return "Exact overview-worktree-notice:projectPath identities; native parent4 canvas-card prefix"
+  }
   Invoke-MultiCase "workspace marker independent prefix and row-key goldens" {
     Assert-MultiCase ((Get-MultiProjectAutomationId "workspace-loop-bar" $a) -ceq
       "workspace-loop-bar-1320898360543276851") "workspace loop-bar A prefix/row-key golden differs"
@@ -177,16 +213,19 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
         [ordered]@{ automationId = "open-project-1737217821384741551"; name = "Beta"; processId = 4242; bounds = @(12,148,232,174) }
       )
       cards = @(
+        [ordered]@{ automationId = "canvas-card-1294898434078301384"; name = "Worktrees not inspected"; processId = 4242; bounds = @(750,82,1036,102) },
         [ordered]@{ automationId = "canvas-card-1929002346198335884"; name = "Alpha loop"; processId = 4242; bounds = @(262,118,482,204) },
+        [ordered]@{ automationId = "canvas-card-1294901732613186017"; name = "Worktrees not inspected"; processId = 4242; bounds = @(750,278,1036,298) },
         [ordered]@{ automationId = "canvas-card-1616358459734844849"; name = "Beta loop"; processId = 4242; bounds = @(262,314,482,400) }
       )
       foreignCardFragmentCount = 0; foreignProjectFragmentCount = 0
+      canvasBounds = @(220,34,1200,900)
     }
   }
   Invoke-MultiCase "unfiltered ordinary overview roster exactly two owners and cards" {
     Assert-MultiCase (Test-MultiProjectObservedRoster "overview" (New-MultiRosterProjection) $rosterOwners $null 4242) `
-      "literal two-owner/two-card whole roster rejected"
-    return "Functional whole scoped roster with literal provider IDs, not a live app claim"
+      "literal two-owner/two-node plus two-summary whole roster rejected"
+    return "Historical two-card case counts NODE cards: complete owned canvas roster is four (two nodes plus two summaries); no live app claim"
   }
   Invoke-MultiCase "project roster retains two owners and exactly one selected project card" {
     $projection = New-MultiRosterProjection
@@ -222,6 +261,43 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       Assert-MultiCase (-not (Test-MultiProjectObservedRoster "overview" $projection $rosterOwners $null 4242)) `
         "whitelisting hid actual extra/duplicate/foreign roster fragments: $mutation"
       return "Actual whole-roster predicate rejected $mutation"
+    }
+  }
+  Invoke-MultiCase "source summary classification keeps full four distinct from two nodes" {
+    $expected = Get-MultiProjectExpectedCanvasRoster "overview" $rosterOwners $null
+    Assert-MultiCase ($expected.Count -eq 4 -and @($expected | Where-Object { $_.classification -ceq "node" }).Count -eq 2 -and
+      @($expected | Where-Object { $_.classification -ceq "source-summary" }).Count -eq 2) "source taxonomy collapsed total/loop count"
+    Assert-MultiCase ($expected[0].projectPath -ceq "A" -and $expected[0].nodeID -eq $null -and
+      $expected[0].identityKind -ceq "overview-worktree-notice") "summary not explicitly owner/kind bound"
+    return "Full roster four, node two, per-owner summary two"
+  }
+  Invoke-MultiCase "source summary geometry is separate from node Open geometry" {
+    $geometry = Get-MultiProjectLaneGeometry @(228,85,1036,780) @(270,169,490,255)
+    Assert-MultiCase (($geometry.summary -join ",") -ceq "586,133,872,153" -and
+      ($geometry.open -join ",") -ceq "880,133,936,153") "actual-canvas source summary/Open rectangles differ"
+    return "Derived from actual NODE bounds and canvas; not summary-as-node geometry"
+  }
+  foreach ($mutation in @("two-nodes-unknown", "unknown-summary", "duplicate-summary", "wrong-summary-owner",
+      "wrong-summary-pid", "wrong-summary-name", "wrong-summary-bounds", "summary-as-node-bounds", "hidden-chrome")) {
+    Invoke-MultiCase ("classified roster rejects " + $mutation) -Negative {
+      $projection = New-MultiRosterProjection
+      switch ($mutation) {
+        "two-nodes-unknown" {
+          $projection.cards = @($projection.cards[1], $projection.cards[3],
+            [ordered]@{ automationId = "canvas-card-1999999999999999999"; name = "Unknown loop"; processId = 4242; bounds = @(508,118,728,204) })
+        }
+        "unknown-summary" { $projection.cards[0].automationId = "canvas-card-1999999999999999999" }
+        "duplicate-summary" { $projection.cards += $projection.cards[0] }
+        "wrong-summary-owner" { $projection.cards[0].automationId = "canvas-card-1294901732613186017" }
+        "wrong-summary-pid" { $projection.cards[0].processId = 7777 }
+        "wrong-summary-name" { $projection.cards[0].name = "Last inspected" }
+        "wrong-summary-bounds" { $projection.cards[0].bounds = @(750,278,1036,298) }
+        "summary-as-node-bounds" { $projection.cards[1].bounds = $projection.cards[0].bounds }
+        "hidden-chrome" { $projection.cards = @($projection.cards[1], $projection.cards[3]) }
+      }
+      Assert-MultiCase (-not (Test-MultiProjectObservedRoster "overview" $projection $rosterOwners $null 4242)) `
+        "source taxonomy ignored unknown/duplicate/wrong-bound/hidden chrome: $mutation"
+      return "Actual classified complete-roster predicate rejected $mutation"
     }
   }
   Invoke-MultiCase "literal lane geometry and DPI scaling" {
@@ -1843,6 +1919,11 @@ Start-Sleep -Seconds 60
       "totalObservedCardCount", "totalObservedProjectRowCount", "expectedMatchedOwners", "unexpectedCardIds", "unexpectedProjectIds",
       "foreignProjectFragmentCount", "static Graph destination is not an ordinary project row")) {
     if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: unfiltered multi-project observer roster lacks $required" }
+  }
+  foreach ($required in @("Get-MultiProjectExpectedCanvasRoster", "expectedNodeCardCount", "expectedSourceSummaryCount",
+      "sourceSummaryCount", "canvasFragmentClasses", "overview-worktree-notice", "source-summary",
+      "workspace navigation was not requested", 'Get-MultiProjectLaneGeometry $overview.canvasBounds $row.card.bounds')) {
+    if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: explicit complete overview taxonomy lacks $required" }
   }
   foreach ($required in @("function Complete-MultiProjectCapture", "function Wait-MultiProjectCapture",
       "function Initialize-MultiProjectProcessJob", "StandaloneProcessJob", "rootStartUtcTicks", "targetStartUtcTicks",
