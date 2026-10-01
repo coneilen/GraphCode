@@ -41,8 +41,14 @@ either outcome. Only the existing parity criteria can promote a row here.
 branches and evidence. Neither is polish, completed work, or automatically a
 preview gate. The [release plan's deferred-provider section](windows-preview-release-plan.md#provider-work-deferred-for-preview-prioritization)
 records the source heads, evidence limits and resume conditions. Prioritize the
-installed production-daemon/one-backend core flight; resume provider work when
-that flight demonstrates a dependency or the user explicitly reprioritizes it.
+installed production-daemon/one-backend core flight. The pause is a priority
+reset rather than a permanent prohibition: resume a bounded existing-owner
+provider chunk when the audited early-release ranking, an actual core
+reproduction, or the lack of credible owned client qualification establishes
+its value. The current audit still keeps both branches paused behind ordinary
+startup/onboarding, readable real-backend input/output, persisted reopen, and
+safe exit because no installed GraphCode reproduction establishes either
+provider dependency.
 This changes delivery priority only: all row names, statuses and runtime evidence
 below are unchanged, and exposed unsafe behavior is not waived.
 
