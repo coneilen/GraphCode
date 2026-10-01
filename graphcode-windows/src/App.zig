@@ -1024,6 +1024,16 @@ pub const App = struct {
     }
 
     fn onFrameWithAccessibilityPublish(self: *App, frame: []const u8, publish: anytype) void {
+        self.onFrameWithEffects(frame, rebindWorkspace, refreshWorkspace, publish);
+    }
+
+    fn onFrameWithEffects(
+        self: *App,
+        frame: []const u8,
+        comptime rebind: fn (*App, []const u8) void,
+        comptime refresh: fn (*App) void,
+        publish: anytype,
+    ) void {
         var incoming_project_path: ?[]u8 = null;
         defer if (incoming_project_path) |path| self.allocator.free(path);
         if (self.pending_rebind_path.len != 0 and Wire.eventKind(frame) == .graph_changed) {
@@ -1040,6 +1050,7 @@ pub const App = struct {
                 )) return;
             }
         }
+        const had_current_graph = self.model.currentGraph() != null;
         const event = self.model.updateFromFrame(frame) catch {
             self.setStatus("Malformed GraphcodeKit event");
             return;
@@ -1108,16 +1119,16 @@ pub const App = struct {
                             if (self.pending_previous_subscription.len != 0) self.allocator.free(self.pending_previous_subscription);
                             self.pending_previous_subscription = self.allocator.dupe(u8, graph.project.path) catch &.{};
                         }
-                        self.rebindWorkspace(graph.project.path);
+                        rebind(self, graph.project.path);
                         if (queued_v1) self.sendPendingOpen();
                     } else if (self.pending_rebind_path.len == 0) {
-                        self.rebindWorkspace(graph.project.path);
+                        rebind(self, graph.project.path);
                     }
                     if (self.canvas.selected_edge) |edge| {
                         if (edge >= graph.edges.items.len) self.canvas.selected_edge = null;
                     }
                     self.remapSelection();
-                    self.rebindWorkspace(graph.project.path);
+                    rebind(self, graph.project.path);
                     self.clampSidebarScroll();
                     if (self.worktree_inspection) |inspection| {
                         if (self.model.graph) |current_graph| {
@@ -1136,11 +1147,11 @@ pub const App = struct {
                             }
                         }
                     }
-                    if (self.pending_rebind_path.len == 0) {
+                    if (!had_current_graph and self.pending_rebind_path.len == 0) {
                         if (self.model.graph) |current_graph| self.queueProject(current_graph.project.path);
                     }
                     self.clampSidebarScroll();
-                    self.refreshWorkspace();
+                    refresh(self);
                 }
             },
             .quick_chats, .quick_chat_changed, .quick_chat_deleted, .quick_chat_activity => {
@@ -1223,10 +1234,14 @@ pub const App = struct {
     }
 
     pub fn openProject(self: *App, path: []const u8) void {
+        self.openProjectWithLayout(path, layoutWorkspace);
+    }
+
+    fn openProjectWithLayout(self: *App, path: []const u8, comptime layout: fn (*App) void) void {
         if (path.len == 0) return;
         self.surface = .project;
         self.workspace_controls.panel_visible = false;
-        self.layoutWorkspace();
+        layout(self);
         const previous = if (self.pending_rebind_path.len != 0)
             self.allocator.dupe(u8, self.pending_previous_subscription) catch {
                 self.setStatus("Unable to retain previous project subscription");
@@ -1332,10 +1347,14 @@ pub const App = struct {
     }
 
     fn flushPendingProject(self: *App) void {
+        self.flushPendingProjectWithLayout(layoutWorkspace);
+    }
+
+    fn flushPendingProjectWithLayout(self: *App, comptime layout: fn (*App) void) void {
         if (self.pending_project_path.len == 0 or self.client.connectionState() != .connected) return;
         const path = self.pending_project_path;
         self.pending_project_path = &.{};
-        self.openProject(path);
+        self.openProjectWithLayout(path, layout);
         self.allocator.free(path);
     }
 
@@ -9211,6 +9230,415 @@ test "graphChanged republishes renamed project card and sidebar accessibility na
     try std.testing.expectEqualStrings("Renamed loop", app.model.graphFor("A").?.nodes.items[0].title);
 }
 
+const GraphPublicationTest = struct {
+    var sink: DpiAccessibilitySink = .{ .expected = &.{}, .dpi_index = 0 };
+    var publications: usize = 0;
+    var layouts: usize = 0;
+    var layout_saw_project: bool = false;
+    var refreshes: usize = 0;
+    var rebinds: usize = 0;
+    var rebound_beta: bool = false;
+    var loop_bars: usize = 0;
+    var toolbars: usize = 0;
+    var selected_beta_projects: usize = 0;
+    var selected_beta_cards: usize = 0;
+
+    fn init(mode: Wire.ProtocolMode) !App {
+        const allocator = std.testing.allocator;
+        var app: App = .{
+            .allocator = allocator,
+            .client = try DaemonClient.initForTesting(allocator),
+            .daemon = undefined,
+            .model = GraphModel.Model.init(allocator),
+            .sidebar_state = Sidebar.State.init(allocator),
+            .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+            .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+        };
+        app.client.mode = mode;
+        app.client.state = .connected;
+        reset(&.{});
+        return app;
+    }
+
+    fn deinit(app: *App) void {
+        app.client.deinit();
+        app.model.deinit();
+        app.sidebar_state.deinit();
+        app.declared_entry_ids.deinit();
+        app.kept_worktree_paths.deinit();
+        for ([_][]const u8{
+            app.selected_node_id,    app.selected_edge_project_path, app.selected_edge_id,
+            app.last_project_opened, app.accepted_subscription,      app.pending_project_path,
+            app.pending_rebind_path, app.pending_sent_path,          app.pending_previous_subscription,
+            app.status_override,     app.ingress_error,
+        }) |value| if (value.len != 0) app.allocator.free(value);
+    }
+
+    fn frame(app: *App, path: []const u8, title_text: []const u8) ![]u8 {
+        return std.fmt.allocPrint(app.allocator, "{{\"version\":{d},\"kind\":\"event\",\"sequence\":3,\"event\":{{\"graphChanged\":{{\"id\":\"{s}\",\"project\":{{\"path\":\"{s}\",\"name\":\"{s}\"}},\"nodes\":[{{\"id\":\"other\",\"title\":\"Other\",\"state\":\"idle\"}},{{\"id\":\"loop\",\"title\":\"{s}\",\"state\":\"running\",\"presence\":{{\"presence\":\"awaitingInput\",\"confidence\":\"reported\"}}}}],\"edges\":[]}}}}}}", .{ @as(u8, if (app.client.mode == .v1) 1 else 2), path, path, if (std.mem.eql(u8, path, "A")) "Alpha" else "Beta", title_text });
+    }
+
+    fn seed(app: *App) !void {
+        for ([_][]const u8{ "A", "B" }) |path| {
+            const initial = try frame(app, path, if (std.mem.eql(u8, path, "A")) "Alpha loop" else "Beta loop");
+            defer app.allocator.free(initial);
+            _ = try app.model.updateFromFrame(initial);
+        }
+        try std.testing.expect(app.selectProject("B"));
+        try std.testing.expect(app.selectNodeIndex(1));
+        app.last_project_opened = try app.allocator.dupe(u8, "A");
+        app.accepted_subscription = try app.allocator.dupe(u8, "A");
+        app.client.subscription_path = try app.allocator.dupe(u8, "A");
+    }
+
+    fn reset(expected: []const DpiExpectedElement) void {
+        sink = .{ .expected = expected, .dpi_index = 0 };
+        publications = 0;
+        layouts = 0;
+        layout_saw_project = false;
+        refreshes = 0;
+        rebinds = 0;
+        rebound_beta = false;
+        loop_bars = 0;
+        toolbars = 0;
+        selected_beta_projects = 0;
+        selected_beta_cards = 0;
+    }
+
+    fn rebind(_: *App, path: []const u8) void {
+        rebinds += 1;
+        rebound_beta = std.mem.eql(u8, path, "B");
+    }
+
+    fn refresh(_: *App) void {
+        refreshes += 1;
+    }
+
+    fn layout(app: *App) void {
+        layouts += 1;
+        layout_saw_project = app.surface == .project and !app.workspace_controls.panel_visible;
+    }
+
+    fn publish(app: *App) void {
+        publications += 1;
+        app.syncAccessibilityTo(@This(), .{ .left = 0, .top = 0, .right = 1200, .bottom = 780 });
+    }
+
+    fn syncCanvasBounds(bounds: c.RECT) void {
+        sink.syncCanvasBounds(bounds);
+    }
+
+    fn syncElements(_: []const u8, elements: []const Accessibility.DynamicElement, policy: WorktreeStatus.Policy) void {
+        loop_bars = 0;
+        toolbars = 0;
+        selected_beta_projects = 0;
+        selected_beta_cards = 0;
+        for (elements) |element| {
+            if (std.mem.eql(u8, element.identity, "workspace-loop-bar:loop")) loop_bars += 1;
+            if (std.mem.eql(u8, element.identity, "workspace-toolbar:B")) toolbars += 1;
+            if (std.mem.eql(u8, element.identity, "open-project:B") and element.selected) selected_beta_projects += 1;
+            if ((std.mem.eql(u8, element.identity, "project-card:B:loop") or
+                std.mem.eql(u8, element.identity, "overview-card:B:loop")) and element.selected) selected_beta_cards += 1;
+        }
+        sink.syncElements("", elements, policy);
+    }
+
+    fn receive(app: *App, path: []const u8, title_text: []const u8) !void {
+        const publication = try frame(app, path, title_text);
+        defer app.allocator.free(publication);
+        app.onFrameWithEffects(publication, rebind, refresh, publish);
+    }
+
+    fn takeOpen(app: *App, path: []const u8) !void {
+        try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+        const expected = try Wire.commandOpenProject(app.allocator, path);
+        defer app.allocator.free(expected);
+        const index = app.client.outbound_head;
+        try std.testing.expectEqualStrings(expected, app.client.outbound[index]);
+        try std.testing.expectEqualDeep(app.pending_open_request_id, app.client.outbound_request_ids[index]);
+        app.allocator.free(app.client.outbound[index]);
+        app.client.outbound_request_ids[index] = null;
+        app.client.outbound_head = (index + 1) % app.client.outbound.len;
+        app.client.outbound_count = 0;
+    }
+
+    fn expectPublished() !void {
+        try std.testing.expect(sink.checked);
+        if (sink.failure) |err| return err;
+    }
+};
+
+fn expectSettledGraphPublication(surface: GraphCanvas.Surface, owner: []const u8) !void {
+    const F = GraphPublicationTest;
+    var app = try F.init(.v2);
+    defer F.deinit(&app);
+    try F.seed(&app);
+    app.surface = surface;
+    app.workspace_controls.panel_visible = surface == .workspace;
+    var workspace: TerminalWorkspace.Workspace = .{
+        .parent = null,
+        .allocator = app.allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = app.allocator },
+        .layout = try @import("WorkspaceLayout.zig").Layout.init(app.allocator, "B"),
+        .layout_path = &.{},
+        .project_key = &.{},
+    };
+    defer workspace.layout.deinit();
+    try workspace.layout.addTab("loop", true);
+    app.workspace = &workspace;
+    F.publish(&app);
+    try F.expectPublished();
+    const original_canvas = F.sink.canvas.?;
+    try std.testing.expectEqual(@as(usize, if (surface == .workspace) 1 else 0), F.loop_bars);
+    try std.testing.expectEqual(@as(usize, if (surface == .workspace) 1 else 0), F.toolbars);
+
+    const alpha_title = if (std.mem.eql(u8, owner, "A")) "Alpha interleaved" else "Alpha loop";
+    const beta_title = if (std.mem.eql(u8, owner, "B")) "Beta refreshed" else "Beta loop";
+    const expected = [_]DpiExpectedElement{
+        .{ .identity = "loop:A:loop", .present = true, .name = alpha_title },
+        .{ .identity = "loop:B:loop", .present = true, .name = beta_title },
+        .{ .identity = if (surface == .overview) "overview-card:B:loop" else "project-card:B:loop", .present = true, .name = beta_title },
+        .{ .identity = "workspace-toolbar:B", .present = surface == .workspace, .name = "Beta", .bounds = if (surface == .workspace) .{ .{ 8, 1, 280, 33 }, .{ 8, 1, 280, 33 }, .{ 8, 1, 280, 33 } } else null },
+        .{ .identity = "workspace-loop-bar:loop", .present = surface == .workspace, .name = "Selected loop workspace", .bounds = if (surface == .workspace) .{ .{ 220, 34, 928, 80 }, .{ 220, 34, 928, 80 }, .{ 220, 34, 928, 80 } } else null },
+    };
+    F.reset(&expected);
+    const requests = app.client.next_request;
+    try F.receive(&app, owner, if (std.mem.eql(u8, owner, "A")) alpha_title else beta_title);
+    const automatically_queued = app.pending_project_path.len;
+    // Cross the real deferred-open boundary without mounting a window or terminal.
+    app.flushPendingProjectWithLayout(F.layout);
+    F.publish(&app);
+
+    try std.testing.expectEqual(surface, app.surface);
+    try std.testing.expectEqual(surface == .workspace, app.workspace_controls.panel_visible);
+    try std.testing.expectEqualStrings("B", app.model.currentGraph().?.project.path);
+    try std.testing.expectEqualStrings("B", app.model.selected_project_path.?);
+    try std.testing.expectEqualStrings("loop", app.model.selected().?.id);
+    try std.testing.expectEqualStrings("loop", app.selected_node_id);
+    try std.testing.expectEqual(@as(?usize, 1), app.model.selectedIndex());
+    try std.testing.expectEqualStrings(alpha_title, app.model.graphFor("A").?.nodes.items[1].title);
+    try std.testing.expectEqualStrings(beta_title, app.model.graphFor("B").?.nodes.items[1].title);
+    var updated_attention = false;
+    for (app.model.attention_entries.items) |entry| {
+        if (std.mem.eql(u8, entry.project_path, owner) and std.mem.eql(u8, entry.node.title, if (std.mem.eql(u8, owner, "A")) alpha_title else beta_title)) updated_attention = true;
+    }
+    try std.testing.expect(updated_attention);
+    try std.testing.expectEqual(@as(usize, 0), automatically_queued);
+    try std.testing.expectEqual(@as(usize, 0), app.pending_rebind_path.len);
+    try std.testing.expectEqual(@as(u64, 0), app.open_generation);
+    try std.testing.expectEqual(requests, app.client.next_request);
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    try std.testing.expectEqualStrings("A", app.last_project_opened);
+    try std.testing.expectEqualStrings("A", app.client.subscription_path);
+    try std.testing.expectEqual(@as(usize, 0), F.layouts);
+    try std.testing.expectEqual(@as(usize, 1), F.refreshes);
+    try std.testing.expect(F.rebinds > 0 and F.rebound_beta);
+    try std.testing.expectEqual(@as(usize, 2), F.publications);
+    try F.expectPublished();
+    try std.testing.expectEqualDeep(original_canvas, F.sink.canvas.?);
+    try std.testing.expectEqual(@as(usize, if (surface == .workspace) 1 else 0), F.loop_bars);
+    try std.testing.expectEqual(@as(usize, if (surface == .workspace) 1 else 0), F.toolbars);
+    try std.testing.expectEqual(@as(usize, 1), F.selected_beta_projects);
+    try std.testing.expectEqual(@as(usize, if (surface == .overview) 0 else 1), F.selected_beta_cards);
+}
+
+test "graph publication interleaved Alpha refresh preserves cached Beta workspace across flush" {
+    try expectSettledGraphPublication(.workspace, "A");
+}
+
+test "graph publication same-owner refresh preserves workspace across flush" {
+    try expectSettledGraphPublication(.workspace, "B");
+}
+
+test "graph publication settled refresh preserves overview across flush" {
+    try expectSettledGraphPublication(.overview, "A");
+}
+
+test "graph publication first populated graph queues bootstrap once and flushes only when connected" {
+    const F = GraphPublicationTest;
+    var app = try F.init(.v2);
+    defer F.deinit(&app);
+    try F.receive(&app, "A", "Alpha loop");
+    try std.testing.expectEqualStrings("A", app.pending_project_path);
+    try std.testing.expectEqual(@as(u64, 0), app.open_generation);
+    app.client.state = .disconnected;
+    app.flushPendingProjectWithLayout(F.layout);
+    try std.testing.expectEqualStrings("A", app.pending_project_path);
+    try std.testing.expectEqual(@as(usize, 0), F.layouts);
+    app.client.state = .connected;
+    app.flushPendingProjectWithLayout(F.layout);
+    try std.testing.expectEqualStrings("A", app.pending_rebind_path);
+    try std.testing.expectEqual(@as(u64, 1), app.open_generation);
+    try std.testing.expectEqual(@as(usize, 1), F.layouts);
+    try std.testing.expect(F.layout_saw_project);
+    app.client.state = .connected;
+    app.sendPendingOpen();
+    try std.testing.expect(app.pending_open_sent);
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+    try F.receive(&app, "A", "Alpha accepted");
+    try F.receive(&app, "A", "Alpha settled");
+    app.flushPendingProjectWithLayout(F.layout);
+    try std.testing.expectEqual(@as(usize, 0), app.pending_project_path.len);
+    try std.testing.expectEqual(@as(usize, 0), app.pending_rebind_path.len);
+    try std.testing.expectEqual(@as(u64, 1), app.open_generation);
+    try std.testing.expectEqualStrings("A", app.accepted_subscription);
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+    try F.expectPublished();
+}
+
+test "graph publication explicit open preserves v1 and v2 acceptance rejection and subscriptions" {
+    const F = GraphPublicationTest;
+    for ([_]Wire.ProtocolMode{ .v1, .v2 }) |mode| {
+        var app = try F.init(mode);
+        defer F.deinit(&app);
+        try F.seed(&app);
+        app.surface = .workspace;
+        app.workspace_controls.panel_visible = true;
+        app.openProjectWithLayout("B", F.layout);
+        try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+        try std.testing.expect(!app.workspace_controls.panel_visible);
+        try std.testing.expectEqual(@as(usize, 1), F.layouts);
+        try std.testing.expectEqualStrings("A", app.pending_previous_subscription);
+        app.client.state = .connected;
+        app.sendPendingOpen();
+        try std.testing.expect(app.pending_open_sent);
+        try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+        const request = app.pending_open_request_id.?;
+        try F.takeOpen(&app, "B");
+        try F.receive(&app, "C", "Foreign");
+        try std.testing.expect(app.model.graphFor("C") == null);
+        try std.testing.expectEqual(@as(usize, 0), F.publications);
+        try F.receive(&app, "A", "Alpha while opening");
+        try std.testing.expectEqualStrings("B", app.pending_rebind_path);
+        try std.testing.expectEqualStrings("Alpha while opening", app.model.graphFor("A").?.nodes.items[1].title);
+        if (mode == .v2) {
+            app.onFrameWithEffects(
+                \\{"version":2,"kind":"response","requestID":"ffffffff-ffff-4fff-8fff-ffffffffffff","event":{"errorOccurred":"stale rejection"}}
+            , F.rebind, F.refresh, F.publish);
+            try std.testing.expectEqualStrings("B", app.pending_rebind_path);
+            try std.testing.expectEqual(@as(usize, 0), app.ingress_error.len);
+        }
+        const rejection = if (mode == .v1)
+            try app.allocator.dupe(u8,
+                \\{"version":1,"kind":"event","event":{"errorOccurred":"B rejected"}}
+            )
+        else
+            try std.fmt.allocPrint(app.allocator, "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"errorOccurred\":\"B rejected\"}}}}", .{request});
+        defer app.allocator.free(rejection);
+        app.onFrameWithEffects(rejection, F.rebind, F.refresh, F.publish);
+        try std.testing.expectEqual(@as(usize, 0), app.pending_rebind_path.len);
+        try std.testing.expect(!app.pending_open_sent and !app.open_project_pending);
+        try std.testing.expectEqualStrings("A", app.client.subscription_path);
+        try std.testing.expectEqualStrings("A", app.last_project_opened);
+        try std.testing.expectEqualStrings("A", app.accepted_subscription);
+        try std.testing.expectEqualStrings("B rejected", app.ingress_error);
+
+        app.openProjectWithLayout("B", F.layout);
+        app.client.state = .connected;
+        app.sendPendingOpen();
+        try std.testing.expect(app.pending_open_sent);
+        try F.takeOpen(&app, "B");
+        try F.receive(&app, "B", "Beta accepted");
+        try std.testing.expectEqualStrings("B", app.model.currentGraph().?.project.path);
+        try std.testing.expectEqualStrings("B", app.client.subscription_path);
+        try std.testing.expectEqualStrings("B", app.last_project_opened);
+        try std.testing.expectEqualStrings("B", app.accepted_subscription);
+        try std.testing.expectEqual(@as(usize, 0), app.pending_rebind_path.len);
+        try std.testing.expectEqual(@as(usize, 0), app.pending_project_path.len);
+        try std.testing.expectEqual(@as(usize, 0), app.ingress_error.len);
+        try std.testing.expect(!app.pending_open_sent and !app.open_project_pending);
+        try std.testing.expect(app.pending_open_request_id == null);
+        try F.expectPublished();
+    }
+}
+
+test "graph publication v1 queued opens accept the sent owner before the newest intent" {
+    const F = GraphPublicationTest;
+    var app = try F.init(.v1);
+    defer F.deinit(&app);
+    try F.seed(&app);
+    app.openProjectWithLayout("B", F.layout);
+    app.client.state = .connected;
+    app.sendPendingOpen();
+    try std.testing.expectEqualStrings("B", app.pending_sent_path);
+    try F.takeOpen(&app, "B");
+    app.openProjectWithLayout("C", F.layout);
+    try std.testing.expectEqualStrings("B", app.pending_sent_path);
+    try std.testing.expectEqualStrings("C", app.pending_rebind_path);
+    try F.receive(&app, "C", "Too early");
+    try std.testing.expect(app.model.graphFor("C") == null);
+    try F.receive(&app, "B", "Beta accepted");
+    try std.testing.expectEqualStrings("B", app.accepted_subscription);
+    try std.testing.expectEqualStrings("B", app.pending_previous_subscription);
+    try std.testing.expectEqualStrings("C", app.pending_rebind_path);
+    try std.testing.expect(app.pending_open_sent and !app.open_project_pending);
+    try std.testing.expectEqualStrings("C", app.pending_sent_path);
+    try F.takeOpen(&app, "C");
+    try F.receive(&app, "C", "Newest accepted");
+    try std.testing.expectEqualStrings("C", app.model.currentGraph().?.project.path);
+    try std.testing.expectEqualStrings("C", app.accepted_subscription);
+    try std.testing.expectEqualStrings("C", app.client.subscription_path);
+    try std.testing.expectEqual(@as(usize, 0), app.pending_rebind_path.len);
+    try std.testing.expectEqual(@as(usize, 0), app.pending_project_path.len);
+    try std.testing.expectEqual(@as(u64, 3), app.client.next_request);
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    try F.expectPublished();
+}
+
+test "graph publication v2 superseded opens reject stale graphs and errors without losing latest intent" {
+    const F = GraphPublicationTest;
+    var app = try F.init(.v2);
+    defer F.deinit(&app);
+    try F.seed(&app);
+    app.openProjectWithLayout("B", F.layout);
+    app.client.state = .connected;
+    app.sendPendingOpen();
+    const old_request = app.pending_open_request_id.?;
+    try F.takeOpen(&app, "B");
+    app.openProjectWithLayout("C", F.layout);
+    app.client.state = .connected;
+    app.sendPendingOpen();
+    const latest_request = app.pending_open_request_id.?;
+    try F.takeOpen(&app, "C");
+    try F.receive(&app, "B", "Stale Beta");
+    try std.testing.expectEqualStrings("Beta loop", app.model.graphFor("B").?.nodes.items[1].title);
+    const stale_error = try std.fmt.allocPrint(app.allocator, "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"errorOccurred\":\"old rejection\"}}}}", .{old_request});
+    defer app.allocator.free(stale_error);
+    app.onFrameWithEffects(stale_error, F.rebind, F.refresh, F.publish);
+    try std.testing.expectEqualStrings("C", app.pending_rebind_path);
+    try std.testing.expectEqualDeep(latest_request, app.pending_open_request_id.?);
+    try std.testing.expectEqual(@as(usize, 0), F.publications);
+    try std.testing.expectEqual(@as(usize, 0), app.ingress_error.len);
+    try F.receive(&app, "C", "Latest accepted");
+    try std.testing.expectEqualStrings("C", app.model.currentGraph().?.project.path);
+    try std.testing.expectEqualStrings("C", app.accepted_subscription);
+    try std.testing.expectEqual(@as(usize, 0), app.pending_rebind_path.len);
+    try std.testing.expectEqual(@as(usize, 0), app.pending_project_path.len);
+    try F.expectPublished();
+}
+
+test "graph publication null graph and recent-project bootstrap preserve existing queued intent" {
+    const F = GraphPublicationTest;
+    var app = try F.init(.v2);
+    defer F.deinit(&app);
+    app.onFrameWithEffects(
+        \\{"version":2,"kind":"event","event":{"graphChanged":null}}
+    , F.rebind, F.refresh, F.publish);
+    try std.testing.expect(app.model.currentGraph() == null);
+    try std.testing.expectEqual(@as(usize, 0), app.pending_project_path.len);
+    app.onFrameWithEffects(
+        \\{"version":2,"kind":"event","event":{"recentProjectsListed":[{"path":"A","name":"Alpha"}]}}
+    , F.rebind, F.refresh, F.publish);
+    try std.testing.expectEqualStrings("A", app.pending_project_path);
+    try F.receive(&app, "A", "Alpha loop");
+    try std.testing.expectEqualStrings("A", app.pending_project_path);
+    app.flushPendingProjectWithLayout(F.layout);
+    try std.testing.expectEqual(@as(u64, 1), app.open_generation);
+    try std.testing.expectEqualStrings("A", app.pending_rebind_path);
+    try F.expectPublished();
+}
 fn noticeTestApp() !App {
     const allocator = std.testing.allocator;
     var app: App = .{
