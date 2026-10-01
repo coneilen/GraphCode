@@ -113,8 +113,8 @@ production-agent experience; many observations use deterministic fixtures.
   rows remain unchanged. The separate
   [rename/refresh qualification #547](https://github.com/scgopi/GraphCode/pull/547)
   has no accepted new native GREEN at this snapshot. Its latest reported
-  driver run passed blank validation but later read `lphaRenamed` instead of
-  `AlphaRenamed`, then stalled during a subsequent clear/text step despite
+  driver run passed blank validation but later read `lpha renamed` instead of
+  `Alpha renamed`, then stalled during a subsequent clear/text step despite
   reported enqueue counts. The driver lacks a clear-completion fence and is
   being fixed separately. This is not an observed production Win32 cause for
   the lost leading character. Reproduce against the production path or use an
@@ -124,11 +124,12 @@ production-agent experience; many observations use deterministic fixtures.
 - **Provider:** [coneilen/winghostty#10](https://github.com/coneilen/winghostty/pull/10)
   has a queued interactive check with no available runner at this snapshot.
   That is a provider evidence/availability gap, not proof that every current
-  terminal is unusable. The proposed hosted Windows Server x64/Mesa CPU real-GL
-  route must pass unchanged rendering/GUI assertions and its desktop capability
-  canary; it would still not prove Windows 11 client/hardware behavior. No runner
-  provisioning or workaround is assumed. No GraphCode repin follows without
-  separate validation and approval.
+  terminal is unusable. The hosted Windows Server x64/Mesa CPU real-GL route is
+  actively implemented (candidate `cc0de7a9`), but not yet qualified. It must
+  pass unchanged rendering/GUI assertions and its desktop capability canary;
+  it would still not prove Windows 11 client/hardware behavior. No runner
+  provisioning or successful qualification is assumed. No GraphCode repin
+  follows without separate validation and approval.
 - **Modal and visual evidence:** bounded historical 96-DPI production drawing
   captures exist. There are zero accepted matched current Windows/macOS
   reference pairs, not zero Windows captures of any kind. The separate modal
@@ -171,10 +172,10 @@ observation. Notes distinguish the parts of mixed rows.
 | Edge creation sheet | F + O + E | Qualify exposed form; defer advanced graph scope | Real native input/validation/dispatch ran with a protocol stub; real-daemon persistence was separately headless. Qualify cancellation, exact endpoint/configuration preservation and visible result on the packaged path if offered. Defer advanced transforms/cycles outside the profile only with safe refusal; no combined production-UI persistence proof yet. |
 | Custody child creation | O + F + E | Defer feature; guard exposed path | Owned-target queue tests cover unresolved parents and inherited backend, not native selection or production acceptance/persistence. Defer custody/report-back workflows. If reachable, cancellation/stale-scope/attachment handling must remain safe; template-backend and downstream-send failure residuals are functional, not polish. |
 | Edge editing | F + O + E | Qualify exposed editing; defer deeper scope | Stub-backed native edit/cancel and separate headless production persistence exist. Require exact unchanged ID/endpoints/runtime count, one intended change and no cancellation mutation on the package if exposed. Deeper wrappers remain refused; edge UIA and macOS-equivalent edit surface are absent, not cosmetic gaps. |
-| Node creation sheet | F + O + P + E | Qualify basic creation; defer advanced choices | Native type/validation/result evidence uses a stub, while production persistence is separately headless. Qualify typed exact input, scrolling, cancel and retained project context with the real package. Stale tile recap is a recorded functional feedback defect; lost UIA census needs attribution. Nondefault inspected branches, attachments/picker/paste/drop and templates can be deferred with safe boundaries; teaching-tile styling can follow. |
+| Node creation sheet | F + O + P + E | Qualify basic creation; defer advanced choices | Native type/validation/result evidence uses a stub, while production persistence is separately headless. Qualify typed exact input, scrolling, cancel and retained project context with the real package. The recorded stale tile recap defect was fixed by [#543](https://github.com/scgopi/GraphCode/pull/543); lost UIA census still needs attribution. Nondefault inspected branches, attachments/picker/paste/drop and templates can be deferred with safe boundaries; teaching-tile styling can follow. |
 | Node update/rename | F + O + E | Qualify rename and basic edits | Require exact title propagation to graph/sidebar with stable ID, open/cancel/submit Edit Details, clear-versus-unchanged semantics and reload persistence. #549 and pending #547 do not substitute for that combined flight. Diagnose driver clear/focus sequencing separately from product input; defer nonessential typed retypes, not required basic edits. |
 | Canvas context menu | F + O + P + E | Qualify core actions and safety | Live menus and one edge edit/cancel were observed, not every invoked outcome. Open/Rename/Edit/Stop and named destructive cancellation need the packaged flight. Defer child/import/export/promotion flows safely; exact menu presentation is polish only after reachable commands target the right object. |
-| Sketch promotion | O + F + E | Defer feature; guard exposed path | Queue/helper, hidden-menu and headless daemon acceptance exist, but native promotion with an active backend/session has not run. Defer Goal/Turn/Timed conversion. If exposed, verify or guard identity/session/history preservation and cancellation; synthetic session markers do not establish real continuity. |
+| Sketch promotion | O + F + E | Defer feature; guard exposed path | Queue/helper and headless daemon acceptance exist; [#542](https://github.com/scgopi/GraphCode/pull/542) observed hosted stub-backed native Goal/Turn/Timed promotions. Active real-backend/session continuity remains unqualified, so the row stays Partial. Defer conversion outside the preview scope; if exposed, verify or guard identity/session/history preservation and cancellation. Synthetic session markers do not establish real continuity. |
 | Terminal VT state and rendering | F + O + P + E | Core release gate | Witness actual agent output, Unicode/graphemes it emits, wrapping, resize negotiation, cursor/input and liveness with visible pixels matching current state; unsupported-cell rejection/old pixels is not success. Parser memory tests and surface-size helpers cannot prove this. Extended scrollback/selection features may defer only if the CLI remains usable; font smoothing is polish only after readable correct rendering. |
 | Mounted background tabs | F + O + E | Qualify exposed continuity | Corrected selectors exclude close buttons, but no new complete live tab/backend round trip is proven. If tabs/splits are offered, switch back to the same session/output/focus without unintended close or input delivery. Defer extra topology automation, not continuity of an exposed control. |
 | Show in Graph | F + P + E | Qualify round trip | Focused live evidence supports action/identity return, not a new complete gate or native Loop-menu route. Verify the production terminal-to-card-to-same-loop transition and focus. Extra hints are polish; wrong destination or stale provider binding is functional. |
