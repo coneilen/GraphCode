@@ -8,7 +8,7 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     foreach ($definition in $ast.FindAll({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-          ($node.Name -like "*-MultiProject*" -or $node.Name -eq "ConvertTo-SketchCanonicalJson")
+          ($node.Name -like "*-MultiProject*" -or $node.Name -cin @("ConvertTo-SketchCanonicalJson", "Test-RetryableUiaError"))
       }, $true)) { . ([scriptblock]::Create($definition.Extent.Text)) }
   }
   $scratch = Join-Path ([IO.Path]::GetTempPath()) ("gc-mp-" + [guid]::NewGuid().ToString("N"))
@@ -54,6 +54,82 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
   function New-MultiControl {
     return [ordered]@{ token = $token; projectPath = $alpha; nodeID = $a; title = "Alpha interleaved"
       selection = [ordered]@{ projectPath = $beta; nodeID = $b; source = "synthetic-client" } }
+  }
+  function New-MultiMetadataMock($processIdValue, $identity, $afterPid = $null, [switch] $Unavailable) {
+    $global:multiMetadataAccessOrder = [Collections.Generic.List[string]]::new()
+    $global:multiMetadataPidReads = 0
+    $global:multiMetadataPidBefore = $processIdValue
+    $global:multiMetadataPidAfter = if ($null -eq $afterPid) { $processIdValue } else { $afterPid }
+    $global:multiMetadataId = $identity
+    $global:multiMetadataUnavailable = [bool]$Unavailable
+    $current = New-Object PSObject
+    $current | Add-Member ScriptProperty ProcessId {
+      $global:multiMetadataAccessOrder.Add("PID")
+      $global:multiMetadataPidReads++
+      if ($global:multiMetadataPidReads -eq 1) { return $global:multiMetadataPidBefore }
+      return $global:multiMetadataPidAfter
+    }
+    $current | Add-Member ScriptProperty AutomationId {
+      $global:multiMetadataAccessOrder.Add("ID")
+      if ($global:multiMetadataUnavailable) {
+        throw [Runtime.InteropServices.COMException]::new("controlled stale UIA metadata", [int]0x80040201)
+      }
+      return $global:multiMetadataId
+    }
+    $current | Add-Member ScriptProperty Name {
+      $global:multiMetadataAccessOrder.Add("FORBIDDEN_NAME")
+      throw "Foreign or unresolved Name must not be read"
+    }
+    return [pscustomobject]@{ Current = $current }
+  }
+  Invoke-MultiCase "guarded prefix handles null without pretending metadata is ready" {
+    Assert-MultiCase (-not (Test-MultiProjectAutomationPrefix $null "workspace-loop-bar-") -and
+      -not (Test-MultiProjectAutomationPrefix 7 "canvas-card-")) "guarded prefix coerced unavailable/invalid IDs"
+    return "Null and wrong typed IDs are not prefix matches; metadata readiness is separately mandatory"
+  }
+  Invoke-MultiCase "owned available semantic metadata reads PID first and again" {
+    $mock = New-MultiMetadataMock 4242 "canvas-card-1983941480823304696"
+    $metadata = Get-MultiProjectFragmentMetadata $mock 4242
+    Assert-MultiCase ($metadata.observationReady -and $metadata.ownership -ceq "owned" -and
+      $metadata.automationID.state -ceq "available" -and $metadata.family -ceq "canvas-fragment" -and
+      ($global:multiMetadataAccessOrder -join "|") -ceq "PID|ID|PID") "PID-first/stable semantic metadata shape differs"
+    return "Exact owned semantic ID, stable PID; no Name access"
+  }
+  Invoke-MultiCase "owned source-supported static chrome is classified explicitly" {
+    $metadata = Get-MultiProjectFragmentMetadata (New-MultiMetadataMock 4242 "actual-size") 4242
+    Assert-MultiCase ($metadata.observationReady -and $metadata.family -ceq "source-supported-chrome") "known static source chrome rejected"
+    return "Provider static Graph control, not semantic card"
+  }
+  foreach ($case in @(
+      @{ name = "null native candidate"; pid = 0; id = $null; after = 0; state = "unavailable"; owner = "unavailable" },
+      @{ name = "foreign null ID"; pid = 7777; id = $null; after = 7777; state = "unavailable"; owner = "foreign" },
+      @{ name = "empty owned ID"; pid = 4242; id = ""; after = 4242; state = "empty"; owner = "owned" },
+      @{ name = "invalid typed ID"; pid = 4242; id = 7; after = 4242; state = "invalid"; owner = "owned" },
+      @{ name = "unavailable stale ID"; pid = 4242; id = "unused"; after = 4242; state = "unavailable"; owner = "owned"; unavailable = $true },
+      @{ name = "changed ownership"; pid = 4242; id = "canvas-card-1983941480823304696"; after = 7777; state = "available"; owner = "changed" },
+      @{ name = "unknown native-boundary ID"; pid = 7777; id = "native-boundary"; after = 7777; state = "available"; owner = "foreign" }
+    )) {
+    Invoke-MultiCase ("metadata batch rejects " + $case.name) -Negative {
+      $unavailable = $case.ContainsKey("unavailable") -and $case.unavailable
+      $metadata = Get-MultiProjectFragmentMetadata (New-MultiMetadataMock $case.pid $case.id $case.after -Unavailable:$unavailable) 4242
+      Assert-MultiCase (-not $metadata.observationReady -and $metadata.automationID.state -ceq $case.state -and
+        $metadata.ownership -ceq $case.owner -and -not (Test-MultiProjectMetadataBatch @($metadata)) -and
+        -not ($global:multiMetadataAccessOrder -contains "FORBIDDEN_NAME") -and $metadata.proofLimit.Length -gt 0) `
+        "unresolved native/stale metadata silently dropped or foreign name read: $($case.name)"
+      return "Actual metadata readiness predicate rejects $($case.name); native semantic cause unestablished"
+    }
+  }
+  Invoke-MultiCase "foreign semantic fragment stays counted and fails strict roster" -Negative {
+    $metadata = Get-MultiProjectFragmentMetadata (New-MultiMetadataMock 7777 "canvas-card-1983941480823304696") 4242
+    Assert-MultiCase ($metadata.observationReady -and $metadata.ownership -ceq "foreign" -and
+      (Test-MultiProjectAutomationPrefix $metadata.automationID.value "canvas-card-") -and
+      -not ($global:multiMetadataAccessOrder -contains "FORBIDDEN_NAME")) "foreign semantic fragment lost before PID-only classification"
+    $actual = @([ordered]@{ automationId = $metadata.automationID.value; name = "Owned fixture placeholder"
+      processId = 7777; bounds = @(248,118,468,204) })
+    Assert-MultiCase (-not (Test-MultiProjectFragmentRoster $actual @([ordered]@{
+      automationId = "canvas-card-1983941480823304696"; name = "Owned fixture placeholder"
+    }) 4242)) "wrong PID semantic fragment accepted"
+    return "Foreign semantic PID contributes failure, not filtered Name/content"
   }
   Invoke-MultiCase "two exact positive owner publications" {
     $peer = Get-MultiProjectPeerSnapshot (New-MultiBaseline)
@@ -1924,6 +2000,17 @@ Start-Sleep -Seconds 60
       "sourceSummaryCount", "canvasFragmentClasses", "overview-worktree-notice", "source-summary",
       "workspace navigation was not requested", 'Get-MultiProjectLaneGeometry $overview.canvasBounds $row.card.bounds')) {
     if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: explicit complete overview taxonomy lacks $required" }
+  }
+  $metadataObserverAst = [Management.Automation.Language.Parser]::ParseInput($uiaLiveGateSource,[ref]$null,[ref]$null)
+  $metadataObserver = $metadataObserverAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq "Get-MultiProjectObservation"
+  },$true)
+  if (-not $metadataObserver -or $metadataObserver.Extent.Text.Contains(".StartsWith(") -or
+      -not $metadataObserver.Extent.Text.Contains("Test-MultiProjectMetadataBatch") -or
+      -not $metadataObserver.Extent.Text.Contains("unresolvedMetadataCount") -or
+      -not $uiaLiveGateSource.Contains("UIA_MULTIPROJECT_METADATA_REACQUIRE=")) {
+    throw "RED: new observer prefix/typed metadata boundary remains unguarded or silently omitted"
   }
   foreach ($required in @("function Complete-MultiProjectCapture", "function Wait-MultiProjectCapture",
       "function Initialize-MultiProjectProcessJob", "StandaloneProcessJob", "rootStartUtcTicks", "targetStartUtcTicks",

@@ -2386,9 +2386,76 @@ function Test-MultiProjectObservedSurface([string] $surface, [bool] $ownerNodesM
 function Get-MultiProjectElementEvidence($element, [int] $processId) {
   $current = $element.Current
   if ($current.ProcessId -ne $processId) { throw "MULTIPROJECT_PRIVACY: refusing another process's fragment names" }
+  $identity = $current.AutomationId
+  if ($identity -isnot [string] -or $identity.Length -eq 0) {
+    throw "MULTIPROJECT_METADATA: owned identity became unavailable before name capture"
+  }
   $rect = $current.BoundingRectangle
-  return [ordered]@{ automationId = [string]$current.AutomationId; name = [string]$current.Name
+  return [ordered]@{ automationId = $identity; name = [string]$current.Name
     processId = $current.ProcessId; bounds = @($rect.Left, $rect.Top, $rect.Right, $rect.Bottom) }
+}
+
+function Test-MultiProjectAutomationPrefix($value, [string] $prefix) {
+  return $value -is [string] -and $value.Length -gt 0 -and
+    $value.StartsWith($prefix, [StringComparison]::Ordinal)
+}
+
+function Read-MultiProjectMetadataProperty($element, [string] $property) {
+  try {
+    $value = $element.Current.$property
+    $state = if ($null -eq $value) { "unavailable" } elseif ($property -ceq "AutomationId") {
+      if ($value -isnot [string]) { "invalid" } elseif ($value.Length -eq 0) { "empty" } else { "available" }
+    } elseif (($value -is [int] -or $value -is [long]) -and $value -gt 0) { "available" } else { "invalid" }
+    return [ordered]@{ state = $state; value = $value; errorType = $null; hresult = $null }
+  } catch {
+    if (-not (Test-RetryableUiaError $_)) { throw }
+    $exception = if ($_.Exception.InnerException) { $_.Exception.InnerException } else { $_.Exception }
+    return [ordered]@{ state = "unavailable"; value = $null
+      errorType = $exception.GetType().FullName; hresult = $exception.HResult }
+  }
+}
+
+function Get-MultiProjectFragmentMetadata($element, [int] $expectedProcessId) {
+  $pidFirst = Read-MultiProjectMetadataProperty $element "ProcessId"
+  $identity = Read-MultiProjectMetadataProperty $element "AutomationId"
+  $pidAfter = Read-MultiProjectMetadataProperty $element "ProcessId"
+  $ownership = if ($pidFirst.state -cne "available" -or $pidAfter.state -cne "available") { "unavailable" }
+    elseif ($pidFirst.value -ne $pidAfter.value) { "changed" }
+    elseif ($pidFirst.value -eq $expectedProcessId) { "owned" } else { "foreign" }
+  $family = "unclassified"
+  if ($identity.state -ceq "available") {
+    if (Test-MultiProjectAutomationPrefix $identity.value "canvas-card-") { $family = "canvas-fragment" }
+    elseif (Test-MultiProjectAutomationPrefix $identity.value "open-project-") { $family = "project-fragment" }
+    elseif ((Test-MultiProjectAutomationPrefix $identity.value "workspace-loop-bar-") -or
+        (Test-MultiProjectAutomationPrefix $identity.value "workspace-toolbar-")) { $family = "workspace-marker" }
+    elseif ($ownership -ceq "owned") {
+      $staticIds = @("canvas-primary-action", "zoom-out", "actual-size", "zoom-in", "fit-canvas",
+        "overview-destination", "quick-chats-destination")
+      $chromePrefixes = @("sidebar-section-", "project-row-", "project-new-loop-", "project-disclosure-",
+        "quick-chats-header-", "quick-chat-new-", "quick-chats-disclosure-", "quick-chat-row-",
+        "header-attention-", "header-worktree-", "header-jump-", "header-toggle-panel-",
+        "workspace-show-graph-", "workspace-stop-", "workspace-toggle-panel-", "workspace-detail-sparkline-",
+        "workspace-detail-start-", "workspace-detail-usage-", "workspace-tab-", "workspace-tab-close-",
+        "workspace-new-tab-", "workspace-split-right-", "workspace-split-down-")
+      if ($staticIds -ccontains $identity.value -or @($chromePrefixes | Where-Object {
+          Test-MultiProjectAutomationPrefix $identity.value $_
+        }).Count -gt 0) { $family = "source-supported-chrome" }
+    }
+  }
+  $ready = $ownership -cin @("owned", "foreign") -and $identity.state -ceq "available" -and
+    $family -cne "unclassified"
+  return [ordered]@{
+    element = $element; firstPID = $pidFirst; finalPID = $pidAfter; automationID = $identity
+    ownership = $ownership; family = $family; observationReady = $ready
+    proofLimit = if ($ready) { $null } else {
+      "Identity/ownership unavailable or unclassified: no native-boundary cause or harmless non-fragment policy established; reacquire without command replay."
+    }
+  }
+}
+
+function Test-MultiProjectMetadataBatch($metadata) {
+  if ($metadata -isnot [array] -or $metadata.Count -le 0) { return $false }
+  return @($metadata | Where-Object { -not $_.observationReady }).Count -eq 0
 }
 
 function Get-MultiProjectLaneGeometry([double[]] $canvas, [double[]] $card) {
@@ -2735,21 +2802,26 @@ function Invoke-MultiProjectRenamePhase {
     $multiRoot = [System.Windows.Automation.AutomationElement]::FromHandle($multiWindow)
     $graph = Find-FragmentByIdWithRetry $multiRoot "graph" $rawWalker
     $graphElements = if ($null -ne $graph) { @(Get-DirectChildren $graph $rawWalker) } else { @() }
-    $ownedGraphElements = @($graphElements | Where-Object { $_.Current.ProcessId -eq $multiProcess.Id })
-    $foreignCardCount = @($graphElements | Where-Object { $_.Current.ProcessId -ne $multiProcess.Id -and
-      $_.Current.AutomationId.StartsWith("canvas-card-", [StringComparison]::Ordinal) }).Count
-    $allCards = @($ownedGraphElements | Where-Object { $_.Current.AutomationId.StartsWith("canvas-card-", [StringComparison]::Ordinal) })
+    $graphMetadata = @($graphElements | ForEach-Object { Get-MultiProjectFragmentMetadata $_ $multiProcess.Id })
+    $ownedGraphMetadata = @($graphMetadata | Where-Object { $_.ownership -ceq "owned" -and $_.observationReady })
+    $ownedGraphElements = @($ownedGraphMetadata | ForEach-Object { $_.element })
+    $foreignCardCount = @($graphMetadata | Where-Object { $_.ownership -ceq "foreign" -and
+      (Test-MultiProjectAutomationPrefix $_.automationID.value "canvas-card-") }).Count
+    $allCards = @($ownedGraphMetadata | Where-Object { Test-MultiProjectAutomationPrefix $_.automationID.value "canvas-card-" } |
+      ForEach-Object { $_.element })
     $projectContainer = Find-FragmentByIdWithRetry $multiRoot "projects" $rawWalker
     $projectElements = if ($projectContainer) { @(Get-DirectChildren $projectContainer $rawWalker) } else { @() }
-    $foreignProjectCount = @($projectElements | Where-Object { $_.Current.ProcessId -ne $multiProcess.Id -and
-      $_.Current.AutomationId.StartsWith("open-project-", [StringComparison]::Ordinal) }).Count
-    $allProjectRows = @($projectElements | Where-Object { $_.Current.ProcessId -eq $multiProcess.Id -and
-      $_.Current.AutomationId.StartsWith("open-project-", [StringComparison]::Ordinal) })
+    $projectMetadata = @($projectElements | ForEach-Object { Get-MultiProjectFragmentMetadata $_ $multiProcess.Id })
+    $foreignProjectCount = @($projectMetadata | Where-Object { $_.ownership -ceq "foreign" -and
+      (Test-MultiProjectAutomationPrefix $_.automationID.value "open-project-") }).Count
+    $allProjectRows = @($projectMetadata | Where-Object { $_.ownership -ceq "owned" -and $_.observationReady -and
+      (Test-MultiProjectAutomationPrefix $_.automationID.value "open-project-") } | ForEach-Object { $_.element })
     $nodeCardKind = if ($surface -ceq "overview") { "overview-card" } else { "project-card" }
     $expectedNodeCardIds = @($owners | ForEach-Object { Get-MultiProjectAutomationId $nodeCardKind $_.path $_.node })
     $cards = @($allCards | Where-Object { $expectedNodeCardIds -ccontains $_.Current.AutomationId })
     $observed = [Collections.Generic.List[object]]::new()
-    $matches = $cards.Count -eq $(if ($surface -ceq "overview") { 2 } else { 1 })
+    $metadataReady = (Test-MultiProjectMetadataBatch $graphMetadata) -and (Test-MultiProjectMetadataBatch $projectMetadata)
+    $matches = $metadataReady -and $cards.Count -eq $(if ($surface -ceq "overview") { 2 } else { 1 })
     foreach ($owner in $owners) {
       $projectId = Get-MultiProjectAutomationId "open-project" $owner.path
       $loopId = Get-MultiProjectAutomationId "loop" $owner.path $owner.node
@@ -2805,13 +2877,13 @@ function Invoke-MultiProjectRenamePhase {
       canvasBounds = if ($canvas) { @($canvas.Left, $canvas.Top, $canvas.Right, $canvas.Bottom) } else { @() }
     }
     $workspaceProjection = [ordered]@{
-      loopBars = @($ownedGraphElements | Where-Object { $_.Current.AutomationId.StartsWith("workspace-loop-bar-", [StringComparison]::Ordinal) } |
-        ForEach-Object { Get-MultiProjectElementEvidence $_ $multiProcess.Id })
-      toolbars = @($ownedGraphElements | Where-Object { $_.Current.AutomationId.StartsWith("workspace-toolbar-", [StringComparison]::Ordinal) } |
-        ForEach-Object { Get-MultiProjectElementEvidence $_ $multiProcess.Id })
-      foreignWorkspaceFragmentCount = @($graphElements | Where-Object { $_.Current.ProcessId -ne $multiProcess.Id -and
-        ($_.Current.AutomationId.StartsWith("workspace-loop-bar-", [StringComparison]::Ordinal) -or
-         $_.Current.AutomationId.StartsWith("workspace-toolbar-", [StringComparison]::Ordinal)) }).Count
+      loopBars = @($ownedGraphMetadata | Where-Object { Test-MultiProjectAutomationPrefix $_.automationID.value "workspace-loop-bar-" } |
+        ForEach-Object { Get-MultiProjectElementEvidence $_.element $multiProcess.Id })
+      toolbars = @($ownedGraphMetadata | Where-Object { Test-MultiProjectAutomationPrefix $_.automationID.value "workspace-toolbar-" } |
+        ForEach-Object { Get-MultiProjectElementEvidence $_.element $multiProcess.Id })
+      foreignWorkspaceFragmentCount = @($graphMetadata | Where-Object { $_.ownership -ceq "foreign" -and
+        ((Test-MultiProjectAutomationPrefix $_.automationID.value "workspace-loop-bar-") -or
+         (Test-MultiProjectAutomationPrefix $_.automationID.value "workspace-toolbar-")) }).Count
     }
     $matches = $matches -and (Test-MultiProjectObservedRoster $surface $fragmentProjection $owners $selectedOwner $multiProcess.Id)
     $matches = Test-MultiProjectObservedSurface $surface $matches $workspaceProjection $selectedOwner $multiProcess.Id
@@ -2828,6 +2900,13 @@ function Invoke-MultiProjectRenamePhase {
         nodeID = if ($known.Count -eq 1) { $known[0].nodeID } else { $null } }
     })
     return [ordered]@{ requestedSurface = $surface; observedSurface = if ($matches) { $surface } else { $null }
+      metadataReady = $metadataReady
+      observedRawGraphElementCount = $graphMetadata.Count; observedRawProjectElementCount = $projectMetadata.Count
+      unresolvedMetadataCount = @(@($graphMetadata) + @($projectMetadata) | Where-Object { -not $_.observationReady }).Count
+      fragmentMetadata = @(@($graphMetadata) + @($projectMetadata) | ForEach-Object {
+        [ordered]@{ firstPID = $_.firstPID; finalPID = $_.finalPID; automationID = $_.automationID
+          ownership = $_.ownership; family = $_.family; observationReady = $_.observationReady; proofLimit = $_.proofLimit }
+      })
       matched = $matches; observedOwnerCount = $allProjectRows.Count
       expectedMatchedOwners = @($observed | Where-Object { $null -ne $_.projectName }).Count
       totalObservedProjectRowCount = $allProjectRows.Count; totalObservedCardCount = $allCards.Count
@@ -2852,7 +2931,18 @@ function Invoke-MultiProjectRenamePhase {
   }
   function Wait-MultiProjectObservation([string] $surface, $selectedOwner = $null) {
     for ($attempt = 1; $attempt -le 100; $attempt++) {
-      $observation = Get-MultiProjectObservation $surface $selectedOwner
+      try { $observation = Get-MultiProjectObservation $surface $selectedOwner }
+      catch {
+        if (-not (Test-RetryableUiaError $_) -and -not $_.Exception.Message.StartsWith("MULTIPROJECT_METADATA:", [StringComparison]::Ordinal)) { throw }
+        Write-Host ("UIA_MULTIPROJECT_METADATA_REACQUIRE=" + ([ordered]@{
+          attempt = $attempt; maximumAttempts = 100; requestedSurface = $surface
+          expectedPID = $multiProcess.Id; errorType = $_.Exception.GetType().FullName
+          hresult = $_.Exception.HResult; semanticCauseEstablished = $false
+        } | ConvertTo-Json -Compress))
+        if ($attempt -eq 100) { throw }
+        Start-Sleep -Milliseconds 100
+        continue
+      }
       Write-Host ("UIA_MULTIPROJECT_OBSERVATION=" + ($observation | ConvertTo-Json -Depth 6 -Compress))
       if ($observation.matched) { return $observation }
       Start-Sleep -Milliseconds 100
