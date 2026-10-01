@@ -14,7 +14,8 @@ const c = Win32.c;
 /// and `SHFileOperationW` can fail late, so the irreversible step must not precede the
 /// fallible one. What makes that safe is the staging rename: the folder is moved aside
 /// first, which is atomic, reversible, and proves exclusive access before anything else
-/// happens. Every failure after it puts the folder back.
+/// happens. Later failures attempt to put the folder back; failed restoration retains
+/// the staged path in the recovery report.
 pub const staging_prefix = ".gc-deleting-";
 pub const daemon_stop_timeout_ms: i64 = 5_000;
 pub const recycle_flags: c.FILEOP_FLAGS =
@@ -160,6 +161,7 @@ fn causeText(cause: ?anyerror) []const u8 {
         error.WorkspaceIsCurrent => "it is the workspace this window has open",
         error.WorkspaceStagingCollision => "a leftover folder from an earlier delete is in the way",
         error.InvalidWorkspacePath => "its location is not a workspace folder",
+        error.OutOfMemory => "memory allocation failed",
         else => "an unexpected failure",
     };
 }
@@ -224,8 +226,11 @@ pub fn deleteRecoverablyWith(
     };
     const sessions: ?[][]u8 = Api.collectSessions(allocator, staged) catch |err| blk: {
         if (err == error.OutOfMemory) {
-            Api.rename(allocator, staged, path) catch {};
-            allocator.free(staged);
+            var report = rollbackReport(Api, allocator, staged, path, err, .refused);
+            if (report.outcome == .stranded) {
+                report.sessions_known = false;
+                return report;
+            }
             return error.OutOfMemory;
         }
         break :blk null;
@@ -359,6 +364,7 @@ const Fixture = struct {
     var renames: usize = 0;
     var fail_stage = false;
     var fail_collect = false;
+    var fail_collect_memory = false;
     var fail_daemon = false;
     var fail_recycle = false;
     var fail_rollback = false;
@@ -370,6 +376,7 @@ const Fixture = struct {
         renames = 0;
         fail_stage = false;
         fail_collect = false;
+        fail_collect_memory = false;
         fail_daemon = false;
         fail_recycle = false;
         fail_rollback = false;
@@ -407,6 +414,7 @@ const Fixture = struct {
     fn collectSessions(allocator: std.mem.Allocator, path: []const u8) ![][]u8 {
         _ = path;
         record(.collect);
+        if (fail_collect_memory) return error.OutOfMemory;
         if (fail_collect) return error.MetadataReadFailed;
         const ids = try allocator.alloc([]u8, 2);
         var owned: usize = 0;
@@ -559,6 +567,40 @@ test "workspace teardown releases every partial allocation on failure" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "workspace teardown retains recovery path after session allocation and rollback failure" {
+    const allocator = std.testing.allocator;
+    Fixture.reset();
+    Fixture.fail_collect_memory = true;
+    Fixture.fail_rollback = true;
+    var report = try deleteRecoverablyWith(Fixture, allocator, fixture_path, fixture_current);
+    defer report.deinit(allocator);
+    try std.testing.expectEqual(Outcome.stranded, report.outcome);
+    try std.testing.expectEqual(@as(?anyerror, error.OutOfMemory), report.cause);
+    try std.testing.expect(!report.sessions_known);
+    try std.testing.expectEqual(@as(usize, 0), report.sessions_targeted);
+    try std.testing.expectEqualSlices(Step, &.{ .stage, .collect, .rollback }, Fixture.taken());
+    const staged = report.staged_path orelse return error.MissingStagedPath;
+    try std.testing.expectEqualStrings(Fixture.staged[0..Fixture.staged_len], staged);
+    @memset(Fixture.staged[0..Fixture.staged_len], 'x');
+    try std.testing.expectEqualStrings("C:\\fixture\\.gc-deleting-4242-.graphcode-alpha", staged);
+    const message = try statusMessage(allocator, report);
+    defer allocator.free(message);
+    try std.testing.expect(std.mem.indexOf(u8, message, staged) != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "memory allocation failed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "No sessions were ended") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "daemon is stopped") == null);
+}
+
+test "workspace teardown restores after session allocation failure" {
+    Fixture.reset();
+    Fixture.fail_collect_memory = true;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        deleteRecoverablyWith(Fixture, std.testing.allocator, fixture_path, fixture_current),
+    );
+    try std.testing.expectEqualSlices(Step, &.{ .stage, .collect, .rollback }, Fixture.taken());
 }
 
 test "workspace staging name is never itself a discoverable workspace" {
