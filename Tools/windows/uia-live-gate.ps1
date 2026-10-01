@@ -9137,7 +9137,6 @@ try {
 
   $multiProjectRenameEvidence = Invoke-MultiProjectRenamePhase
   Write-Host ("UIA_MULTIPROJECT_RENAME_EVIDENCE=" + ($multiProjectRenameEvidence | ConvertTo-Json -Depth 8 -Compress))
-  Require $false "N3e deliberate hosted RED perturbation after completed multi-project/rename evidence"
 
   [pscustomobject]@{
     name = $rootName
