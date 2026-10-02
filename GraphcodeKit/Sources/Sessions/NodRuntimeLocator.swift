@@ -10,9 +10,15 @@ public enum NodRuntimeLocator {
   /// without touching the process environment the rest of the suite reads.
   static var binaryOverride: URL?
 
-  /// Tried in order: the development override, the running app's bundle, then the
-  /// support directory's `bin`, which is where `graphcoded` (installed out of the bundle)
-  /// finds its helpers.
+  /// The runtime's directory inside the app bundle — `graphcode-nod` with what it loads
+  /// beside it (NodRuntime/scripts/package.sh).
+  public static let bundledDirectory = "Contents/Helpers/nod"
+  /// Where `DaemonBootstrap` copies that directory, under the support directory's `bin`.
+  public static let installedDirectory = "nod"
+
+  /// Tried in order: the development override, the running app's bundle, then the copy
+  /// `DaemonBootstrap` installs under the support directory's `bin` — the only one
+  /// `graphcoded` can see, since it runs from there with no bundle of its own.
   public static func binaryURL(bundle: Bundle = .main) -> URL? {
     if let binaryOverride { return binaryOverride }
     if let path = NodRuntimeLocation.developmentOverride {
@@ -20,11 +26,10 @@ public enum NodRuntimeLocator {
     }
     let name = CLISessionBackendKind.nod.executableName ?? "graphcode-nod"
     let candidates = [
-      bundle.resourceURL?.appendingPathComponent("bin/\(name)"),
-      SupportDirectory.binDirectory.appendingPathComponent(name),
+      bundle.bundleURL.appendingPathComponent("\(bundledDirectory)/\(name)"),
+      SupportDirectory.binDirectory.appendingPathComponent("\(installedDirectory)/\(name)"),
     ]
-    return candidates.compactMap { $0 }
-      .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
   }
 
   /// `$NOD_STATE` for a node — under the support directory, so a moved workspace keeps
@@ -42,19 +47,15 @@ public enum NodRuntimeLocator {
     stateDirectory(forNodeID: nodeID).appendingPathComponent(NodProtocol.controlSocketName)
   }
 
-  /// The session's environment: its state directory, and — for a node in a project — the
-  /// project and the graph file the runtime's graphcode MCP server reads siblings and
-  /// edges from.
+  /// The session's environment: its state directory, which node it is, and its project.
   public static func environment(forNodeID nodeID: UUID, projectPath: String? = nil)
     -> [String: String]
   {
-    var environment = [NodProtocol.stateDirectoryVariable: stateDirectory(forNodeID: nodeID).path]
-    if let projectPath {
-      environment[NodProtocol.projectPathVariable] = projectPath
-      environment[NodProtocol.graphFileVariable] =
-        ProjectPersistence(baseDirectory: SupportDirectory.url)
-        .graphFileURL(forProjectPath: projectPath).path
-    }
+    var environment = [
+      NodProtocol.stateDirectoryVariable: stateDirectory(forNodeID: nodeID).path,
+      NodProtocol.nodeIDVariable: nodeID.uuidString,
+    ]
+    environment[NodProtocol.projectPathVariable] = projectPath
     return environment
   }
 

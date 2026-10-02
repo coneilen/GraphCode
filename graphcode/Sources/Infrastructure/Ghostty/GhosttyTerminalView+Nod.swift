@@ -16,7 +16,8 @@ extension GhosttyTerminalView {
       nodeID: nodeID, loopType: loopType, settings: settings,
       workingDirectory: effectiveWorkingDirectory,
       goalFile: loopType == .goalBased && FileManager.default.fileExists(atPath: goalFile)
-        ? goalFile : nil)
+        ? goalFile : nil,
+      unattended: loopType == .timeBased)
     let environment = NodRuntimeLocator.environment(forNodeID: nodeID, projectPath: projectPath)
       .sorted { $0.key < $1.key }
       .map { "\($0.key)=\(PresenceHooks.singleQuoted($0.value))" }

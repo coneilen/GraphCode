@@ -1301,13 +1301,13 @@ public enum ZmxSessionLauncher {
     let arguments =
       nodPrefix
       + node.backend.launchArguments(
-      prompt: promptWithMemory, tier: tier, briefingPath: briefingPath,
-      settings: settings,
-      workspacePaths: paths,
-      hooksFile: hooksFile,
-      sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
-      zmxPath: reportingPath,
-      sessionsDirectory: sessionsDirectory)
+        prompt: promptWithMemory, tier: tier, briefingPath: briefingPath,
+        settings: settings,
+        workspacePaths: paths,
+        hooksFile: hooksFile,
+        sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
+        zmxPath: reportingPath,
+        sessionsDirectory: sessionsDirectory)
     let command =
       [
         "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
@@ -1336,12 +1336,12 @@ public enum ZmxSessionLauncher {
         let arguments =
           nodPrefix
           + node.backend.launchArguments(
-          prompt: prompt, tier: tier, briefingPath: briefingPath, settings: settings,
-          workspacePaths: workspacePaths,
-          hooksFile: hooksFile,
-          sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
-          zmxPath: reportingPath,
-          sessionsDirectory: sessionsDirectory)
+            prompt: prompt, tier: tier, briefingPath: briefingPath, settings: settings,
+            workspacePaths: workspacePaths,
+            hooksFile: hooksFile,
+            sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
+            zmxPath: reportingPath,
+            sessionsDirectory: sessionsDirectory)
         return [
           "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
         ]
@@ -1490,7 +1490,8 @@ public enum ZmxSessionLauncher {
           briefingPath: Self.resumeBriefingPath(
             forBackend: node.backend, projectPath: projectPath, isRemote: remote != nil,
             settings: settings),
-          hooksFile: hooksFile, remoteHooksPath: remoteEnvironmentPath, nodeID: node.id, projectPath: projectPath),
+          hooksFile: hooksFile, remoteHooksPath: remoteEnvironmentPath, nodeID: node.id,
+          projectPath: projectPath),
         scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
   }
 
@@ -1504,15 +1505,18 @@ public enum ZmxSessionLauncher {
   }
 
   /// `nodArguments` for a launch from here: the node's working directory, and its goal
-  /// written where `--goal-file` points. Empty for every other backend.
+  /// written where `--goal-file` points. Empty for every other backend. `inheritFile` is
+  /// for a fresh launch only — a resumed conversation already has what it inherited.
   static func nodArguments(
-    forNode node: LoopNode, projectPath: String?, settings: GraphcodeSettings
+    forNode node: LoopNode, projectPath: String?, settings: GraphcodeSettings,
+    inheritFile: String? = nil
   ) -> [String] {
     guard node.backend == .nod else { return [] }
     return node.backend.nodArguments(
       nodeID: node.id, loopType: node.loopType, settings: settings,
       workingDirectory: workingDirectory(forNode: node, projectPath: projectPath),
-      goalFile: NodRuntimeLocator.writeGoal(of: node)?.path)
+      goalFile: NodRuntimeLocator.writeGoal(of: node)?.path, inheritFile: inheritFile,
+      unattended: node.loopType == .timeBased)
   }
 
   /// A Nod session with nothing to say yet — a main loop with no starting note. Unlike a

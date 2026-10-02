@@ -144,7 +144,10 @@ try:
               "--goal", "Reply DONE when told to", "--backend", "nod").strip())
     goal_id = node_id_of("NodGoal")
     check("goal loop created", goal_id is not None)
-    node = wait_for("NodGoal", lambda n: presence(n).get("presence") == "idle")
+    # Generous: the first launch waits on a login shell, and on a loaded machine the
+    # daemon's zmx probes are slow.
+    node = wait_for("NodGoal", lambda n: presence(n).get("presence") == "idle", 180)
+    check("the runtime was launched", os.path.exists(f"{state_dir(goal_id)}/argv.json"))
     with open(f"{state_dir(goal_id)}/argv.json") as out:
         argv = json.loads(out.readline())
     check("launch argv names node, cwd, engine, loop type, goal file",
@@ -189,6 +192,9 @@ try:
     while time.time() < deadline and not any(
             e["type"] == "userMessage" and "Heartbeat" in e["text"] for e in events(timed_id)):
         time.sleep(1)
+    with open(f"{state_dir(timed_id)}/argv.json") as out:
+        timed_argv = json.loads(out.readline())
+    check("a timed loop is launched --unattended", "--unattended" in timed_argv, json.dumps(timed_argv))
     timed = events(timed_id)
     starts = [e for e in timed if e["type"] == "sessionStarted"]
     check("a heartbeat reaches the timed loop", any(

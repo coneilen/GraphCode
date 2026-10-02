@@ -176,7 +176,8 @@ extension CLISessionBackendKind {
   /// type that picks its model, and the engine. Empty for every CLI.
   public func nodArguments(
     nodeID: UUID, loopType: LoopType, settings: GraphcodeSettings,
-    workingDirectory: String? = nil, goalFile: String? = nil, inheritFile: String? = nil
+    workingDirectory: String? = nil, goalFile: String? = nil, inheritFile: String? = nil,
+    unattended: Bool = false
   ) -> [String] {
     guard self == .nod else { return [] }
     let nod = settings.nod
@@ -186,6 +187,7 @@ extension CLISessionBackendKind {
       + (nod.model(for: loopType).map { ["--model", $0] } ?? [])
       + (goalFile.map { ["--goal-file", $0] } ?? [])
       + (inheritFile.map { ["--inherit", $0] } ?? [])
+      + (unattended ? ["--unattended"] : [])
   }
 
   /// pi reads a positional argument that starts with `-` as an option and one that starts

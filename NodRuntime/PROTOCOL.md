@@ -14,24 +14,27 @@ graphcode starts `graphcode-nod` inside the node's zmx session:
 
 ```
 graphcode-nod --node <uuid> [--cwd <dir>] --engine claude|copilot --loop-type main|goal|timed|turn|composite
-              [--model <id>] [--goal-file <path>] [--inherit <path>] [--briefing <path>]
-              [--prompt <text>] [--resume <conversation-id>]
+              [--model <id>] [--goal-file <path>] [--inherit <path>] [--unattended]
+              [--briefing <path>] [--prompt <text>] [--resume <conversation-id>]
 ```
 
 - `NOD_STATE` (`NodProtocol.stateDirectoryVariable`) is always set, to
   `<support-dir>/nod/<node-uuid>`. Use it rather than computing `~/.graphcode/...`: a
   workspace can move its support directory. Create it if missing.
-- `NOD_PROJECT_PATH` and `NOD_GRAPH_FILE` are set for a node in a project: the project
-  path, and the graph file the daemon saves (read it, never write it — the daemon
-  rewrites it on every change).
+- `NOD_NODE_ID` is always set, and `NOD_PROJECT_PATH` is set for a node in a project, for
+  the graphcode MCP server, which asks `graphcoded`'s socket about siblings and edges.
+- `--unattended` marks a loop nobody watches: timed loops, and composite children. A
+  permission it would have to ask about fails the run (`permissionUnavailable`).
 - `--inherit <path>` hands a fresh composite child or fork the brief it starts from. It is
   never passed on `--resume`.
 - `--goal-file` is `$NOD_STATE/goal.md`, the goal's condition as plain text, rewritten on
   every launch.
 - `--resume` is the `conversationID` of an earlier `sessionStarted`. graphcode banks it
   from the event log while the session is live, so a reboot or restart resumes.
-- The binary comes from `Contents/Resources/bin/graphcode-nod` in the app bundle, then the
-  support directory's `bin/`. `GRAPHCODE_NOD_PATH` overrides both for development.
+- The binary is `Contents/Helpers/nod/graphcode-nod` in the app bundle for the app's own
+  panes. `graphcoded` runs `<support-dir>/bin/nod/graphcode-nod`: the app copies the whole
+  `Helpers/nod` directory there when it installs its helpers. `GRAPHCODE_NOD_PATH`
+  overrides both for development.
 - A plain line on the PTY is a queued `send`. graphcode falls back to typing when
   `control.sock` is not there yet, so read stdin from the first moment.
 

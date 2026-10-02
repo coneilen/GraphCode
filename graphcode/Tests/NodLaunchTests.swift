@@ -11,7 +11,8 @@ private let start = Date(timeIntervalSince1970: 1_790_000_000)
 
 private func records(_ events: [NodEvent]) -> [NodEventRecord] {
   events.enumerated().map {
-    NodEventRecord(seq: $0.offset + 1, at: start.addingTimeInterval(Double($0.offset)), event: $0.element)
+    NodEventRecord(
+      seq: $0.offset + 1, at: start.addingTimeInterval(Double($0.offset)), event: $0.element)
   }
 }
 
@@ -100,7 +101,8 @@ struct NodSessionFoldTests {
 
   @Test
   func theLiveLineFollowsToolsUntilTheyFinish() {
-    let call = NodEvent.toolCall(.init(turn: 1, callID: "c1", tool: "Grep", title: "Search \"UsageGate\""))
+    let call = NodEvent.toolCall(
+      .init(turn: 1, callID: "c1", tool: "Grep", title: "Search \"UsageGate\""))
     var events: [NodEvent] = [started, .turnStarted(.init(turn: 1, origin: .user)), call]
     #expect(NodSessionFold(records: records(events)).activityLine == "Search \"UsageGate\"")
     events.append(.toolResult(.init(callID: "c1", status: .ok, summary: "6 hits")))
@@ -139,7 +141,8 @@ struct NodSessionFoldTests {
     #expect(notYet.goalVerdict?.met == false)
     #expect(notYet.cardState.goalProgress == NodGoalProgress(met: 1, total: 2))
 
-    let met = NodSessionFold(records: records([started, check([true, false]), check([true, true])]))
+    let met = NodSessionFold(
+      records: records([started, check([true, false]), check([true, true])]))
     #expect(met.goalVerdict?.met == true)
     #expect(met.goalVerdict?.detail == "2 of 2 clauses met")
     #expect(met.goalVerdict?.recordedAt == start.addingTimeInterval(2))
@@ -148,7 +151,8 @@ struct NodSessionFoldTests {
 
   @Test
   func unknownEventsChangeNothing() {
-    let known = NodSessionFold(records: records([started, .turnStarted(.init(turn: 1, origin: .user))]))
+    let known = NodSessionFold(
+      records: records([started, .turnStarted(.init(turn: 1, origin: .user))]))
     var withUnknown = known
     withUnknown.apply(NodEventRecord(seq: 3, at: start, event: .unknown("fromTheFuture")))
     #expect(withUnknown.presence == known.presence)
@@ -182,9 +186,11 @@ struct NodSessionLogTests {
       of: records([
         started,
         .turnStarted(.init(turn: 1, origin: .user)),
-        .assistantText(.init(turn: 1, messageID: "m1", delta: "Found it. ExportRoute ", final: false)),
         .assistantText(
-          .init(turn: 1, messageID: "m1", delta: "is registered before UsageGate runs.", final: true)),
+          .init(turn: 1, messageID: "m1", delta: "Found it. ExportRoute ", final: false)),
+        .assistantText(
+          .init(
+            turn: 1, messageID: "m1", delta: "is registered before UsageGate runs.", final: true)),
         .toolCall(.init(turn: 1, callID: "c1", tool: "Read", title: "Read UsageGate.swift")),
         .turnEnded(.init(turn: 1, filesChanged: 0, added: 0, removed: 0, summary: nil)),
       ]), metricSamples: [])
@@ -248,9 +254,15 @@ struct NodLaunchArgumentTests {
     #expect(Array(arguments.prefix(3)) == ["run", "graphcode-\(nodeID.uuidString)", "-d"])
     let script = arguments[7]
     let state = NodRuntimeLocator.stateDirectory(forNodeID: nodeID).path
-    #expect(script.hasPrefix("exec env NOD_STATE=\"\(state)\" /Apps/GraphCode.app/bin/graphcode-nod "))
+    #expect(
+      script.hasPrefix(
+        "exec env NOD_NODE_ID=\"\(nodeID.uuidString)\" NOD_STATE=\"\(state)\" "
+          + "/Apps/GraphCode.app/bin/graphcode-nod "))
     let argv = Array(arguments.dropFirst(9))
-    #expect(Array(argv.prefix(6)) == ["--node", nodeID.uuidString, "--engine", "claude", "--loop-type", "turn"])
+    #expect(
+      Array(argv.prefix(6)) == [
+        "--node", nodeID.uuidString, "--engine", "claude", "--loop-type", "turn",
+      ])
     #expect(argv.suffix(2).first == "--prompt")
 
     let resume = try #require(
@@ -259,6 +271,29 @@ struct NodLaunchArgumentTests {
     #expect(resume[7] == script)
     #expect(Array(resume.suffix(2)) == ["--resume", "conv-1"])
     #expect(!resume.contains("--prompt"))
+  }
+
+  @Test
+  func aTimedLoopIsUnattendedAndTheEnvironmentNamesItsProject() {
+    let timed = LoopNode(
+      id: nodeID, title: "Nightly", loopType: .timeBased, triggerPrompt: "/loop 1h deps",
+      backend: .nod)
+    let argv = ZmxSessionLauncher.nodArguments(
+      forNode: timed, projectPath: nil, settings: GraphcodeSettings(), inheritFile: "/b.md")
+    #expect(Array(argv.suffix(3)) == ["--inherit", "/b.md", "--unattended"])
+    let goal = LoopNode(id: nodeID, title: "Cap", loopType: .turnBased, backend: .nod)
+    #expect(
+      !ZmxSessionLauncher.nodArguments(
+        forNode: goal, projectPath: nil, settings: GraphcodeSettings()
+      )
+      .contains("--unattended"))
+    #expect(
+      NodRuntimeLocator.environment(forNodeID: nodeID, projectPath: "/p")
+        == [
+          "NOD_STATE": NodRuntimeLocator.stateDirectory(forNodeID: nodeID).path,
+          "NOD_NODE_ID": nodeID.uuidString, "NOD_PROJECT_PATH": "/p",
+        ])
+    #expect(NodRuntimeLocator.environment(forNodeID: nodeID)["NOD_PROJECT_PATH"] == nil)
   }
 
   @Test
@@ -272,7 +307,8 @@ struct NodLaunchArgumentTests {
       Array(arguments.dropFirst(9))
         == ["--node", nodeID.uuidString, "--engine", "claude", "--loop-type", "main"])
     // A CLI with nothing to say still gets no argv — that path is unchanged.
-    #expect(ZmxSessionLauncher.arguments(forNode: LoopNode(title: "Chat", loopType: .sketch)) == nil)
+    #expect(
+      ZmxSessionLauncher.arguments(forNode: LoopNode(title: "Chat", loopType: .sketch)) == nil)
   }
 
   @Test
@@ -295,7 +331,8 @@ struct NodLaunchArgumentTests {
     let file = try #require(NodRuntimeLocator.writeGoal(of: node))
     defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
     #expect(file.lastPathComponent == "goal.md")
-    #expect(try String(contentsOf: file, encoding: .utf8) == "Every paid route goes through UsageGate")
+    #expect(
+      try String(contentsOf: file, encoding: .utf8) == "Every paid route goes through UsageGate")
     #expect(NodRuntimeLocator.writeGoal(of: LoopNode(title: "t", backend: .nod)) == nil)
   }
 }
@@ -392,6 +429,125 @@ struct NodControlClientTests {
     func close() {
       Darwin.close(descriptor)
       unlink(path)
+    }
+  }
+#endif
+
+@Suite
+struct NodGraphStoreTests {
+  private func store(
+    _ nodes: [LoopNode], verdict: GoalVerdict? = nil, presence: Presence = .idle
+  ) -> GraphStore {
+    var graph = LoopGraph(project: ProjectRef(path: "", name: "p"))
+    for node in nodes { graph.nodes.append(node) }
+    return GraphStore(
+      graph: graph,
+      onReadActivity: { _, _ in "asks to run swift package resolve" },
+      onReadPresence: { _, _ in PresenceReading(presence: presence, confidence: .reported) },
+      onReadGoalVerdict: { _, _ in verdict })
+  }
+
+  /// Nod's goal has no directive, which used to mean no verdict poller at all: the loop
+  /// met its goal and ran on.
+  @Test
+  func aNodGoalLoopIsResolvedByItsRecordedVerdict() async {
+    let node = LoopNode(
+      title: "Cap", loopType: .goalBased,
+      goal: GoalSpec(summary: "Every paid route is gated", pollIntervalSeconds: 1),
+      backend: .nod, state: .running)
+    let store = store([node], verdict: GoalVerdict(met: true, detail: "1 of 1 clauses met"))
+    await store.ensureUnattendedSessions()
+    for _ in 0..<40 where await store.graph.nodes[id: node.id]?.state != .succeeded {
+      try? await Task.sleep(for: .milliseconds(100))
+    }
+    let resolved = await store.graph.nodes[id: node.id]
+    #expect(resolved?.state == .succeeded)
+    #expect(resolved?.resolution?.basis == .nativeGoal)
+    #expect(resolved?.resolution?.detail == "1 of 1 clauses met")
+  }
+
+  @Test
+  func aNodLoopWaitingOnAHumanSaysWhatItAsks() async {
+    let nod = LoopNode(title: "Nod", loopType: .turnBased, backend: .nod, state: .running)
+    let claude = LoopNode(title: "Claude", loopType: .turnBased, state: .running)
+    let store = store([nod, claude], presence: .awaitingInput)
+    await store.handle(.refreshUsage)
+    let graph = await store.graph
+    #expect(graph.nodes[id: nod.id]?.activity == "asks to run swift package resolve")
+    #expect(graph.nodes[id: claude.id]?.activity == nil)
+  }
+}
+
+#if os(macOS)
+  /// `graphcoded` runs from the support directory with no bundle of its own, so a Nod loop
+  /// it launches can only find the runtime the app copied there.
+  @Suite
+  struct NodRuntimeInstallTests {
+    private func makeApp(withNod: Bool) throws -> URL {
+      let app = FileManager.default.temporaryDirectory
+        .appendingPathComponent("nod-\(UUID().uuidString).app", isDirectory: true)
+      let bin = app.appendingPathComponent("Contents/Resources/bin", isDirectory: true)
+      try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+      for name in ["graphcoded", "zmx", "graphcode"] {
+        FileManager.default.createFile(
+          atPath: bin.appendingPathComponent(name).path, contents: Data(name.utf8),
+          attributes: [.posixPermissions: 0o755])
+      }
+      if withNod {
+        let nod = app.appendingPathComponent(NodRuntimeLocator.bundledDirectory)
+        try FileManager.default.createDirectory(at: nod, withIntermediateDirectories: true)
+        FileManager.default.createFile(
+          atPath: nod.appendingPathComponent("graphcode-nod").path, contents: Data("nod".utf8),
+          attributes: [.posixPermissions: 0o755])
+        FileManager.default.createFile(
+          atPath: nod.appendingPathComponent("runtime.node").path, contents: Data("rt".utf8))
+      }
+      return app
+    }
+
+    @Test
+    func theWholeRuntimeDirectoryIsCopiedBesideTheHelpers() throws {
+      let app = try makeApp(withNod: true)
+      let destination = FileManager.default.temporaryDirectory
+        .appendingPathComponent("nod-bin-\(UUID().uuidString)", isDirectory: true)
+      defer {
+        try? FileManager.default.removeItem(at: app)
+        try? FileManager.default.removeItem(at: destination)
+      }
+      let bundled = app.appendingPathComponent("Contents/Resources/bin")
+      #expect(!DaemonBootstrap.nodRuntimeInstalled(from: bundled, in: destination))
+      #expect(DaemonBootstrap.stamp(forHelpersIn: bundled).contains("\nnod:"))
+
+      try DaemonBootstrap.installHelpers(from: bundled, to: destination)
+
+      let installed = destination.appendingPathComponent("nod/graphcode-nod")
+      #expect(FileManager.default.isExecutableFile(atPath: installed.path))
+      #expect(
+        FileManager.default.fileExists(
+          atPath: destination.appendingPathComponent("nod/runtime.node").path))
+      let type = try FileManager.default.attributesOfItem(atPath: installed.path)[.type]
+      #expect(type as? FileAttributeType == .typeRegular)
+      #expect(DaemonBootstrap.nodRuntimeInstalled(from: bundled, in: destination))
+
+      try DaemonBootstrap.installHelpers(from: bundled, to: destination)
+      #expect(FileManager.default.isExecutableFile(atPath: installed.path))
+    }
+
+    @Test
+    func aBundleWithoutNodStillInstallsAndOwesNothing() throws {
+      let app = try makeApp(withNod: false)
+      let destination = FileManager.default.temporaryDirectory
+        .appendingPathComponent("nod-bin-\(UUID().uuidString)", isDirectory: true)
+      defer {
+        try? FileManager.default.removeItem(at: app)
+        try? FileManager.default.removeItem(at: destination)
+      }
+      let bundled = app.appendingPathComponent("Contents/Resources/bin")
+      #expect(!DaemonBootstrap.stamp(forHelpersIn: bundled).contains("nod:"))
+      try DaemonBootstrap.installHelpers(from: bundled, to: destination)
+      #expect(DaemonBootstrap.nodRuntimeInstalled(from: bundled, in: destination))
+      #expect(
+        !FileManager.default.fileExists(atPath: destination.appendingPathComponent("nod").path))
     }
   }
 #endif

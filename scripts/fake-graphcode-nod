@@ -17,11 +17,14 @@ from datetime import datetime, timezone
 
 
 def parse(argv):
-    options, flags = {}, {"-p"}
+    options, switches = {}, {"--unattended"}
     index = 0
     while index < len(argv):
         key = argv[index]
-        if key.startswith("-") and index + 1 < len(argv):
+        if key in switches:
+            options[key.lstrip("-")] = True
+            index += 1
+        elif key.startswith("-") and index + 1 < len(argv):
             options[key.lstrip("-")] = argv[index + 1]
             index += 2
         else:
