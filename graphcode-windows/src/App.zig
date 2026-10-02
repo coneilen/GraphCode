@@ -57,6 +57,42 @@ const daemon_supervisor_test_hook_environment = "GRAPHCODE_DAEMON_SUPERVISOR_TES
 const daemon_supervisor_test_property =
     std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.DaemonSupervisorState");
 
+fn runFirstRunStartup(
+    context: anytype,
+    should_show: bool,
+    comptime schedule_connection: fn (@TypeOf(context)) void,
+    comptime show_modal: fn (@TypeOf(context)) void,
+) bool {
+    if (!should_show) return false;
+    schedule_connection(context);
+    show_modal(context);
+    return true;
+}
+
+const FirstRunStartup = struct {
+    const Context = struct {
+        app: *App,
+        store: Onboarding.Store,
+        initial_backend: []const u8,
+    };
+
+    fn scheduleConnection(context: *Context) void {
+        context.app.client.setCallback(&onDaemonFrame, context.app);
+        context.app.client.connect();
+    }
+
+    fn showModal(context: *Context) void {
+        if (Onboarding.showFirstRun(
+            context.app.window.hwnd,
+            context.app.allocator,
+            context.store,
+            context.initial_backend,
+        ) catch null) |backend| {
+            context.app.applyOnboardingBackend(backend);
+        }
+    }
+};
+
 const WorkspaceKeyRoute = union(enum) {
     action: InputRouter.Action,
     copy_terminal_selection,
@@ -1195,6 +1231,7 @@ pub const App = struct {
         defer c.CoUninitialize();
         const daemon_supervisor_test_hook = envFlag(daemon_supervisor_test_hook_environment);
         const uia_gate_hook = envFlag("GRAPHCODE_UIA_GATE");
+        var daemon_connection_scheduled = false;
         // GDI+ may create a process-owned helper window. The daemon handoff
         // and UIA live tests depend on deterministic top-level window and
         // foreground behavior, so keep that visual-only subsystem disabled
@@ -1280,9 +1317,17 @@ pub const App = struct {
                 (shell_test == null or !std.mem.eql(u8, shell_test.?, "1")))
             {
                 const initial_backend = if (self.product_settings) |settings| settings.default_backend else "claudeCode";
-                if (Onboarding.showFirstRun(self.window.hwnd, self.allocator, store, initial_backend) catch null) |backend| {
-                    self.applyOnboardingBackend(backend);
-                }
+                var first_run = FirstRunStartup.Context{
+                    .app = self,
+                    .store = store,
+                    .initial_backend = initial_backend,
+                };
+                daemon_connection_scheduled = runFirstRunStartup(
+                    &first_run,
+                    store.shouldShow(),
+                    FirstRunStartup.scheduleConnection,
+                    FirstRunStartup.showModal,
+                );
             }
         }
         self.createEmptyStateControls();
@@ -1326,8 +1371,10 @@ pub const App = struct {
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_WORKSPACE_ACTIONS")) |value| {
             self.smoke_workspace_actions = value;
         } else |_| {}
-        self.client.setCallback(&onDaemonFrame, self);
-        self.client.connect();
+        if (!daemon_connection_scheduled) {
+            self.client.setCallback(&onDaemonFrame, self);
+            self.client.connect();
+        }
         try self.window.messageLoop();
         if (self.exit_requested) std.process.exit(0);
         if (self.smoke_failure) {
@@ -12732,6 +12779,61 @@ test "gesture registration outcome survives later startup setStatus calls" {
     // ...but the durable record must be completely unaffected.
     try std.testing.expect(!app.window.gesture_config_registered);
     try std.testing.expectEqual(@as(c.DWORD, 1223), app.window.gesture_config_last_error);
+}
+
+test "first-run startup schedules daemon connection before the modal returns" {
+    const Event = enum {
+        connection_scheduled,
+        modal_entered,
+        modal_returned,
+    };
+    const Probe = struct {
+        events: [3]Event = undefined,
+        count: usize = 0,
+
+        fn append(self: *@This(), event: Event) void {
+            self.events[self.count] = event;
+            self.count += 1;
+        }
+
+        fn scheduleConnection(self: *@This()) void {
+            self.append(.connection_scheduled);
+        }
+
+        fn showModal(self: *@This()) void {
+            self.append(.modal_entered);
+            self.append(.modal_returned);
+        }
+    };
+    var probe = Probe{};
+
+    try std.testing.expect(runFirstRunStartup(&probe, true, Probe.scheduleConnection, Probe.showModal));
+
+    try std.testing.expectEqual(@as(usize, 3), probe.count);
+    try std.testing.expectEqual(Event.connection_scheduled, probe.events[0]);
+    try std.testing.expectEqual(Event.modal_entered, probe.events[1]);
+    try std.testing.expectEqual(Event.modal_returned, probe.events[2]);
+}
+
+test "ordinary startup defers daemon connection when no first-run modal is shown" {
+    const Probe = struct {
+        connection_scheduled: bool = false,
+        modal_shown: bool = false,
+
+        fn scheduleConnection(self: *@This()) void {
+            self.connection_scheduled = true;
+        }
+
+        fn showModal(self: *@This()) void {
+            self.modal_shown = true;
+        }
+    };
+    var probe = Probe{};
+
+    try std.testing.expect(!runFirstRunStartup(&probe, false, Probe.scheduleConnection, Probe.showModal));
+
+    try std.testing.expect(!probe.connection_scheduled);
+    try std.testing.expect(!probe.modal_shown);
 }
 
 test "gesture registration failure formats the exact production diagnostic text" {
