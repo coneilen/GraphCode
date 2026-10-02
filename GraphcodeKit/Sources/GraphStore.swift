@@ -3883,6 +3883,7 @@ public actor GraphStore {
     if target.runsUnattended, !target.isResolved {
       ensureSession(target)
       try? await Task.sleep(for: Self.respawnedSessionSettle)
+      if Task.isCancelled { return .staged(reason: "deadline") }
       if await deliverToSession(target, message) { return .typed }
       if Task.isCancelled { return .staged(reason: "deadline") }
     }

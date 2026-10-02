@@ -168,6 +168,30 @@ struct SendAcknowledgementTests {
   }
 
   @Test
+  func aDeadlineDuringTheRespawnSettleDoesNotTypeAgain() async {
+    let attempts = LockIsolated(0)
+    let remembered = LockIsolated<[String]>([])
+    let graph = Self.graph()
+    let store = GraphStore(
+      graph: graph,
+      deliveryDeadline: .milliseconds(300),
+      onEnsureSession: { _, _ in },
+      onDeliverMessage: { _, _, _ in
+        // Fails at once, so the deadline lands in the respawn settle before the retry.
+        attempts.withValue { $0 += 1 }
+        return false
+      },
+      onAppendMemory: { _, entry in remembered.withValue { $0.append(entry) } })
+
+    await store.handle(.messageNode(graph.nodes[0].id, text: "now", from: nil, followUp: nil))
+    await store.finishSessionTyping()
+    try? await Task.sleep(for: GraphStore.respawnedSessionSettle + .milliseconds(500))
+
+    #expect(attempts.value == 1)
+    #expect(remembered.value == ["while you were away: [graphcode] now"])
+  }
+
+  @Test
   func aSendIsBroadcastOnceWhenItsDrainChangesNothing() async {
     let broadcasts = LockIsolated(0)
     let graph = Self.graph()
