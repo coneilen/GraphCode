@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { copilotToolPrefix } from "./mcpServers";
 
 export interface ToolDescription {
   /** The work card's one line, e.g. `Search "UsageGate"`. */
@@ -71,8 +72,8 @@ export function describeTool(tool: string, input: unknown): ToolDescription {
     case "update_todo":
       return { title: "Plan", activity: "planning" };
   }
-  if (tool.startsWith("mcp__")) {
-    const short = tool.split("__").pop() ?? tool;
+  if (tool.startsWith("mcp__") || tool.startsWith(copilotToolPrefix)) {
+    const short = tool.startsWith("mcp__") ? (tool.split("__").pop() ?? tool) : tool.slice(copilotToolPrefix.length);
     return { title: `Use ${short}`, activity: `using ${short}` };
   }
   return { title: tool, activity: `using ${tool}` };

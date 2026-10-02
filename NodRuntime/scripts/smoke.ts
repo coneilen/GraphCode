@@ -5,6 +5,8 @@
 //
 // The runtime command defaults to this checkout's source; pass "/path/to/graphcode-nod" to
 // smoke a packaged build. Claude needs an anthropic-api-key item in app.graphcode.nod.
+// With NOD_PROJECT_PATH (and GRAPHCODE_SOCKET) set, Nod also calls the graphcode MCP
+// server's siblings tool against that graph first.
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { join } from "node:path";
@@ -23,10 +25,13 @@ writeFileSync(join(support, "settings.json"), JSON.stringify({ nod: { engine, sh
 const goalFile = join(root, "goal.txt");
 writeFileSync(goalFile, "Done when hello.txt contains the line `hello nod` and `cat hello.txt` has printed it");
 
+const graphStep = process.env.NOD_PROJECT_PATH
+  ? "First call the graphcode server's siblings tool and say how many other loops it lists. "
+  : "";
 const state = join(support, "nod", node);
 const child = Bun.spawn(
   [...runtime.split(" "), "--node", node, "--cwd", work, "--engine", engine, "--loop-type", "goal", "--goal-file", goalFile,
-    "--prompt", "Use your Write tool (not the shell) to create hello.txt containing the line `hello nod`. Then run `ls -la` and then `cat hello.txt`.",
+    "--prompt", graphStep + "Use your Write tool (not the shell) to create hello.txt containing the line `hello nod`. Then run `ls -la` and then `cat hello.txt`.",
     "--exit-when-idle"],
   { env: { ...process.env, GRAPHCODE_SUPPORT_DIR: support, NOD_STATE: state }, stdout: "inherit", stderr: "inherit" },
 );

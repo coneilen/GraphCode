@@ -70,6 +70,7 @@ graphcode-nod -p <prompt> [--engine claude|copilot] [--model <id>]   # one-shot 
 | `presence.ts` | the `presence`/`activity`/`usage` zmx labels and `sessions/<node>.id` that `PresenceHooks` writes |
 | `credentials.ts` · `agentRuntimes.ts` | Keychain sign-ins, and where each engine's agent runtime is |
 | `brief.ts` | `--inherit <brief.json>` (PROTOCOL.md, Inherited briefs) |
+| `mcp/` · `mcpServers.ts` | the built-in graphcode server, the project's `.mcp.json` servers, and how each engine mounts them |
 
 ```sh
 bun install && bun test        # unit tests run against fake engines; the contract test compiles NodProtocol.swift
@@ -107,6 +108,13 @@ bun src/main.ts -p "hello"     # from source
   turn a human or timer started). Claude's cost is exact at each turn end and estimated
   mid-turn from tokens, scaled to the last exact figure, so the cap can stop mid-turn.
   Copilot reports premium requests, which its plan caps.
+- **MCP**: each engine mounts exactly two kinds of server. The built-in `graphcode` server
+  is always on: in-process on Claude (an SDK MCP server), custom tools named
+  `graphcode_<tool>` on Copilot. The project's `.mcp.json` servers are found the way the
+  CLIs find them, walking up from the working directory with `${VAR}` expanded, minus
+  `NodSettings.disabledMCPServers`. Claude runs with `strictMcpConfig`, so Claude Code adds
+  nothing of its own; Copilot never discovers config. graphcode's tools pass the gate and
+  apply `messagesOtherLoops` themselves; any other server's tool is an `mcpTool` ask.
 - **Context** is reported as `usage.contextUsed`; at 95% Nod compacts after the turn.
 - **Resume**: `--resume <conversation-id>` continues the engine conversation and appends to
   the same `events.jsonl`, continuing its `seq`. `conversation.json` holds engine, model and

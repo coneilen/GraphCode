@@ -4,6 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 import {
   CopilotClient,
   RuntimeConnection,
+  type CopilotClientOptions,
   type CopilotSession,
   type PermissionRequest,
   type PermissionRequestResult,
@@ -11,6 +12,8 @@ import {
   type SessionEvent,
 } from "@github/copilot-sdk";
 import type { Engine, EngineFailure, EngineSession, EngineStart, ToolRequest, TurnCallbacks, TurnResult } from "./engine";
+import { serverName } from "./mcp";
+import { copilotGraphcodeTools, copilotMcpServers, copilotToolPrefix } from "./mcpServers";
 import type { NodAttachment } from "./protocol";
 import { summarizeResult } from "./tools";
 
@@ -29,6 +32,8 @@ export interface CopilotEngineOptions {
   githubToken?: string;
   /** The Copilot runtime to spawn; the SDK's bundled one when absent. */
   cliPath?: string;
+  /** Tests pass a fake client to see the config a session opens with. */
+  client?: (options: CopilotClientOptions) => CopilotClient;
 }
 
 /**
@@ -64,6 +69,8 @@ export class CopilotEngine implements Engine {
       streaming: true,
       systemMessage: start.systemAppend ? { mode: "append", content: start.systemAppend } : undefined,
       onPermissionRequest: (request) => this.onPermission(request),
+      tools: copilotGraphcodeTools(start.mcp?.graphcode ?? []),
+      mcpServers: copilotMcpServers(start.mcp ?? { graphcode: [], servers: {} }),
       hooks: {
         onPostToolUse: () => {
           const steer = this.turn?.callbacks.takeSteer();
@@ -84,12 +91,13 @@ export class CopilotEngine implements Engine {
 
   private makeClient(cwd: string): CopilotClient {
     const path = this.options.cliPath;
-    return new CopilotClient({
+    const options: CopilotClientOptions = {
       workingDirectory: cwd,
       logLevel: "error",
       ...(this.options.githubToken ? { gitHubToken: this.options.githubToken, useLoggedInUser: false } : { useLoggedInUser: true }),
       ...(path ? { connection: RuntimeConnection.forStdio({ path }) } : {}),
-    });
+    };
+    return this.options.client ? this.options.client(options) : new CopilotClient(options);
   }
 
   private async currentModel(): Promise<string | undefined> {
@@ -276,6 +284,11 @@ export function toolRequest(request: PermissionRequest, cwd: string): ToolReques
       return { intent: { kind: "fetch", url: str("url") } };
     case "mcp":
       return { intent: { kind: "mcp", server: str("serverName"), tool: str("toolName") } };
+    case "custom-tool": {
+      const name = str("toolName");
+      if (name.startsWith(copilotToolPrefix)) return { intent: { kind: "mcp", server: serverName, tool: name.slice(copilotToolPrefix.length) } };
+      return { intent: { kind: "read" } };
+    }
     case "read":
       return { intent: { kind: "read" } };
   }

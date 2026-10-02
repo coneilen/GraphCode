@@ -1,6 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { EventLog } from "./eventLog";
+import { serverName } from "./mcp";
 import type { NodPermissionDecision, NodPermissionKind } from "./protocol";
 import type { Ask, NodSettings } from "./settings";
 
@@ -38,7 +39,7 @@ interface OpenAsk {
 }
 
 /**
- * Gates shell, network and out-of-worktree work by `NodSettings` and the shell allowlist.
+ * Gates shell, network, out-of-worktree and project-MCP work by `NodSettings` and the shell allowlist.
  * Reads, searches and in-worktree edits never ask here — edits are reviewed as hunks.
  */
 export class PermissionGate {
@@ -74,7 +75,9 @@ export class PermissionGate {
       case "fetch":
         return this.byPolicy(settings.network, "network", intent.url, "Fetches a URL.");
       case "mcp":
-        return { verdict: "allow" };
+        // graphcode's own tools apply messagesOtherLoops themselves, as drafts or refusals.
+        if (intent.server === serverName) return { verdict: "allow" };
+        return this.ask("mcpTool", `${intent.server}/${intent.tool}`, "Calls a tool on one of this project's MCP servers.");
       case "messageLoop":
         if (settings.messagesOtherLoops === "send") return { verdict: "allow" };
         if (settings.messagesOtherLoops === "never") return deny("messageLoop", intent.subject);
