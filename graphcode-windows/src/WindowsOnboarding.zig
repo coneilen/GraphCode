@@ -31,14 +31,10 @@ pub const Store = struct {
     marker: []u8,
 
     pub fn init(allocator: std.mem.Allocator) !Store {
-        const base = std.process.getEnvVarOwned(allocator, "LOCALAPPDATA") catch
-            try std.process.getEnvVarOwned(allocator, "USERPROFILE");
-        defer allocator.free(base);
-        const dir = try std.fs.path.join(allocator, &.{ base, "GraphCode" });
-        errdefer allocator.free(dir);
+        const dir = try supportDirectoryFrom(allocator, std.process.getEnvVarOwned);
+        defer allocator.free(dir);
         try std.fs.cwd().makePath(dir);
         const marker = try std.fs.path.join(allocator, &.{ dir, "onboarding-seen" });
-        allocator.free(dir);
         return .{ .allocator = allocator, .marker = marker };
     }
 
@@ -57,6 +53,26 @@ pub const Store = struct {
         file.close();
     }
 };
+
+const EnvLookup = fn (std.mem.Allocator, []const u8) anyerror![]u8;
+
+/// Onboarding state belongs to the effective GraphCode support directory:
+/// `%GRAPHCODE_SUPPORT_DIR%` when set, otherwise `%USERPROFILE%\.graphcode`.
+fn supportDirectoryFrom(allocator: std.mem.Allocator, lookup: EnvLookup) ![]u8 {
+    if (lookup(allocator, "GRAPHCODE_SUPPORT_DIR")) |directory| {
+        return directory;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    const profile = lookup(allocator, "USERPROFILE") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.UserProfileMissing,
+        else => return err,
+    };
+    defer allocator.free(profile);
+    return std.fs.path.join(allocator, &.{ profile, ".graphcode" });
+}
 
 const State = struct {
     allocator: std.mem.Allocator,
@@ -474,6 +490,51 @@ test "onboarding marker persists first-run completion" {
     try std.testing.expect(store.shouldShow());
     try store.markSeen();
     try std.testing.expect(!store.shouldShow());
+}
+
+test "onboarding support directory selection honors the configured override" {
+    const Environment = struct {
+        fn lookup(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+            if (std.mem.eql(u8, name, "GRAPHCODE_SUPPORT_DIR"))
+                return allocator.dupe(u8, "D:\\isolated\\graphcode");
+            if (std.mem.eql(u8, name, "LOCALAPPDATA"))
+                return allocator.dupe(u8, "C:\\Users\\tester\\AppData\\Local");
+            if (std.mem.eql(u8, name, "USERPROFILE"))
+                return allocator.dupe(u8, "C:\\Users\\tester");
+            return error.EnvironmentVariableNotFound;
+        }
+    };
+
+    const directory = try supportDirectoryFrom(std.testing.allocator, Environment.lookup);
+    defer std.testing.allocator.free(directory);
+    try std.testing.expectEqualStrings("D:\\isolated\\graphcode", directory);
+}
+
+test "onboarding support directory selection uses the GraphCode default" {
+    const Environment = struct {
+        fn lookup(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+            if (std.mem.eql(u8, name, "USERPROFILE"))
+                return allocator.dupe(u8, "C:\\Users\\tester");
+            return error.EnvironmentVariableNotFound;
+        }
+    };
+
+    const directory = try supportDirectoryFrom(std.testing.allocator, Environment.lookup);
+    defer std.testing.allocator.free(directory);
+    try std.testing.expectEqualStrings("C:\\Users\\tester\\.graphcode", directory);
+}
+
+test "onboarding support directory selection rejects a missing profile" {
+    const Environment = struct {
+        fn lookup(_: std.mem.Allocator, _: []const u8) ![]u8 {
+            return error.EnvironmentVariableNotFound;
+        }
+    };
+
+    try std.testing.expectError(
+        error.UserProfileMissing,
+        supportDirectoryFrom(std.testing.allocator, Environment.lookup),
+    );
 }
 
 test "onboarding backend values match product settings" {
