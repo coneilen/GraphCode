@@ -5,15 +5,39 @@ directory and ZIP. The bundle contains the GraphCode shell, `graphcoded`,
 `graphcode`, `zmx`, Winghostty host assets, Swift runtime DLLs, pinned provider
 metadata, `LICENSE`, `THIRD-PARTY-NOTICES.txt`, and `GraphCode-Setup.ps1`.
 
+For developer iteration from an untagged checkout, use the explicit local mode:
+
 ```powershell
-pwsh Tools/windows/package.ps1 -Command Build `
-  -InputDirectory .build/windows/release `
-  -Version 1.0.0
-pwsh Tools/windows/package.ps1 -Command Verify `
-  -Package .build/windows/packages/GraphCode-1.0.0-windows-x86_64.zip
-pwsh Tools/windows/package.ps1 -Command Install `
-  -Package .build/windows/packages/GraphCode-1.0.0-windows-x86_64
+. .\.graphcode-tools\environment.ps1
+pwsh -NoProfile -File Tools\windows\stage-swift-products.ps1
+pwsh -NoProfile -File Tools\windows\package.ps1 -Command Build -Local `
+  -WinghosttyRoot $env:GRAPHCODE_WINGHOSTTY_ROOT `
+  -ZmxRoot $env:GRAPHCODE_ZMX_ROOT
+
+$package = Get-ChildItem .build\windows\packages\GraphCode-0.0.0-local+*-windows-x86_64.zip |
+  Select-Object -First 1
+pwsh -NoProfile -File Tools\windows\package.ps1 -Command Verify -Package $package.FullName
 ```
+
+`-Local` derives the version from the checked-out commit as
+`0.0.0-local+<12-character SHA>` and records the complete 40-character SHA plus
+the source-tree dirty state in `metadata.json`. It does not accept a caller
+supplied version, release-tag provenance, signing certificate, or trusted
+publisher pin. Verification performs the ordinary complete manifest and provider
+checks, then prints `LOCAL UNSIGNED` and the exact source SHA.
+
+Local metadata is deliberately unmistakable:
+
+- `packageKind` is `local-development`
+- `signing` is `UNSIGNED LOCAL DEVELOPMENT PACKAGE (not code signed)`
+- `sourceProvenance.kind` is `local`
+- `sourceProvenance.sourceCommit` is the exact 40-character `HEAD` SHA
+- `sourceProvenance.sourceTreeDirty` reports whether tracked or untracked
+  checkout changes were present
+
+No supported publication route accepts this metadata. `release.ps1` requires
+`release-candidate` / `release-tag` provenance and refuses a local package before
+any GitHub upload.
 
 The ZIP contains one top-level `GraphCode` directory. Installation verifies the
 complete manifest and provider provenance before copying anything, then stages
@@ -27,6 +51,10 @@ Unsigned artifacts are explicitly marked `UNSIGNED (not code signed)` in
 format. Their checksums detect corruption, not publisher authenticity. They
 remain accepted unless `-TrustedSignerThumbprint` is supplied.
 
+Local development artifacts use the stronger
+`UNSIGNED LOCAL DEVELOPMENT PACKAGE (not code signed)` marker described above;
+they are installable for local testing but are never release candidates.
+
 ## Standalone setup without a checkout
 
 Extract the ZIP and use its `GraphCode\GraphCode-Setup.ps1`. The setup supports
@@ -35,10 +63,12 @@ neither this repository nor Git, Swift, Zig, the SDK, or a separate helper scrip
 It is a command-line PowerShell installer, not an MSI or graphical EXE installer.
 The default command is non-mutating `Verify`; installation must be explicit.
 
-For a **locally built, trusted development package**:
+For a locally built development package:
 
 ```powershell
-Expand-Archive -LiteralPath .\GraphCode-1.2.3-windows-x86_64.zip `
+$localPackage = Get-ChildItem .\GraphCode-0.0.0-local+*-windows-x86_64.zip |
+  Select-Object -First 1
+Expand-Archive -LiteralPath $localPackage.FullName `
   -DestinationPath .\extracted
 powershell.exe -NoProfile -File .\extracted\GraphCode\GraphCode-Setup.ps1 `
   -Command Verify
@@ -227,8 +257,9 @@ anything is built). The workflow checks out that tag before staging or building.
 `HEAD`; a mismatch is refused before packaging, including when `-Publish` is
 absent, because the workflow artifact is itself a durable release object.
 
-For local development of packaging changes from an untagged commit, the
-deliberate `-AllowTagMismatch` switch permits an unpublished package:
+For qualification of release packaging changes against an existing release tag,
+the deliberate `-AllowTagMismatch` switch permits an unpublished
+**release-candidate** package:
 
 ```powershell
 pwsh -NoProfile -File Tools\windows\release.ps1 -Tag v1.2.3 -AllowTagMismatch
@@ -237,7 +268,9 @@ pwsh -NoProfile -File Tools\windows\release.ps1 -Tag v1.2.3 -AllowTagMismatch
 The package records the requested tag, peeled tag commit, actual source commit,
 failed match, and explicit mismatch allowance in its own `metadata.json` before
 the manifest and ZIP are created. `-AllowTagMismatch` can never be combined
-with `-Publish`.
+with `-Publish`. It is not the developer local-package route; use
+`package.ps1 -Command Build -Local` when the artifact should identify itself as
+local rather than as a mismatched release candidate.
 
 After the provenance gate, `release.ps1` builds through `package.ps1`, re-runs
 `package.ps1 -Command Verify`, reads the built package's own `metadata.json`,

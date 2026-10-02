@@ -118,6 +118,14 @@ foreach ($produced in @($archive, $packageRoot)) {
 # Release publishing intentionally produces the ordinary unsigned package.
 # Keep the package's own declaration visible and reject an unexpected state.
 $metadata = Get-Content -LiteralPath (Join-Path $packageRoot "metadata.json") -Raw | ConvertFrom-Json
+$packageKind = [string] $metadata.packageKind
+$packageProvenance = $metadata.sourceProvenance
+if ($packageKind -eq "local-development" -or [string] $packageProvenance.kind -eq "local") {
+  throw "release publication refuses a local development package"
+}
+if ($packageKind -ne "release-candidate" -or [string] $packageProvenance.kind -ne "release-tag") {
+  throw "package does not declare release-candidate provenance"
+}
 $reported = [string] $metadata.signing
 if (-not $reported.StartsWith("UNSIGNED")) {
   throw "package signing state '$reported' contradicts the unsigned Windows release policy"
@@ -125,7 +133,6 @@ if (-not $reported.StartsWith("UNSIGNED")) {
 if ([string] $metadata.version -ne $version) {
   throw "package reports version '$($metadata.version)', expected '$version'"
 }
-$packageProvenance = $metadata.sourceProvenance
 if (-not $packageProvenance -or
     [string] $packageProvenance.tag -ne $Tag -or
     [string] $packageProvenance.tagCommit -ne $tagCommit -or
