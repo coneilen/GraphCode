@@ -32,6 +32,9 @@ struct GraphcodeApp: App {
       FeatureRamps.publishNodFlag(enabled: FeatureRamps.isEnabled(.nod))
       NodRuntimeLocator.installAvailability()
     }
+    let nodCards = NodLiveCardState()
+    NodCardWiring.provider = nodCards
+    NodCardWiring.answerer = nodCards
     // Records this instance as the one holding this workspace, so opening the same
     // workspace again raises this window instead of starting a second app over one set
     // of graphs and `zmx` session names. Released on the way out; a crash leaves a pid

@@ -20,20 +20,21 @@ than assuming that terminal slot zero or the last active slot is visible.
 
 By default, the pinned Winghostty child HWND already owns the terminal's UI Automation
 Text/Text2 provider. GraphCode supplies an owned UTF-8 snapshot of its existing
-120x40 rendered-cell grid, with spaces for empty cells, preserved trailing blanks,
-LF row separators, and independent UTF-16 length/cursor offsets. This deliberately
-replaces the recent raw VT byte stream: the accessible document is the current
-grid, not a transcript or scrollback. The ASCII parser and renderer are unchanged;
-Unicode cell-encoding tests do not establish Unicode terminal rendering. Render
-and accessibility updates remain separate, best-effort calls. Failures report
-through the existing status/diagnostic path without empty-text fallbacks; a failed
-accessibility update leaves the provider's last successful snapshot, which must
-not be treated as current renderer state. Producer tests use injected outbound
-calls, not native UIA. Once no input or pane publication error remains, the status
-path replaces only its own exact failure messages with one neutral error-cleared
-notice; it does not overwrite unrelated statuses or imply a reset pane published
-fresh text. Applied selection, visible caret/geometry, provider range
-conformance, and end-to-end accessibility parity remain unverified or incomplete.
+pane-sized rendered-cell grid, with spaces for empty cells, preserved trailing
+blanks, LF row separators, and independent UTF-16 length/cursor offsets. This
+deliberately replaces the recent raw VT byte stream: the accessible document is
+the current grid, not a transcript or scrollback. The ASCII parser and renderer
+are unchanged; Unicode cell-encoding tests do not establish Unicode terminal
+rendering. Render and accessibility updates remain separate, best-effort calls.
+Failures report through the existing status/diagnostic path without empty-text
+fallbacks; a failed accessibility update leaves the provider's last successful
+snapshot, which must not be treated as current renderer state. Producer tests use
+injected outbound calls, not native UIA. Once no input or pane publication error
+remains, the status path replaces only its own exact failure messages with one
+neutral error-cleared notice; it does not overwrite unrelated statuses or imply a
+reset pane published fresh text. Applied selection, visible caret/geometry,
+provider range conformance, and end-to-end accessibility parity remain unverified
+or incomplete.
 
 ### Experimental VT parser (opt-in, partial renderer support)
 
@@ -83,13 +84,18 @@ OSC 2 titles are retained without UI changes and bells remain a UI no-op.
 The PWD query copies the API's value, but **OSC 7 does not populate it at this
 pin**; an explicit public PWD option roundtrip is not OSC 7 support.
 
-Production remains fixed at **120x40**. Headless tests exercise in-memory resize,
-reflow, scrollback/viewport, all stream chunk boundaries, projection failures,
-allocation failures, and response ownership. Pixel-bound changes do not resize
-the VT because PTY resize negotiation is not implemented. Wheel/selection
+Production derives each pane's grid from its live bounds and measured cell
+metrics. Initial attach uses that computed size; later topology changes resize
+the owned cell/VT state and queue `zmx resize <session> <columns>x<rows>` for the
+attached session. Zero-sized or unavailable geometry preserves the previous
+grid rather than collapsing it during minimize/restore. Headless tests exercise
+the state transition, in-memory resize, reflow, scrollback/viewport, stream
+chunk boundaries, projection failures, allocation failures, and response
+ownership. They do not prove that a real backend accepted the resize or that
+visible wrapping and pixels match the negotiated PTY dimensions. Wheel/selection
 integration, native glyph rendering, visible caret geometry, full TextPattern
-conformance, and end-to-end terminal parity remain separate work. No live
-HWND, UIA, clipboard, device-input, or rendering proof is claimed.
+conformance, and end-to-end terminal parity remain separate work. No live HWND,
+UIA, clipboard, device-input, backend-resize, or rendering proof is claimed.
 
 `build.zig` builds the VT library separately from the unchanged Win32 host and
 links its generated static artifact into the application. The

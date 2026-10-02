@@ -116,7 +116,23 @@ graph files. `ctx.projectPath` comes from `$NOD_PROJECT_PATH`.
 
 `ask` and `handoff` follow `NodSettings.messagesOtherLoops`, read on every call.
 `draftForMe` emits `mailDraft` and sends nothing. `send` sends `messageNode` as this loop.
-`never` refuses. The runtime answers `sendDraft` with `sendDraft(ctx, {toNodeID, text})`.
+`never` refuses.
+The runtime keeps each draft's addressee and answers `sendDraft` with `sendDraft(ctx, {toNodeID, text})`, the text as the human edited it.
+Without `$NOD_PROJECT_PATH` the server stays mounted and its tools say the graph is out of reach.
+
+### Mounting
+
+| | Claude engine | Copilot engine |
+|---|---|---|
+| graphcode | in-process SDK MCP server `graphcode` (`mcp__graphcode__<tool>`) | custom tools `graphcode_<tool>` |
+| `.mcp.json` | `mcpServers`, with `strictMcpConfig: true` | `mcpServers` (config discovery stays off) |
+| gate | PreToolUse forces every `mcp__` call to `canUseTool` | `mcp` and `custom-tool` permission requests |
+
+`.mcp.json` is read walking up from the loop's working directory, the nearer file winning a
+name, with `${VAR}` and `${VAR:-default}` expanded. Names in `NodSettings.disabledMCPServers`
+are skipped, and an entry called `graphcode` is ignored. A project server's tool asks as
+`mcpTool` with subject `<server>/<tool>`.
+
 `classifyInbound(line, graph, nodeID)` maps a typed `[graphcode] <Sender>: …` line to the
 sending loop, so a drafted reply goes to the right place.
 

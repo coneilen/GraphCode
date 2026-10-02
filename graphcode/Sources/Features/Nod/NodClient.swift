@@ -172,6 +172,10 @@ struct NodSettingsClient: Sendable {
   /// "Always in <project>": the runtime keeps it for the session only; the shell allowlist
   /// is what makes it outlive the run.
   var addAllowlistPattern: @Sendable (String) async -> Void
+  /// The composer's edit-policy chip, kept for every Nod loop after this one.
+  var setEditPolicy: @Sendable (NodSettings.EditPolicy) async -> Void
+  /// Sign in again, raise the spend cap: both live on Settings › Agents › Nod.
+  var openNodSettings: @Sendable () async -> Void
 }
 
 extension NodSettingsClient: DependencyKey {
@@ -181,10 +185,17 @@ extension NodSettingsClient: DependencyKey {
       await MainActor.run {
         _ = SettingsModel.shared.settings.nod.addAllowlistPattern(pattern)
       }
+    },
+    setEditPolicy: { policy in
+      await MainActor.run { SettingsModel.shared.settings.nod.editsInWorktree = policy }
+    },
+    openNodSettings: {
+      await MainActor.run { SettingsModel.shared.requestedPane = .agent(.nod) }
     })
 
   static let testValue = NodSettingsClient(
-    current: { NodSettings() }, addAllowlistPattern: { _ in })
+    current: { NodSettings() }, addAllowlistPattern: { _ in }, setEditPolicy: { _ in },
+    openNodSettings: {})
 }
 
 extension DependencyValues {

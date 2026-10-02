@@ -1,10 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Authorization, Engine, EngineFailure, ToolRequest, TurnCallbacks, TurnResult, UsageReport } from "./engine";
 import type { EventLog } from "./eventLog";
 import { GoalEvaluator } from "./goal";
 import { HunkStager, type StagedHunk } from "./hunks";
+import {
+  createGraphcodeTools,
+  daemonClient,
+  DaemonError,
+  sendDraft,
+  type GraphDaemon,
+  type GraphcodeToolContext,
+  type MessagePolicy,
+} from "./mcp";
+import type { ProjectMcpServer } from "./mcpServers";
 import { PermissionGate } from "./permissions";
 import type { PresenceReporter } from "./presence";
 import type { NodAttachment, NodCommand, NodDelivery, NodTurnOrigin } from "./protocol";
@@ -33,6 +43,14 @@ export interface RuntimeOptions {
   unattended?: boolean;
   /** Consecutive "not yet" goal checks before Nod stops and waits for a human. */
   maxGoalContinuations?: number;
+  /** `$NOD_PROJECT_PATH`: the graph the graphcode MCP server reads. */
+  projectPath?: string;
+  /** graphcoded's socket; a client on the default socket when absent. */
+  daemon?: GraphDaemon;
+  /** Read per call, so Settings › Agents › Nod applies without a restart. */
+  messagesOtherLoops?: () => MessagePolicy;
+  /** The project's `.mcp.json` servers, already without `disabledMCPServers`. */
+  mcpServers?: Record<string, ProjectMcpServer>;
 }
 
 interface Pending {
@@ -70,6 +88,9 @@ export class NodRuntime {
   private closed = false;
   private idleWaiters: (() => void)[] = [];
   private readonly unattended: boolean;
+  private readonly graph: GraphcodeToolContext;
+  /** `mailDraft` id → the loop it is addressed to, for `sendDraft`. */
+  private drafts = new Map<string, string>();
 
   constructor(private readonly options: RuntimeOptions) {
     const { log, settings, cwd } = options;
@@ -81,6 +102,17 @@ export class NodRuntime {
       log,
       onAwaiting: (awaiting) => void this.options.presence.presence(awaiting ? "awaitingInput" : "busy"),
     });
+    const { projectPath } = options;
+    this.graph = {
+      nodeID: options.nodeID,
+      projectPath: projectPath ?? "",
+      daemon: projectPath ? (options.daemon ?? daemonClient()) : noProject,
+      messagesOtherLoops: options.messagesOtherLoops ?? (() => settings.messagesOtherLoops),
+      emit: (draft) => {
+        this.drafts.set(draft.draftID, draft.toNodeID);
+        log.append(draft);
+      },
+    };
     this.stager = new HunkStager(log, cwd);
     this.stager.onLateDecision = (hunk) => this.steer(lateDecisionNote(hunk));
     if (options.goal?.trim()) {
@@ -113,6 +145,7 @@ export class NodRuntime {
       resume: this.options.resume,
       forkFrom: inherit?.fork?.conversationID,
       systemAppend,
+      mcp: { graphcode: createGraphcodeTools(this.graph), servers: this.options.mcpServers ?? {} },
     });
     this.conversationID = session.conversationID;
     this.model = session.model;
@@ -161,8 +194,13 @@ export class NodRuntime {
         return;
       case "fork":
         throw new Error("fork is not supported by this runtime yet");
-      case "sendDraft":
-        throw new Error("mail drafts are sent by the graph layer, not the runtime");
+      case "sendDraft": {
+        const toNodeID = this.drafts.get(command.draftID) ?? this.loggedDraftTarget(command.draftID);
+        if (!toNodeID) throw new Error(`no mail draft ${command.draftID}`);
+        await sendDraft(this.graph, { toNodeID, text: command.text });
+        this.drafts.delete(command.draftID);
+        return;
+      }
       case "compact":
         if (this.busy) this.compactRequested = true;
         else await this.compactNow();
@@ -388,10 +426,32 @@ export class NodRuntime {
     this.options.log.append({ type: "failure", kind: failure.kind, message: failure.message });
   }
 
+  /** A draft from before a resume is only in the log. */
+  private loggedDraftTarget(draftID: string): string | undefined {
+    const path = this.options.log.path;
+    if (!existsSync(path)) return undefined;
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      if (!line.includes(draftID)) continue;
+      const record = JSON.parse(line) as { type?: string; draftID?: string; toNodeID?: string };
+      if (record.type === "mailDraft" && record.draftID === draftID) return record.toNodeID;
+    }
+    return undefined;
+  }
+
   private writeConversation(): void {
     const conversation = { engine: this.options.engine.kind, model: this.model, conversationID: this.conversationID };
     writeFileSync(join(this.options.stateDir, "conversation.json"), JSON.stringify(conversation, null, 2) + "\n");
   }
+}
+
+const noProject: GraphDaemon = {
+  snapshot: unreachable,
+  mailbox: unreachable,
+  graphCommand: unreachable,
+};
+
+async function unreachable(): Promise<never> {
+  throw new DaemonError("This loop was launched without its project path (NOD_PROJECT_PATH), so the graph is out of reach.");
 }
 
 function lateDecisionNote(hunk: StagedHunk): string {

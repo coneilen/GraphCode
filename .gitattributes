@@ -1,2 +1,5 @@
 *.swift text eol=lf
 *.sh text eol=lf
+investigation/macos-parity-evidence/evidence/*.png filter=lfs diff=lfs merge=lfs -text
+investigation/visual-baseline/rendered-macos/*.png filter=lfs diff=lfs merge=lfs -text
+investigation/visual-baseline/rendered-windows/*.png filter=lfs diff=lfs merge=lfs -text

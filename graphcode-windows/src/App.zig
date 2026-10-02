@@ -1,5 +1,12 @@
 const std = @import("std");
-const build_options = @import("build_options");
+const builtin = @import("builtin");
+const build_options = if (builtin.is_test)
+    struct {
+        pub const version = "dev";
+        pub const worktrees_deferred = false;
+    }
+else
+    @import("build_options");
 const DaemonClient = @import("DaemonClient.zig").DaemonClient;
 const GraphCanvas = @import("GraphCanvas.zig");
 const GdiplusAA = @import("GdiplusAA.zig");
@@ -52,6 +59,7 @@ const c = Win32.c;
 
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
 const workspace_restart_message = "Workspace identity changed or could not be verified. Restart GraphCode before managing workspaces.";
+const worktrees_deferred_message = "Worktrees are deferred for this preview";
 const tray_test_hook_environment = "GRAPHCODE_TRAY_TEST_HOOK";
 const daemon_supervisor_test_hook_environment = "GRAPHCODE_DAEMON_SUPERVISOR_TEST_HOOK";
 const daemon_supervisor_test_property =
@@ -122,6 +130,11 @@ fn workspaceInstanceKey(allocator: std.mem.Allocator, path: []const u8) ![:0]u16
     const name = try WorkspaceLifecycle.instanceName(allocator, user, path);
     defer allocator.free(name);
     return std.unicode.utf8ToUtf16LeAllocZ(allocator, name);
+}
+
+fn compiledWorktreesDeferred() bool {
+    if (builtin.is_test) return false;
+    return build_options.worktrees_deferred;
 }
 
 pub fn restoreCurrentWorkspace(allocator: std.mem.Allocator) !void {
@@ -1014,6 +1027,8 @@ pub const App = struct {
     edge_drag_source_id: []u8 = &.{},
     selection_initialized: bool = false,
     worktree_inspection: ?WorktreeStatus.Inspection = null,
+    worktrees_deferred: bool = false,
+    worktree_inspection_attempt_count: usize = 0,
     selected_worktree_path: []u8 = &.{},
     reclaim_confirmation_armed: bool = false,
     worktree_dialog: ?WorktreeDialog.Dialog = null,
@@ -1127,6 +1142,7 @@ pub const App = struct {
             .client = client,
             .daemon = .{ .allocator = allocator },
             .model = GraphModel.Model.init(allocator),
+            .worktrees_deferred = compiledWorktreesDeferred(),
             .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
             .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
             .tray_test_hook_enabled = envFlag(tray_test_hook_environment),
@@ -3397,7 +3413,11 @@ pub const App = struct {
         const sketch = std.mem.eql(u8, node.loop_type, "sketch");
         var promotion_error: ?anyerror = null;
         const promotion: ?SketchPromotion.Context = if (!sketch) null else SketchPromotion.Context.capture(
-            self.allocator, &self.model, project_path, composite_id orelse "", node,
+            self.allocator,
+            &self.model,
+            project_path,
+            composite_id orelse "",
+            node,
         ) catch |err| blk: {
             promotion_error = err;
             break :blk null;
@@ -4028,7 +4048,29 @@ pub const App = struct {
         );
     }
 
+    fn clearDeferredWorktreeState(self: *App) void {
+        if (self.worktree_dialog) |*dialog| dialog.deinit();
+        self.worktree_dialog = null;
+        if (self.worktree_inspection) |*inspection| {
+            WorktreeStatus.deinitInspection(self.allocator, inspection);
+        }
+        self.worktree_inspection = null;
+        if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
+        self.selected_worktree_path = &.{};
+        self.reclaim_confirmation_armed = false;
+        self.model.invalidateWorktreeNotices(.worktrees_changed);
+    }
+
+    fn guardWorktreesPreview(self: *App) bool {
+        if (!self.worktrees_deferred) return false;
+        self.clearDeferredWorktreeState();
+        self.setStatus(worktrees_deferred_message);
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+        return true;
+    }
+
     fn inspectWorktrees(self: *App) void {
+        if (self.guardWorktreesPreview()) return;
         if (envFlag("GRAPHCODE_UIA_GATE") and envFlag("GRAPHCODE_UIA_SHOW_DIALOGS") and self.worktree_inspection != null) {
             self.presentWorktreeSweep();
             return;
@@ -4072,6 +4114,7 @@ pub const App = struct {
     }
 
     fn inspectWorktreesImpl(self: *App, show_sweep: bool) void {
+        if (self.guardWorktreesPreview()) return;
         const current_graph = self.model.graph orelse {
             self.setStatus("Worktrees require a local filesystem project");
             return;
@@ -4099,6 +4142,7 @@ pub const App = struct {
                 };
             }
         }
+        self.worktree_inspection_attempt_count += 1;
         var inspection = WorktreeStatus.inspect(self.allocator, path, bindings.items) catch |err| {
             self.recordWorktreeInspectionFailure(path, err);
             return;
@@ -4140,6 +4184,7 @@ pub const App = struct {
     }
 
     fn presentWorktreeSweep(self: *App) void {
+        if (self.guardWorktreesPreview()) return;
         const graph = self.model.graph orelse return;
         const inspection = self.worktree_inspection orelse return;
         const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
@@ -4259,7 +4304,10 @@ pub const App = struct {
             defer self.allocator.free(message);
             self.setIngressError(message);
         } else |_| {}
-        self.setStatus("UIA fixture inspection ready");
+        self.setStatus(if (self.worktrees_deferred)
+            worktrees_deferred_message
+        else
+            "UIA fixture inspection ready");
         return true;
     }
 
@@ -4278,6 +4326,7 @@ pub const App = struct {
         self.uia_fixture_model_arena = data.model_arena;
         self.worktree_inspection = data.inspection;
         self.worktree_dialog = data.dialog;
+        if (self.worktrees_deferred) self.clearDeferredWorktreeState();
         if (self.uia_fixture_project_path.len != 0) self.allocator.free(self.uia_fixture_project_path);
         self.uia_fixture_project_path = captured;
         if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
@@ -4359,6 +4408,7 @@ pub const App = struct {
     }
 
     fn reclaimWorktrees(self: *App) void {
+        if (self.guardWorktreesPreview()) return;
         const current_graph = self.model.graph orelse {
             self.setStatus("Worktrees require a local filesystem project");
             return;
@@ -4439,6 +4489,7 @@ pub const App = struct {
     }
 
     pub fn selectWorktreeRow(self: *App, path: []const u8) bool {
+        if (self.guardWorktreesPreview()) return false;
         const inspection = self.worktree_inspection orelse return false;
         if (!envFlag("GRAPHCODE_UIA_GATE")) {
             if (self.currentProject()) |project| {
@@ -4467,6 +4518,7 @@ pub const App = struct {
     }
 
     pub fn toggleWorktreeRow(self: *App, index: usize) bool {
+        if (self.guardWorktreesPreview()) return false;
         const dialog = if (self.worktree_dialog) |*value| value else return false;
         if (index >= dialog.rows.items.len or
             WorktreeStatus.decision(dialog.rows.items[index].entry) != .reclaimable) return false;
@@ -4486,6 +4538,7 @@ pub const App = struct {
     }
 
     fn applyUiaWorktreeSelection(self: *App, payload: usize, operation: usize) bool {
+        if (self.guardWorktreesPreview()) return false;
         const dialog = if (self.worktree_dialog) |*value| value else return false;
         var target: ?usize = null;
         for (dialog.rows.items, 0..) |row, index| {
@@ -4763,6 +4816,7 @@ pub const App = struct {
     }
 
     fn editWorktreePolicy(self: *App) void {
+        if (self.guardWorktreesPreview()) return;
         const selected_path = self.currentProject() orelse {
             self.setStatus("Open a project before changing project settings");
             return;
@@ -4809,6 +4863,7 @@ pub const App = struct {
     }
 
     fn saveCurrentWorktreePolicy(self: *App) void {
+        if (self.guardWorktreesPreview()) return;
         const dialog = self.worktree_dialog orelse {
             self.setStatus("Inspect worktrees before saving policy");
             return;
@@ -4820,6 +4875,7 @@ pub const App = struct {
     }
 
     fn toggleAllowReclaim(self: *App) void {
+        if (self.guardWorktreesPreview()) return;
         if (self.worktree_dialog) |*dialog| {
             var policy = dialog.policy;
             policy.allow_reclaim = !policy.allow_reclaim;
@@ -4829,6 +4885,7 @@ pub const App = struct {
     }
 
     fn toggleConfirmReclaim(self: *App) void {
+        if (self.guardWorktreesPreview()) return;
         if (self.worktree_dialog) |*dialog| {
             var policy = dialog.policy;
             policy.confirm_each_reclaim = !policy.confirm_each_reclaim;
@@ -4838,6 +4895,7 @@ pub const App = struct {
     }
 
     fn revealSelectedWorktree(self: *App) void {
+        if (self.guardWorktreesPreview()) return;
         const dialog = self.worktree_dialog orelse {
             self.setStatus("Inspect worktrees before revealing a row");
             return;
@@ -4875,6 +4933,7 @@ pub const App = struct {
     }
 
     fn keepWorktreeOffer(self: *App, path: []const u8) void {
+        if (self.guardWorktreesPreview()) return;
         for (self.kept_worktree_paths.items) |kept| if (std.mem.eql(u8, kept, path)) return;
         const copy = self.allocator.dupe(u8, path) catch {
             self.setStatus("Unable to keep the worktree offer");
@@ -4889,6 +4948,7 @@ pub const App = struct {
     }
 
     fn reclaimWorktreeOffer(self: *App, path: []const u8) void {
+        if (self.guardWorktreesPreview()) return;
         const graph = self.model.graph orelse return;
         if (!graph.project.isLocalFilesystem()) return;
         const inspection = self.worktree_inspection orelse return;
@@ -4932,6 +4992,7 @@ pub const App = struct {
     }
 
     fn moveWorktreeSelection(self: *App, delta: i32) void {
+        if (self.guardWorktreesPreview()) return;
         const inspection = self.worktree_inspection orelse return;
         if (inspection.entries.items.len == 0) return;
         var index: usize = 0;
@@ -9240,7 +9301,11 @@ test "workspace running cycle production helper compiles with no launch capabili
     F.open = &.{F.wide(F.rows[0].path)};
     F.expected_restore = F.open[0];
     try std.testing.expectEqual(WorkspaceCycleResult.restored, try cycleWorkspaceWith(
-        RestoreOnly, std.testing.allocator, F.default_path, "c:/fixture/.graphcode", 1,
+        RestoreOnly,
+        std.testing.allocator,
+        F.default_path,
+        "c:/fixture/.graphcode",
+        1,
     ));
     try std.testing.expectEqual(@as(usize, 1), F.restores);
 }
@@ -9524,10 +9589,14 @@ test "Show in Graph shared action publishes project UIA after native effects com
     );
     try std.testing.expect(app.model.setSelectedID("loop"));
     var workspace: TerminalWorkspace.Workspace = .{
-        .parent = null, .allocator = allocator, .zmx_path = &.{}, .cwd = &.{},
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
         .input_queue = .{ .allocator = allocator },
         .layout = try @import("WorkspaceLayout.zig").Layout.init(allocator, "A"),
-        .layout_path = &.{}, .project_key = &.{},
+        .layout_path = &.{},
+        .project_key = &.{},
     };
     defer workspace.layout.deinit();
     try workspace.layout.addTab("loop", true);
@@ -13021,6 +13090,74 @@ test "header UIA identities hash to distinct payloads" {
             try std.testing.expect(Accessibility.worktreeIdentityPayload(lhs) != Accessibility.worktreeIdentityPayload(rhs));
         }
     }
+}
+
+test "preview Worktrees guard blocks production actions without inspection" {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .worktrees_deferred = true,
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer {
+        if (app.status_override.len != 0) allocator.free(app.status_override);
+        app.model.deinit();
+        app.sidebar_state.deinit();
+        app.declared_entry_ids.deinit();
+        app.kept_worktree_paths.deinit();
+    }
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\preview","name":"Preview"},"nodes":[],"edges":[]}}}
+    );
+    const entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator);
+    app.worktree_inspection = .{
+        .entries = entries,
+        .default_branch = try allocator.dupe(u8, "main"),
+        .project_path = try allocator.dupe(u8, "C:\\preview"),
+    };
+    app.worktree_dialog = try WorktreeDialog.Dialog.init(
+        allocator,
+        "C:\\preview",
+        app.worktree_inspection.?.entries.items,
+        .{ .allow_reclaim = true },
+    );
+    app.selected_worktree_path = try allocator.dupe(u8, "C:\\preview-worktree");
+    app.reclaim_confirmation_armed = true;
+
+    app.inspectWorktrees();
+    try std.testing.expectEqualStrings(worktrees_deferred_message, app.status_override);
+    try std.testing.expectEqual(@as(usize, 0), app.worktree_inspection_attempt_count);
+    try std.testing.expect(app.worktree_inspection == null);
+    try std.testing.expect(app.worktree_dialog == null);
+    try std.testing.expectEqual(@as(usize, 0), app.selected_worktree_path.len);
+    try std.testing.expect(!app.reclaim_confirmation_armed);
+
+    app.inspectWorktreesImpl(false);
+    app.presentWorktreeSweep();
+    app.reclaimWorktrees();
+    app.reclaimWorktreeOffer("C:\\preview-worktree");
+    app.keepWorktreeOffer("C:\\preview-worktree");
+    app.editWorktreePolicy();
+    app.saveCurrentWorktreePolicy();
+    app.toggleAllowReclaim();
+    app.toggleConfirmReclaim();
+    app.revealSelectedWorktree();
+    app.moveWorktreeSelection(1);
+    try std.testing.expect(!app.selectWorktreeRow("C:\\preview-worktree"));
+    try std.testing.expect(!app.toggleWorktreeRow(0));
+    try std.testing.expect(!app.applyUiaWorktreeSelection(0, 0));
+    try std.testing.expectEqualStrings(worktrees_deferred_message, app.status_override);
+    try std.testing.expectEqual(@as(usize, 0), app.worktree_inspection_attempt_count);
+
+    app.surface = .project;
+    app.openGlobalOverview();
+    try std.testing.expectEqual(GraphCanvas.Surface.overview, app.surface);
+    try std.testing.expectEqualStrings(worktrees_deferred_message, app.status_override);
 }
 
 fn runSmokeWorkspaceActions(self: *App) void {
