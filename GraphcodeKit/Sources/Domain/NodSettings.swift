@@ -40,6 +40,9 @@ public struct NodSettings: Codable, Equatable, Sendable {
   /// Per-run cap for unattended loops (timed and composite children), in dollars; 0 is no
   /// cap. Copilot reports premium requests instead and is capped by its plan.
   public var spendCapUSD: Double
+  /// MCP servers from the project's `.mcp.json` switched off for Nod, by name. The
+  /// built-in graphcode server is always on and never listed here.
+  public var disabledMCPServers: [String]
 
   public init(
     engine: NodEngine = .claudeAgentSDK,
@@ -52,7 +55,8 @@ public struct NodSettings: Codable, Equatable, Sendable {
     editsOutsideWorktree: Ask = .never,
     messagesOtherLoops: MessagePolicy = .draftForMe,
     shellAllowlist: [String] = [],
-    spendCapUSD: Double = 2
+    spendCapUSD: Double = 2,
+    disabledMCPServers: [String] = []
   ) {
     self.engine = engine
     self.modelsByLoopType = modelsByLoopType
@@ -65,6 +69,7 @@ public struct NodSettings: Codable, Equatable, Sendable {
     self.messagesOtherLoops = messagesOtherLoops
     self.shellAllowlist = shellAllowlist
     self.spendCapUSD = spendCapUSD
+    self.disabledMCPServers = disabledMCPServers
   }
 
   public init(from decoder: Decoder) throws {
@@ -84,6 +89,7 @@ public struct NodSettings: Codable, Equatable, Sendable {
     messagesOtherLoops = try value(.messagesOtherLoops, defaults.messagesOtherLoops)
     shellAllowlist = try value(.shellAllowlist, defaults.shellAllowlist)
     spendCapUSD = try value(.spendCapUSD, defaults.spendCapUSD)
+    disabledMCPServers = try value(.disabledMCPServers, defaults.disabledMCPServers)
   }
 
   public func model(for loopType: LoopType) -> String? {
