@@ -275,6 +275,15 @@ extension [NodTranscript.Item] {
 
 @Suite
 struct NodEventTailTests {
+  /// The runtime's launcher names the directory with `uuidString` as is; a lowercased copy
+  /// would split the pane from the runtime on a case-sensitive volume.
+  @Test
+  func theStateDirectoryIsTheUppercaseNodeID() throws {
+    let id = try #require(UUID(uuidString: "9b3408f9-9b16-447f-a439-fc2aa8c02d06"))
+    let url = NodStateDirectory.url(forNode: id, supportDirectory: URL(fileURLWithPath: "/s"))
+    #expect(url.path == "/s/nod/9B3408F9-9B16-447F-A439-FC2AA8C02D06")
+  }
+
   @Test
   func aTornLineWaitsForTheRestOfIt() throws {
     let lines = NodLog.monetization.jsonLines
