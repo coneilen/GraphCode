@@ -139,6 +139,35 @@ struct SendAcknowledgementTests {
   }
 
   @Test
+  func aTypingAbandonedAtTheDeadlineIsNeitherRetriedNorStagedTwice() async {
+    let attempts = LockIsolated(0)
+    let ensured = LockIsolated(0)
+    let remembered = LockIsolated<[String]>([])
+    let graph = Self.graph()
+    let store = GraphStore(
+      graph: graph,
+      deliveryDeadline: .milliseconds(300),
+      onEnsureSession: { _, _ in ensured.withValue { $0 += 1 } },
+      onDeliverMessage: { _, _, _ in
+        attempts.withValue { $0 += 1 }
+        // Hangs until the deadline cancels it, then reports failure, as a cancelled
+        // `zmx send` does.
+        while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(10)) }
+        return false
+      },
+      onAppendMemory: { _, entry in remembered.withValue { $0.append(entry) } })
+
+    await store.handle(.messageNode(graph.nodes[0].id, text: "now", from: nil, followUp: nil))
+    await store.finishSessionTyping()
+    // Past the respawn settle, where an abandoned typing would retry.
+    try? await Task.sleep(for: GraphStore.respawnedSessionSettle + .milliseconds(500))
+
+    #expect(attempts.value == 1)
+    #expect(ensured.value == 0)
+    #expect(remembered.value == ["while you were away: [graphcode] now"])
+  }
+
+  @Test
   func aSendIsBroadcastOnceWhenItsDrainChangesNothing() async {
     let broadcasts = LockIsolated(0)
     let graph = Self.graph()

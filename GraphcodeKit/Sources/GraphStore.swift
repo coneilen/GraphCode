@@ -3858,12 +3858,17 @@ public actor GraphStore {
     _ message: String, to nodeID: UUID, resolved: Bool
   ) async -> TypingOutcome {
     guard let target = graph.nodes[id: nodeID] else { return .targetGone }
+    // Cancelled means `typeLogged`'s deadline gave up on this typing and staged it: a
+    // cancelled send reads as failed, and retrying or staging again from here would
+    // respawn the loop and type into it behind the chain's next message.
     if resolved {
       if await deliverToSession(target, message) { return .typed }
+      if Task.isCancelled { return .staged(reason: "deadline") }
       stageUntyped(message, to: target)
       return .staged(reason: "session-gone")
     }
     if await deliverToSession(target, message) { return .typed }
+    if Task.isCancelled { return .staged(reason: "deadline") }
     // The transport can also fail because the session died after the graph last
     // looked — a goal loop whose agent exited on its very first turn had no session
     // left to type into, and (before sessions that answer while dead stopped passing
@@ -3879,6 +3884,7 @@ public actor GraphStore {
       ensureSession(target)
       try? await Task.sleep(for: Self.respawnedSessionSettle)
       if await deliverToSession(target, message) { return .typed }
+      if Task.isCancelled { return .staged(reason: "deadline") }
     }
     stageUntyped(message, to: target)
     return .staged(reason: "delivery-failed")
