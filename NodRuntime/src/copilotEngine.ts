@@ -207,7 +207,10 @@ export class CopilotEngine implements Engine {
         const error = data.error as { message?: string } | undefined;
         let output = ok ? (result?.content ?? "") : (error?.message ?? result?.content ?? "failed");
         if (this.injectedSteer && output.includes(this.injectedSteer)) {
-          output = output.replace(this.injectedSteer, "").trim();
+          output = output
+            .replace(this.injectedSteer, "")
+            .replace(/\s*Additional guidance from postToolUse hooks:\s*$/, "")
+            .trim();
           this.injectedSteer = undefined;
         }
         turn?.callbacks.toolResult(id, ok ? "ok" : "error", summarizeResult(tool?.name ?? "", output, !ok), output, tool ? Date.now() - tool.at : undefined);
