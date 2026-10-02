@@ -39,6 +39,7 @@ struct RespawnOnSendTests {
     let nodeID = graph.nodes[0].id
 
     await store.handle(.messageNode(nodeID, text: "wake up", from: nil, followUp: nil))
+    await store.finishSessionTyping()
 
     #expect(deliveries.value == 2)
     #expect(ensured.value == 1)
@@ -61,6 +62,7 @@ struct RespawnOnSendTests {
     let nodeID = graph.nodes[0].id
 
     await store.handle(.messageNode(nodeID, text: "wake up", from: nil, followUp: nil))
+    await store.finishSessionTyping()
 
     #expect(deliveries.value == 2)
     #expect(remembered.value.contains { $0.contains("while you were away") })
@@ -85,6 +87,7 @@ struct RespawnOnSendTests {
     let nodeID = graph.nodes[0].id
 
     await store.handle(.messageNode(nodeID, text: "wake up", from: nil, followUp: nil))
+    await store.finishSessionTyping()
 
     #expect(deliveries.value == 1)
     #expect(ensured.value == 0)
@@ -102,6 +105,7 @@ struct RespawnOnSendTests {
     let nodeID = graph.nodes[0].id
 
     await store.handle(.messageNode(nodeID, text: "wake up", from: nil, followUp: nil))
+    await store.finishSessionTyping()
 
     #expect(ensured.value == 0)
   }
