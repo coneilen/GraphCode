@@ -87,6 +87,16 @@ final class WindowsDaemonTests: XCTestCase {
       XCTAssertEqual(ProjectRegistry.presencePollDelay(runningLoops: 0), .seconds(60))
     }
 
+    func testMissingLegacyApplicationSupportFallsBackWithoutTrapping() {
+      let fallback = URL(fileURLWithPath: "C:\\Users\\test-user\\.graphcode", isDirectory: true)
+
+      XCTAssertEqual(
+        SupportDirectory.legacyURL(
+          applicationSupportDirectories: [],
+          fallback: fallback),
+        fallback)
+    }
+
     func testShellPredicateUsesPowerShellAndProjectWorkingDirectory() async throws {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("graphcode-predicate-\(UUID().uuidString)", isDirectory: true)

@@ -147,9 +147,21 @@ public enum SupportDirectory {
 
   /// Where graphcode kept its state before this moved. Read only by the migration below.
   static var legacyURL: URL {
-    FileManager.default
-      .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-      .appendingPathComponent("graphcode", isDirectory: true)
+    legacyURL(
+      applicationSupportDirectories: FileManager.default.urls(
+        for: .applicationSupportDirectory,
+        in: .userDomainMask),
+      fallback: defaultURL)
+  }
+
+  static func legacyURL(
+    applicationSupportDirectories: [URL],
+    fallback: URL
+  ) -> URL {
+    guard let applicationSupport = applicationSupportDirectories.first else {
+      return fallback
+    }
+    return applicationSupport.appendingPathComponent("graphcode", isDirectory: true)
   }
 
   public static var binDirectory: URL {

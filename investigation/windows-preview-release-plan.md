@@ -10,14 +10,29 @@ The critical path is terminal correctness plus a packaged production-daemon
 flight, followed by fixes for any reproduced core bugs. It is not closing all
 36 Partial rows, and it is not just visual polish.
 
-Assessment date: **2026-10-01**. Accepted source floor:
-`f9191cc88a8790807565c1cccad1adb36f43379f`, including accepted product
-source through `ac44de5de71ce9f03ec16b18401855b1126c4d3b` and the merged
-provider-priority documentation in
-[#571](https://github.com/scgopi/GraphCode/pull/571). At this audited HEAD, the
-[parity ledger](ui-parity-matrix.md) contains **98 surfaces: 62 Validated and
-36 Partial**. A newer candidate must be qualified at its own exact source and
-package hashes.
+Assessment date: **2026-10-01**. Accepted repository source floor:
+`ca535d0c4042a60ab748f7ff01d6460e9c9ec0d1` (`origin/main` after
+[#593](https://github.com/scgopi/GraphCode/pull/593)). The first-wave source
+floor remains `7d382687eadbce24b0f72eb23633896414153671`; its post-wave
+documentation reconciliation [#584](https://github.com/scgopi/GraphCode/pull/584)
+merged as `f1c5a57f3ba7e9f5743c34a87628806992e1089f`. The second wave then
+merged resilient Zig downloads [#586](https://github.com/scgopi/GraphCode/pull/586)
+as `c19e277eef2728ef5046770a34fef8f0bbd63f33`, app-native stack `#595`
+(not a GitHub PR) containing [#585](https://github.com/scgopi/GraphCode/pull/585)
+and [#594](https://github.com/scgopi/GraphCode/pull/594) atomically as
+`7d5cf3be8a86b7562b527f90d854845a52f2ac82`, and redirected-profile
+daemon fix [#593](https://github.com/scgopi/GraphCode/pull/593) from accepted
+head `285b73e8e5a7634a9033b8e72f950efc703b4f60` as the current main
+merge. Exact-head #593 checks include successful Windows shell, Windows Swift
+production coverage, and the mandatory macOS shared regression.
+
+At this audited HEAD, a row-by-row review of the
+[parity ledger](ui-parity-matrix.md) still contains exactly **98 surfaces:
+62 Validated and 36 Partial**, with zero Missing, Blocked, or Divergent rows.
+These source, contributor-flow, and evidence-pipeline fixes supply no installed
+production-daemon/native-client or matched macOS observation that closes the
+remaining residuals of a whole row. A newer candidate must be qualified at its
+own exact source and package hashes.
 
 The earlier `0765419a6d1e7ad401422903edf9102dbf0c9a17` assessment recorded
 63 Validated and 35 Partial before a clean-clone setup and manual launch showed
@@ -30,11 +45,13 @@ fix [#565](https://github.com/scgopi/GraphCode/pull/565), terminal exit-tail
 draining [#566](https://github.com/scgopi/GraphCode/pull/566), Tab/backtab
 routing [#567](https://github.com/scgopi/GraphCode/pull/567), launch-free
 packaged-core preparation [#568](https://github.com/scgopi/GraphCode/pull/568),
-and workspace recovery preservation
-[#570](https://github.com/scgopi/GraphCode/pull/570). These improve accepted
-source, focused coverage, and qualification readiness; none independently
-supplies the missing live rendered, production-daemon, native-input,
-cross-platform, or published-artifact evidence required to promote a parity row.
+workspace recovery preservation
+[#570](https://github.com/scgopi/GraphCode/pull/570), and the completed
+implementation waves summarized below. These improve accepted source, focused
+coverage, and qualification readiness; none independently supplies the missing
+installed production-daemon, owned native-input, authenticated-backend,
+destructive-lifecycle, cross-platform, or published-artifact evidence required
+to promote a parity row.
 
 The live release API was checked on this date:
 [v0.1.77](https://github.com/scgopi/GraphCode/releases/tag/v0.1.77), published
@@ -66,14 +83,45 @@ Mixed rows are split within their notes. Clipboard, IME, DPI, accessibility and
 font quality are not blanket polish categories. Existing code bugs blocking
 either parity or ordinary app features are legitimate functional work.
 
+### Evidence-state vocabulary and completed implementation waves
+
+Use these states literally rather than treating "merged" as "release-ready":
+
+| State | Meaning in this plan |
+|---|---|
+| **Source-fixed** | The diagnosed source or tooling defect is corrected in accepted main. This does not establish the installed behavior. |
+| **Locally/CI qualified** | Focused tests, builds, harnesses, or required checks ran with positive execution. This is narrower than a packaged native-client flight. |
+| **Packaged/native-client qualified** | The exact built artifact ran on the declared owned Windows client with production components and the required real input/lifecycle evidence. None of the implementation-wave PRs reached this state. |
+| **Published** | An authorized Windows artifact is attached to a release with recorded provenance/checksum. No Windows artifact is published. |
+| **Deferred** | Work is deliberately outside the current critical path unless a concrete dependency appears. |
+| **Evidence-only** | The work changes documentation, attribution, or observation reliability without itself changing the product behavior being assessed. |
+
+| Delivery | Accepted mapping | State at `ca535d0c` | Residual |
+|---|---|---|---|
+| Audit reconciliation | [#572](https://github.com/scgopi/GraphCode/pull/572) | **Evidence-only**, merged | Superseded by this post-wave audit; no product or parity-row change. |
+| Post-wave documentation reconciliation | [#584](https://github.com/scgopi/GraphCode/pull/584) | **Evidence-only**, merged as `f1c5a57f3ba7e9f5743c34a87628806992e1089f` | Superseded by this second-wave audit; no product or parity-row change. |
+| Onboarding support directory | [#573](https://github.com/scgopi/GraphCode/pull/573) closes [#554](https://github.com/scgopi/GraphCode/issues/554) | **Source-fixed; locally/CI qualified** by 3/3 focused and 10/10 full onboarding tests | Exact packaged first launch must prove the selected support directory changes while the real profile remains byte-for-byte unchanged. |
+| Provider bootstrap paths | [#574](https://github.com/scgopi/GraphCode/pull/574) closes [#551](https://github.com/scgopi/GraphCode/issues/551) | **Source/tooling-fixed; locally/CI qualified** by 5/5 bootstrap tests and the provider-pin contract | Contributor setup improvement only; not packaged-client evidence. |
+| Deep worktree fixtures | [#575](https://github.com/scgopi/GraphCode/pull/575) closes [#561](https://github.com/scgopi/GraphCode/issues/561) | **Source/tooling-fixed; locally qualified** by a deep-root positive run and 21 immutable regression case logs | Evidence-pipeline reliability only; no product parity effect. |
+| Validation profile isolation | [#576](https://github.com/scgopi/GraphCode/pull/576) closes [#562](https://github.com/scgopi/GraphCode/issues/562) | **Source/tooling-fixed; locally/CI qualified** by 4/4 isolation tests and 380 validation-runner contracts | Qualification launches are isolated; this does not establish installed-product profile behavior. |
+| Missing-secret daemon startup | [#577](https://github.com/scgopi/GraphCode/pull/577) closes [#555](https://github.com/scgopi/GraphCode/issues/555) | **Source-fixed; locally/CI qualified** by the focused startup contract and 177/177 DaemonClient tests | The ordinary packaged empty-support-directory first run remains part of the production-core flight. |
+| Explicit local package mode | [#578](https://github.com/scgopi/GraphCode/pull/578) closes [#553](https://github.com/scgopi/GraphCode/issues/553) | **Source/tooling-fixed; packaging-gate qualified** with local provenance and publication refusal | No exact candidate was installed on a client or published; local mode is not release authorization. |
+| First-run connection and UIA | App-native stack `#581` (not a GitHub PR): [#579](https://github.com/scgopi/GraphCode/pull/579) + [#580](https://github.com/scgopi/GraphCode/pull/580); [#556](https://github.com/scgopi/GraphCode/issues/556) remains open | **Source-fixed; locally/CI qualified**, including 734/734 App tests and a shown-window UIA/message probe | Evidence remains for packaged install through connected Welcome, desktop-level native keyboard input, and any claimed assistive-technology behavior. |
+| Resilient pinned Zig downloads | [#586](https://github.com/scgopi/GraphCode/pull/586) closes [#559](https://github.com/scgopi/GraphCode/issues/559) | **Source/tooling-fixed; locally/CI qualified** by 12/12 bootstrap contracts, deterministic HTTP Range/stall fixtures, provider-pin checks, and privacy validation | Contributor bootstrap reliability only; real ziglang.org transport was not part of the PR evidence and no packaged-client gate changes. |
+| Checkout-owned build/run/stop | App-native stack `#595`: [#585](https://github.com/scgopi/GraphCode/pull/585) closes [#557](https://github.com/scgopi/GraphCode/issues/557) | **Source/tooling-fixed; real pinned cycle qualified** at merge `7d5cf3be8a86b7562b527f90d854845a52f2ac82` | The final pinned build produced all four executables; run started production daemon before shell in owned roots; stop removed only captured checkout-owned processes and preserved the real profile. This is not installation, native UI, agent, persistence, accessibility, or packaging evidence. |
+| Contributor quick-start documentation | App-native stack `#595`: [#594](https://github.com/scgopi/GraphCode/pull/594) closes [#552](https://github.com/scgopi/GraphCode/issues/552) | **Evidence-only**, merged atomically with #585 | Documents measured bootstrap/build/run/stop durations, status markers, and honest failure/evidence limits; it changes no product behavior or parity status. |
+| Redirected `USERPROFILE` daemon startup | [#593](https://github.com/scgopi/GraphCode/pull/593) closes [#558](https://github.com/scgopi/GraphCode/issues/558) | **Source-fixed; locally/CI qualified** by the direct-process RED/GREEN, 101 XCTest plus 6 Swift Testing cases, release builds, clean smoke, and exact-head Windows/macOS CI | Removes the `0xC000001D` trap. It does not substitute for the installed production-core, onboarding, native-input, terminal, or persistence flight. |
+| Worktrees UIA timeout attribution | Open [#587](https://github.com/scgopi/GraphCode/pull/587) at head `c249b9f8731741167bd11ca400691f26f0639903`, part of open [#560](https://github.com/scgopi/GraphCode/issues/560) | **Evidence-only harness boundary; required integration failing** | Bounded workers and cleanup establish product UI-thread starvation during synchronous worktree inspection, but an authorized full process dump and child-process inventory are required before changing shared `App.zig` / `WorktreeStatus.zig`. |
+
 ## Provider work deferred for preview prioritization
 
 **2026-10-01 user-directed decision:** pause both provider workstreams rather
 than continue expanding validation before attempting the installed GraphCode
 core workflow. Preserve their open draft PRs, branches, working changes and
 evidence; pausing is not completion, abandonment or a passing check. Accepted
-GraphCode code floor is `ac44de5de71ce9f03ec16b18401855b1126c4d3b`; neither provider
-change is included in its pinned provider. No parity status changes here.
+GraphCode repository floor is
+`ca535d0c4042a60ab748f7ff01d6460e9c9ec0d1`; neither provider change is
+included in its pinned provider. No parity status changes here.
 
 The pause is a priority reset, not a permanent prohibition or a requirement for
 another explicit blanket reprioritization. The current audit still ranks both
@@ -82,13 +130,13 @@ readable terminal input/output, persisted reopen, and safe exit: no installed
 GraphCode reproduction currently makes either provider branch a prerequisite.
 Resume a bounded existing-owner chunk when client qualification or an actual
 core reproduction demonstrates that dependency. The #11 owner also retains
-unpublished working changes beyond its published head; they are preserved, not
+unpushed working changes beyond its remote head; they are preserved, not
 accepted source or final validation.
 
 | Preserved work | Classification | Preview disposition and resume condition |
 |---|---|---|
-| [coneilen/winghostty#11](https://github.com/coneilen/winghostty/pull/11), published `f31f62cf08cdf656be223766cacacd8bf74fc7cf` | Validation infrastructure and harness bug fixes, not UI polish | Deferred. It unblocks the existing provider PR checks but is not intrinsically a tester-release prerequisite if credible owned Windows client qualification is available. Resume a bounded chunk when the core flight demonstrates a validation dependency or owned client qualification is unavailable. |
-| [coneilen/winghostty#10](https://github.com/coneilen/winghostty/pull/10), published `c4d9a0dd8ebbc710485443321071577ccc34250f` | Conditional functional rendering risk, not polish | Deferred. Unsupported glyph-capacity behavior can blank a frame; block the preview if the advertised backend/display profile reproduces that failure. No installed GraphCode reproduction establishes that dependency yet. Resume when the chosen backend/display evidence reproduces or materially elevates that risk. |
+| [coneilen/winghostty#11](https://github.com/coneilen/winghostty/pull/11), remote head `f31f62cf08cdf656be223766cacacd8bf74fc7cf` | Validation infrastructure and harness bug fixes, not UI polish | Deferred. It unblocks the existing provider PR checks but is not intrinsically a tester-release prerequisite if credible owned Windows client qualification is available. Resume a bounded chunk when the core flight demonstrates a validation dependency or owned client qualification is unavailable. |
+| [coneilen/winghostty#10](https://github.com/coneilen/winghostty/pull/10), remote head `c4d9a0dd8ebbc710485443321071577ccc34250f` | Conditional functional rendering risk, not polish | Deferred. Unsupported glyph-capacity behavior can blank a frame; block the preview if the advertised backend/display profile reproduces that failure. No installed GraphCode reproduction establishes that dependency yet. Resume when the chosen backend/display evidence reproduces or materially elevates that risk. |
 
 The latest #11 source run demonstrated owned desktop/input capture, real Mesa
 GL 4.6, the snapshot-to-handle disappearance branch, and zero remaining among
@@ -101,9 +149,9 @@ no deadline, assertion, required check or provider pin is waived.
 
 **Next priority:** qualify ordinary production startup/onboarding, local-folder
 opening, one named actual backend's readable terminal input/output, persisted
-reopen and safe exit. Fix reproduced blockers in that path first. Source-derived
-startup/session risks and the clean-clone issues below still need investigation;
-stub success, package builds and provider PR counts are not that flight.
+reopen and safe exit. Fix reproduced blockers in that path first. The remaining
+open source/tooling and evidence items below can proceed in bounded independent
+lanes; stub success, package builds and provider PR counts are not that flight.
 Do not restart either paused workstream merely to clear its PR or reduce a
 Partial-row count. Exposed unsafe behavior still requires qualification or a
 real safety boundary before inviting testers.
@@ -146,10 +194,17 @@ sidebar identities, project canvas controls, Quick Chat entry points, workspace
 chrome, explicit connection errors and tray lifecycle support the proposed core
 flow. They are useful existing evidence, not 62 certifications of an installed
 production-agent experience; many observations use deterministic fixtures.
-First-run onboarding is not part of that evidence. It currently blocks the
-daemon connection, exposes no UIA tree, and shares its seen marker across
-support directories ([#556](https://github.com/scgopi/GraphCode/issues/556),
-[#554](https://github.com/scgopi/GraphCode/issues/554)).
+First-run onboarding now selects the configured support directory
+([#573](https://github.com/scgopi/GraphCode/pull/573)), can schedule daemon
+connection before entering the modal
+([#579](https://github.com/scgopi/GraphCode/pull/579)), exposes a native UIA
+fragment/action model ([#580](https://github.com/scgopi/GraphCode/pull/580)),
+and can obtain a startup endpoint before the rendezvous secret exists
+([#577](https://github.com/scgopi/GraphCode/pull/577)). Those are accepted
+source and focused runtime improvements. [#556](https://github.com/scgopi/GraphCode/issues/556)
+correctly remains open as **source-fixed, evidence-remaining** because no
+ordinary packaged install has yet demonstrated first launch through connected
+Welcome with owned desktop keyboard input.
 
 - **Terminal:** the [Windows shell README](../graphcode-windows/README.md)
   describes a default legacy ASCII path/current 120x40 text grid and an opt-in
@@ -229,7 +284,7 @@ observation. Notes distinguish the parts of mixed rows.
 | Window toolbar | F + O + P + E | Qualify core; defer extras | Reachable Jump and workspace/detail navigation must not overlap or lose focus at the declared viewport/DPI. Populated Needs You and threshold-driven worktree content lack a complete comparison; defer unneeded worktree aggregation and exact chrome, not unreachable core actions. |
 | File/Loop/Terminal menus | F + P + E | Qualify core | Witness core commands and state-aware enablement in graph and terminal contexts with actual keyboard/menu use. Live subsets and hidden HMENU tests are not the complete route. Extra shortcut hints and macOS ordering fidelity can wait after commands work. |
 | Workspace lifecycle | F + O + E | Qualify safety; defer multi-instance features | Default/local reopen must preserve state. New/Rename/Delete and running-instance paging have helper coverage but no complete shown native lifecycle; delete's recycle/daemon/session effects are injected. Qualify exposed destructive behavior in disposable fixtures or guard it before preview; defer live totals and multi-instance automation, not safety. |
-| Four-page onboarding | F + E | Core release gate | Every tester sees this on first launch. Today it runs modally before `client.connect()`, so the shell stays disconnected until it closes ([#556](https://github.com/scgopi/GraphCode/issues/556)). It has no UIA provider, so it is not reachable by assistive technology or the gate (#556). Its seen marker ignores `GRAPHCODE_SUPPORT_DIR` ([#554](https://github.com/scgopi/GraphCode/issues/554)). On a fresh support directory the daemon is never started at all ([#555](https://github.com/scgopi/GraphCode/issues/555)). To qualify: drive install → first launch → onboarding → connected Welcome on the packaged path with native keyboard and UIA. Exact page artwork can follow. |
+| Four-page onboarding | F + E | Core release gate | Source defects are fixed: [#573](https://github.com/scgopi/GraphCode/pull/573) honors the effective support directory, [#577](https://github.com/scgopi/GraphCode/pull/577) permits startup before the rendezvous secret exists, and app-native stack `#581` ([#579](https://github.com/scgopi/GraphCode/pull/579) + [#580](https://github.com/scgopi/GraphCode/pull/580)) schedules connection before the modal and exposes its actions through UIA. The row remains Partial because [#556](https://github.com/scgopi/GraphCode/issues/556) still needs the exact packaged install → first launch → onboarding → connected Welcome flight, desktop-level native keyboard evidence, and any claimed assistive-technology evidence. Exact page artwork can follow. |
 | Loop row presentation | F + P + E | Qualify identity; defer refinement | Require readable correct title/state/identity in the agent flow. Elapsed formatting has unit coverage but no rendered-column observation; exact time-column spacing and pixel parity can wait. Incorrect or misleading live state is functional, not decoration. |
 | Cross-project global graph | F + O + E | Qualify navigation; defer richer topology | Local lane selection must retain the intended project during foreign refreshes; #549 fixes a real reset bug and is included in the audited source. Two-project production navigation still needs a flight. Defer richer topology/START furniture, filtering and remote/all-project worktree binding; accepted harness success does not close those residuals. |
 | Notebook grid | P + E | Defer | Grid geometry follows pan/zoom in helper tests, but live line spacing has not been pixel-asserted. Finish direct rendered grid evidence and macOS styling later unless the grid makes content unreadable or impedes hit testing. |
@@ -320,6 +375,17 @@ proof gap, not PASS; hosted server evidence must not be relabelled client proof.
   steps, recovery locations and a bug-report route. Never ask testers to bypass
   security policy. Invite only after the core gates have actual evidence.
 
+All **seven** gates remain open. Their execution requires permissions and
+evidence that source, hosted CI, and hidden-window tests cannot manufacture:
+
+| Required external capability | Exact permission/evidence needed |
+|---|---|
+| Packaged install and recovery | An authorized owned Windows 11 x64 client; permission to install the unsigned candidate, create/remove its scheduled task, run upgrade/rollback/uninstall, and preserve before/after user-data hashes plus package/source/provenance records. |
+| Owned desktop and native input | An exclusive or otherwise controlled interactive desktop at the declared 100%/150% profiles; permission to foreground the app, send physical/native keyboard and pointer input, exercise relied-on clipboard/IME paths, and retain screenshots/logs without exposing unrelated user data. Posted messages and hosted server UIA are not substitutes. |
+| Named authenticated backend and credits | Authorization to use one explicitly named supported backend/version with a test account, valid authentication, and sufficient credits/quota; retained prompts/output markers and billing-safe stop criteria. Selector presence does not grant this permission. |
+| Destructive fixture lifecycle | Permission to create disposable local projects/workspaces/sessions, delete or recycle named fixtures, stop the fixture daemon/session processes, inspect the Recycle Bin/recovery result, and compare exact untouched sentinels outside the captured target. |
+| Publication | Maintainer approval for the exact qualified SHA/version/tag and permission to upload the unsigned ZIP plus checksum to the intended prerelease. Build permission, local-package mode, and an existing release-upload capability are not publication approval. |
+
 ## Publication and tester handoff
 
 Use the existing [release workflow](../.github/workflows/windows-release.yml)
@@ -348,86 +414,78 @@ Do not enable or advertise in-app install/relaunch until its own real
 running-EXE/session-continuity flight passes. This plan neither creates a tag
 or release nor dispatches CI, uploads assets, installs an app or changes pins.
 
-## Known work items from a clean-clone setup
+## Assigned work inventory after the clean-clone queue
 
 The 2026-10-01 assignment audit resolved the canonical programme assignee as
 `coneilen` (GitHub user ID `41757757`) separately from the authenticated writer
-`coneilen_microsoft`. Across `scgopi/GraphCode`, `coneilen/winghostty`, and
-`coneilen/zmx`, the exact `windows`-label inventory is **13 open / 0 closed**
-assigned issues, all 13 in `scgopi/GraphCode`; the two provider repositories
-have zero matching assigned issues. Empty provider results were counted as part
-of the successful paginated inventory, not treated as passing product evidence.
+`coneilen_microsoft`. The same 13 assigned `windows`-label issues remain the
+audited inventory, all in `scgopi/GraphCode`; live GitHub state at this commit is
+exactly **3 open / 10 closed**. The two provider repositories still have zero matching
+assigned issues. Empty provider results are inventory facts, not passing
+product evidence.
 
-On 2026-10-01 a new contributor followed the documented workflow on a clean
-Windows 11 x64 PC: bootstrap, Swift staging, `windows-shell` and `packaging`
-validation, a local package build, and a manual launch. The package was built
-from `59ebed1`; the onboarding/connect ordering is unchanged at `8ef2184c`.
-That run filed the issues below. They are tracked here so preview
-qualification does not count around them. None is fixed by this document.
-
-| Issue | Audit disposition | Gate affected | Current result and next criterion |
+| Issue | Live state and accepted source | Evidence tier | Remaining criterion |
 |---|---|---|---|
-| [#554](https://github.com/scgopi/GraphCode/issues/554) | **P0 - still source-supported** | Safe first-run isolation | The onboarding marker still ignores `GRAPHCODE_SUPPORT_DIR`. Fix effective path selection, test override/default cases, and prove an isolated first launch leaves the real profile unchanged. |
-| [#555](https://github.com/scgopi/GraphCode/issues/555) | **P0 - still source-supported** | Clean installation; Reachability and lifecycle | A fresh support directory still cannot derive the endpoint before the daemon creates its secret. Start/reserve the daemon without the secret, then prove packaged first-run connection from an empty support directory. |
-| [#556](https://github.com/scgopi/GraphCode/issues/556) | **P0 - still source-supported** | Reachability and lifecycle | The first-run modal still precedes `client.connect()` and exposes no UIA provider. Qualify native keyboard/UIA onboarding through a connected Welcome state. |
-| [#553](https://github.com/scgopi/GraphCode/issues/553) | **P1 - still source-supported** | Exact artifact | Packaging still has no explicit untagged local mode. Add unmistakable local provenance, verification, publication refusal, and focused tests without weakening release-candidate rules. |
-| [#558](https://github.com/scgopi/GraphCode/issues/558) | **P1 - needs evidence** | Reachability and lifecycle | The redirected-`USERPROFILE` illegal-instruction report remains credible but undiagnosed. Reproduce exact current source, capture the trapping stack, and add a direct-process regression; do not use a fake home as preview isolation. |
-| [#560](https://github.com/scgopi/GraphCode/issues/560) | **P1 - needs evidence** | UIA-backed qualification gates | Later hosted gates passed, so the Worktrees timeout is intermittent rather than resolved. Reproduce on the reporting client, capture a timeout dump, and separate stale-element/desktop contention from a product UI-thread/provider deadlock. |
-| [#561](https://github.com/scgopi/GraphCode/issues/561) | **P1 - still source-supported** | Contributor validation | The process fixture still expands beneath the checkout and exceeds MAX_PATH from app-managed worktrees. Retain a deep-root RED, move to a bounded short root or safe isolated long-path configuration, and prove positive case counts. |
-| [#562](https://github.com/scgopi/GraphCode/issues/562) | **P1 - still source-supported** | Safe qualification isolation | Early shell launches still inherit the real support/profile locations before the later UIA sandbox. Give every launch owned roots and assert the default profile is unchanged on success and failure. |
-| [#551](https://github.com/scgopi/GraphCode/issues/551) | **P2 - still source-supported** | Contributor setup | Provider bootstrap still lacks clone-local `core.longpaths`, path-budget diagnostics, and recovery coverage. This slows P0 reproduction but does not block a prebuilt tester package. |
-| [#552](https://github.com/scgopi/GraphCode/issues/552) | **P2 - deferred** | Contributor handoff | No validated clean-clone quick start exists. Document and clean-machine-validate it after or alongside #551, #553, and #557; do not normalize `-AllowTagMismatch`. |
-| [#557](https://github.com/scgopi/GraphCode/issues/557) | **P2 - deferred** | Contributor setup | No owned-sandbox build/run/stop entry point exists. Implement it without pre-seeding around #555 and stop only checkout-owned processes. |
-| [#559](https://github.com/scgopi/GraphCode/issues/559) | **P2 - still source-supported** | Contributor setup | Zig downloads still lack bounded timeout/retry/resume/progress/mirror behavior. Preserve checksum enforcement and add corrupt/exhausted-path tests. |
-| [#564](https://github.com/scgopi/GraphCode/issues/564) | **P2 - deferred** | Parallel delivery architecture | No bounded `App.zig` extraction has landed. Stage graph/worktree ownership first, but do not block urgent startup, terminal, persistence, safety, or qualification fixes on the full split. |
+| [#551](https://github.com/scgopi/GraphCode/issues/551) | **Closed** by [#574](https://github.com/scgopi/GraphCode/pull/574) | Source/tooling-fixed; 5/5 bootstrap tests plus provider-pin regression | No preview gate; retain the documented short-root remedy for legacy path budgets. |
+| [#552](https://github.com/scgopi/GraphCode/issues/552) | **Closed** by [#594](https://github.com/scgopi/GraphCode/pull/594), merged with lower [#585](https://github.com/scgopi/GraphCode/pull/585) in app-native stack `#595` at `7d5cf3be8a86b7562b527f90d854845a52f2ac82` | Evidence-only documentation; 3 focused documentation cases plus inherited 4-case dev regression | The quick start now records measured timings, supported commands, known failures, and evidence limits. It does not qualify native UI, installation, an authenticated backend, or parity. |
+| [#553](https://github.com/scgopi/GraphCode/issues/553) | **Closed** by [#578](https://github.com/scgopi/GraphCode/pull/578) | Source/tooling-fixed; packaging gate qualified | Local packages have explicit provenance and publication refusal; installed-client and publication evidence remain separate alpha gates. |
+| [#554](https://github.com/scgopi/GraphCode/issues/554) | **Closed** by [#573](https://github.com/scgopi/GraphCode/pull/573) | Source-fixed; 3/3 focused and 10/10 full tests | Prove the exact packaged first launch writes only the selected support directory and leaves the real profile unchanged. |
+| [#555](https://github.com/scgopi/GraphCode/issues/555) | **Closed** by [#577](https://github.com/scgopi/GraphCode/pull/577) | Source-fixed; focused contract and 177/177 DaemonClient tests | Prove the production daemon starts/connects from an empty support directory in the packaged core flight. |
+| [#556](https://github.com/scgopi/GraphCode/issues/556) | **Open; source-fixed/evidence-remaining** through app-native stack `#581` ([#579](https://github.com/scgopi/GraphCode/pull/579) + [#580](https://github.com/scgopi/GraphCode/pull/580)) | Local/CI and shown-window probe evidence; no packaged/native-client qualification | Witness ordinary install → first launch → onboarding → connected Welcome with production `graphcoded`, desktop-level keyboard input, and any claimed assistive-technology behavior. |
+| [#557](https://github.com/scgopi/GraphCode/issues/557) | **Closed** by [#585](https://github.com/scgopi/GraphCode/pull/585), merged with upper [#594](https://github.com/scgopi/GraphCode/pull/594) in app-native stack `#595` at `7d5cf3be8a86b7562b527f90d854845a52f2ac82` | Source/tooling-fixed; 4 focused behavioral cases plus a real pinned build/run/stop cycle | The supported entry point builds the runnable layout, launches production daemon before shell in checkout-owned roots, and stops only revalidated captured identities. Full validation and every native/product release gate remain separate. |
+| [#558](https://github.com/scgopi/GraphCode/issues/558) | **Closed** by [#593](https://github.com/scgopi/GraphCode/pull/593), current main `ca535d0c4042a60ab748f7ff01d6460e9c9ec0d1` from head `285b73e8e5a7634a9033b8e72f950efc703b4f60` | Source-fixed; direct-process behavioral regression, Swift production suite, Windows shell, and mandatory macOS shared CI passed at exact head | The redirected-profile trap is fixed. Continue to use explicit owned support/temp roots for qualification isolation; this closure does not prove installed-product behavior. |
+| [#559](https://github.com/scgopi/GraphCode/issues/559) | **Closed** by [#586](https://github.com/scgopi/GraphCode/pull/586), merged as `c19e277eef2728ef5046770a34fef8f0bbd63f33` | Source/tooling-fixed; 12/12 bootstrap tests plus deterministic Range/resume/stall/mirror/cache/checksum fixtures | Preserve checksum enforcement, bounded retry/timeout behavior, useful partial archives, and explicit mirror semantics. Real ziglang.org transport was not claimed by the PR. |
+| [#560](https://github.com/scgopi/GraphCode/issues/560) | **Open; product-attributed evidence lane** with harness-only [#587](https://github.com/scgopi/GraphCode/pull/587) at `c249b9f8731741167bd11ca400691f26f0639903` | Bounded worker/reacquisition/cleanup contracts pass; exact-head Windows shell integration still fails during synchronous product worktree inspection | Obtain an authorized full process dump at the first post-click timeout and a child-process inventory with command lines. Confirm the UI thread in `applyOverviewLaneAction → inspectWorktreesImpl → WorktreeStatus.inspect` or capture provider locks before changing shared `App.zig` / `WorktreeStatus.zig`. |
+| [#561](https://github.com/scgopi/GraphCode/issues/561) | **Closed** by [#575](https://github.com/scgopi/GraphCode/pull/575) | Source/tooling-fixed; deep-root positive execution and 21 regression logs | No product gate; preserve positive execution counts and bounded fixture roots. |
+| [#562](https://github.com/scgopi/GraphCode/issues/562) | **Closed** by [#576](https://github.com/scgopi/GraphCode/pull/576) | Source/tooling-fixed; 4/4 isolation tests and 380 runner contracts | Qualification isolation is accepted; installed-product profile behavior remains a separate flight. |
+| [#564](https://github.com/scgopi/GraphCode/issues/564) | **Open; deferred** | No extraction accepted | Keep deferred unless a concrete next-wave overlap requires one small ownership extraction; do not turn the broad split into a preview prerequisite. |
 
-Setup items do not block tester qualification, which uses a prebuilt package.
-They do determine how quickly a contributor can reproduce and fix the F-lane
-items. All 13 issues remain open after the audit, each with a dated source-linked
-status comment; no issue had enough evidence to close, reopen, or supersede.
-Closing an issue does not promote a ledger row by itself; promotion still
-requires the ledger's runtime evidence.
+Closing an issue does not promote a ledger row by itself. The ten closures
+record real source/tooling/documentation completion; packaged/native-client qualification,
+publication, and parity promotion retain their separate evidence standards.
 
-## Prioritized implementation dependency map
+## Post-queue orchestration and dependency map
 
-The first post-audit batch uses independent branches and PRs; it is not a native
-stack because current GraphCode contributions use fork heads and GitHub stacks
-require every head branch in the base repository. Dependent work starts only
-after its lower behavior is accepted, rather than presenting inherited fork
-changes as a layer-only diff.
+The bounded source/tooling queue is complete. Remaining work is bottom-up and
+permission-bound; it should not start with another parity-row sweep:
 
-1. **P0 state and startup foundations, in parallel:** #554 owns onboarding
-   marker path selection; #555 owns missing-secret daemon startup and endpoint
-   acquisition. They have distinct file leases. Neither waits for the broad
-   `App.zig` split in #564.
-2. **P0 first-run connection and accessibility:** #556 follows the accepted
-   #554/#555 behavior because it overlaps `WindowsOnboarding.zig` and the
-   `App.zig` startup sequence. Split its connection ordering and UIA surface
-   only if each remains independently coherent and testable; do not run both
-   writers against those files concurrently.
-3. **P1 safe qualification foundations, in parallel:** #562 isolates every
-   validation launch from the real profile; #553 adds honest local-package
-   provenance while preserving publication refusal; #561 removes the
-   app-managed deep-path failure from the Git-process harness. #551 improves
-   provider bootstrap separately because it accelerates reproduction without
-   blocking a prebuilt tester package.
-4. **Installed production-core flight:** after #554/#555/#556 and the safe
-   #562 launch boundary are accepted, build an exact source-bound candidate
-   using #553's supported route or an authorized exact matching tag. Run the
-   ordinary install → onboarding → connected Welcome → local project → one
-   named real backend → input/output → persisted reopen → safe exit path. This
-   step needs fresh client, desktop, backend/auth/credit, and package-operation
-   permission; existing stub, unit, or hosted-server results cannot substitute.
-5. **Evidence-driven follow-up:** attribute #558 and #560 only on their named
-   current-source reproductions. Resume existing-owner
-   `coneilen/winghostty#11` if credible owned client qualification is
-   unavailable or the flight demonstrates a provider-validation dependency;
-   resume `coneilen/winghostty#10` only if the selected backend/display profile
-   reproduces or materially elevates the glyph-capacity risk.
-
-Independent fixes can merge in any order. The only required sequencing is the
-file/behavior dependency above; no PR count, provider branch, or full parity-row
-closure is an implicit preview prerequisite.
+1. **Installed production-core and onboarding qualification - #556:** build an
+   exact source-bound local candidate from
+   `ca535d0c4042a60ab748f7ff01d6460e9c9ec0d1` or a newer explicitly audited
+   main through [#578](https://github.com/scgopi/GraphCode/pull/578)'s supported
+   route, verify provenance, then use an authorized owned Windows client to run
+   install → first launch → onboarding → connected Welcome → local project →
+   one named authenticated backend → readable input/output → persisted reopen
+   → safe exit. This packaged/native-client flight **can close #556** only when
+   its exact residuals pass; missing desktop, backend, destructive-fixture, or
+   assistive-technology permission remains NotExecuted rather than failure or
+   success.
+2. **Authorized timeout attribution - #560 / #587:** keep open
+   [#587](https://github.com/scgopi/GraphCode/pull/587) harness-only and
+   evidence-only at head `c249b9f8731741167bd11ca400691f26f0639903`.
+   Its bounded workers and cleanup are useful but cannot close #560 while
+   required integration still times out. On an authorized owned desktop,
+   capture a full process dump at the first timeout plus a child-process
+   inventory and command lines. Only then make the smallest source change
+   supported by the stacks/locks, rerun the targeted regression and exact-head
+   integration, and decide whether that combined evidence can close #560.
+3. **Keep the release gates honest:** all **seven** gates remain open. The
+   installed production-core result, native input and destructive fixture
+   permission, named authenticated backend authorization, exact artifact
+   provenance, and publication permission are independent. A green
+   build/run/stop cycle, a local package, or harness attribution does not
+   authorize tester publication or promote a ledger row.
+4. **Keep #564 deferred:** do not split shared files merely to create work.
+   Open a bounded extraction session/PR only if the #556 flight or the
+   dump-backed #560 fix identifies a concrete ownership dependency. Such an
+   extraction may unblock delivery but is not preview qualification by itself.
+5. **Keep provider work deferred:** retain
+   [coneilen/winghostty#11](https://github.com/coneilen/winghostty/pull/11) and
+   [coneilen/winghostty#10](https://github.com/coneilen/winghostty/pull/10)
+   paused unless actual client/backend evidence demonstrates respectively a
+   provider-validation dependency or the glyph-capacity failure. No PR count,
+   provider branch, or full parity-row closure is an implicit preview
+   prerequisite.
 
 ## Measuring progress
 

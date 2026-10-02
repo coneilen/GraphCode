@@ -607,6 +607,8 @@ pub fn installMenu(hwnd: c.HWND) !void {
     appendInfo(discovery, "Paste terminal text\tCtrl+Shift+V");
     appendInfo(discovery, "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits");
     appendInfo(discovery, "Jump palette: Up / Down navigate; Enter opens the selected loop");
+    appendInfo(discovery, "Canvas: drag empty space to pan; wheel or pinch to zoom");
+    appendInfo(discovery, "Sidebar: drag a root loop to reorder it");
     appendPopup(help, "Keyboard Shortcuts", discovery);
 
     append(workspace, "New Workspace...", @intFromEnum(Command.workspace_new));
@@ -918,7 +920,7 @@ test "native menu exposes the parity command groups" {
     try std.testing.expectEqual(@as(?Command, null), commandFromId(9999));
 }
 
-test "main and help menus expose missing shortcuts without canvas gesture claims" {
+test "main and help menus expose shortcuts and interaction guidance" {
     const hwnd = try hiddenWorkspaceTestWindow();
     defer _ = c.DestroyWindow(hwnd);
     try installMenu(hwnd);
@@ -956,8 +958,9 @@ test "main and help menus expose missing shortcuts without canvas gesture claims
         "Paste terminal text\tCtrl+Shift+V",
         "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits",
         "Jump palette: Up / Down navigate; Enter opens the selected loop",
+        "Canvas: drag empty space to pan; wheel or pinch to zoom",
+        "Sidebar: drag a root loop to reorder it",
     };
-    try std.testing.expectEqual(@as(c_int, expected.len), c.GetMenuItemCount(guide));
     var guide_title: [128]u16 = undefined;
     const title_length = c.GetMenuStringW(help, 4, &guide_title, guide_title.len, c.MF_BYPOSITION);
     try std.testing.expect(title_length > 0 and title_length < guide_title.len - 1);
@@ -968,12 +971,15 @@ test "main and help menus expose missing shortcuts without canvas gesture claims
         const index: c.UINT = @intCast(expected_index);
         var label: [128]u16 = undefined;
         const length = c.GetMenuStringW(guide, index, &label, label.len, c.MF_BYPOSITION);
-        try std.testing.expect(length > 0 and length < label.len - 1);
+        try std.testing.expect(length < label.len - 1);
         const actual = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, label[0..@intCast(length)]);
         defer std.testing.allocator.free(actual);
         try std.testing.expectEqualStrings(expected_label, actual);
         try std.testing.expect(c.GetMenuState(guide, index, c.MF_BYPOSITION) & c.MF_GRAYED != 0);
     }
+    const item_count = c.GetMenuItemCount(guide);
+    try std.testing.expect(item_count > 0);
+    try std.testing.expectEqual(@as(c_int, expected.len), item_count);
 }
 
 test "Ctrl+Shift+C discovery hints match terminal copy and outside-terminal clone routing" {

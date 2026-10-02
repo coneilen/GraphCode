@@ -436,10 +436,14 @@ public actor ProjectRegistry {
   /// Sequential rather than concurrent across projects: each store's poll already spawns
   /// one subprocess per loop, and firing every project's at once would turn a quiet
   /// background tick into a burst of them.
+  /// One pass for the shared session listing too, so the whole tick costs one `zmx ls`
+  /// however many loops it reads (`ZmxSessionLauncher.SessionListing`).
   private func pollPresence() async {
+    await ZmxSessionLauncher.SessionListing.shared.beginPass()
     for store in stores.values {
       await store.pollPresence()
     }
+    await ZmxSessionLauncher.SessionListing.shared.endPass()
   }
 
   // MARK: - Commands

@@ -55,6 +55,16 @@ struct SupportDirectoryTests {
 
   // MARK: - Migration
 
+  @Test
+  func missingLegacyApplicationSupportFallsBackWithoutTrapping() {
+    let fallback = URL(fileURLWithPath: "/Users/test-user/.graphcode", isDirectory: true)
+
+    #expect(
+      SupportDirectory.legacyURL(
+        applicationSupportDirectories: [],
+        fallback: fallback) == fallback)
+  }
+
   /// A scratch pair of paths — neither created — plus cleanup.
   private func withScratchPaths(_ body: (_ legacy: URL, _ destination: URL) throws -> Void) throws {
     let root = FileManager.default.temporaryDirectory

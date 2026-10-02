@@ -2,12 +2,19 @@
 param(
   [string] $ToolRoot,
   [string] $ProviderRoot,
-  [switch] $SkipSwift
+  [switch] $SkipSwift,
+  [string] $ZigBaseUrl = $env:GRAPHCODE_ZIG_MIRROR,
+  [ValidateRange(0, 20)]
+  [int] $ZigRetryCount = 3,
+  [ValidateRange(1, 3600)]
+  [int] $ZigStallTimeoutSeconds = 30,
+  [ValidateRange(1, 86400)]
+  [int] $ZigOverallTimeoutSeconds = 900
 )
 
 $ErrorActionPreference = "Stop"
-# Progress rendering dominates Invoke-WebRequest and Expand-Archive on hosted
-# runners (about two minutes for the two Zig archives); it carries no evidence.
+# Suppress built-in archive progress; Zig downloads emit throttled byte/rate/ETA
+# lines instead of PowerShell's high-overhead per-record rendering.
 $ProgressPreference = "SilentlyContinue"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 if (-not $ToolRoot) {
@@ -18,6 +25,10 @@ if (-not $ProviderRoot) {
 }
 $ToolRoot = [IO.Path]::GetFullPath($ToolRoot)
 $ProviderRoot = [IO.Path]::GetFullPath($ProviderRoot)
+if (-not $ZigBaseUrl) {
+  $ZigBaseUrl = "https://ziglang.org"
+}
+$ZigBaseUrl = $ZigBaseUrl.TrimEnd("/")
 
 function Test-BootstrapPathBudget(
     [string] $RepositoryRoot,
@@ -58,6 +69,214 @@ function Test-BootstrapPathBudget(
 Test-BootstrapPathBudget $repoRoot $ProviderRoot
 New-Item -ItemType Directory -Force $ToolRoot, $ProviderRoot | Out-Null
 
+function Format-ZigDownloadSize([long] $Bytes) {
+  if ($Bytes -lt 1KB) {
+    return "$Bytes bytes"
+  }
+  if ($Bytes -lt 1MB) {
+    return "$([Math]::Round($Bytes / 1KB, 1)) KiB"
+  }
+  return "$([Math]::Round($Bytes / 1MB, 1)) MiB"
+}
+
+function Write-ZigDownloadProgress(
+    [long] $Downloaded,
+    [Nullable[long]] $Total,
+    [long] $Transferred,
+    [double] $ElapsedSeconds
+  ) {
+  $rate = if ($ElapsedSeconds -gt 0) {
+    $Transferred / $ElapsedSeconds
+  } else {
+    0
+  }
+  $message = "Zig download: $(Format-ZigDownloadSize $Downloaded)"
+  if ($null -ne $Total) {
+    $message += " / $(Format-ZigDownloadSize $Total)"
+  }
+  if ($rate -gt 0) {
+    $message += " at $(Format-ZigDownloadSize ([long] $rate))/s"
+    if ($null -ne $Total -and $Downloaded -lt $Total) {
+      $etaSeconds = [Math]::Ceiling(($Total - $Downloaded) / $rate)
+      $message += ", ETA $([TimeSpan]::FromSeconds($etaSeconds).ToString("g"))"
+    }
+  }
+  Write-Host $message
+}
+
+function Invoke-ZigHttpDownloadAttempt(
+    [uri] $Uri,
+    [string] $PartialPath,
+    [long] $Offset,
+    [int] $StallTimeoutSeconds,
+    [datetime] $OverallDeadline,
+    [int] $ProgressIntervalSeconds
+  ) {
+  $client = [Net.Http.HttpClient]::new()
+  $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+  $request = [Net.Http.HttpRequestMessage]::new(
+    [Net.Http.HttpMethod]::Get,
+    $Uri)
+  if ($Offset -gt 0) {
+    $request.Headers.Range = [Net.Http.Headers.RangeHeaderValue]::new(
+      $Offset,
+      $null)
+  }
+
+  $response = $null
+  $contentStream = $null
+  $fileStream = $null
+  try {
+    $remaining = $OverallDeadline - [datetime]::UtcNow
+    if ($remaining.TotalMilliseconds -le 0) {
+      throw [TimeoutException]::new("Zig download exceeded its overall timeout")
+    }
+    $headerTimeout = [Math]::Min(
+      $StallTimeoutSeconds,
+      [Math]::Max(0.001, $remaining.TotalSeconds))
+    $headerCancellation = [Threading.CancellationTokenSource]::new(
+      [TimeSpan]::FromSeconds($headerTimeout))
+    try {
+      try {
+        $response = $client.Send(
+          $request,
+          [Net.Http.HttpCompletionOption]::ResponseHeadersRead,
+          $headerCancellation.Token)
+      } catch [OperationCanceledException] {
+        if ([datetime]::UtcNow -ge $OverallDeadline) {
+          throw [TimeoutException]::new(
+            "Zig download exceeded its overall timeout waiting for response headers")
+        }
+        throw [TimeoutException]::new(
+          "Zig download stalled waiting for response headers")
+      }
+    } finally {
+      $headerCancellation.Dispose()
+    }
+
+    $append = $Offset -gt 0 -and
+      $response.StatusCode -eq [Net.HttpStatusCode]::PartialContent
+    if ($append) {
+      $rangeStart = $response.Content.Headers.ContentRange.From
+      if ($null -eq $rangeStart -or $rangeStart -ne $Offset) {
+        Remove-Item -LiteralPath $PartialPath -Force -ErrorAction SilentlyContinue
+        throw [IO.InvalidDataException]::new(
+          "Zig download returned an invalid Content-Range for offset $Offset")
+      }
+    } elseif ($Offset -gt 0 -and
+        $response.StatusCode -eq [Net.HttpStatusCode]::RequestedRangeNotSatisfiable) {
+      Remove-Item -LiteralPath $PartialPath -Force -ErrorAction SilentlyContinue
+      throw [IO.InvalidDataException]::new(
+        "Zig download server rejected the partial archive range; restarting is required")
+    } elseif ($Offset -gt 0 -and
+        $response.StatusCode -eq [Net.HttpStatusCode]::OK) {
+      Write-Host "Zig download server ignored Range; restarting this attempt."
+      $Offset = 0
+    } else {
+      [void] $response.EnsureSuccessStatusCode()
+      $Offset = 0
+    }
+
+    $total = $null
+    $contentRangeLength = if ($response.Content.Headers.ContentRange) {
+      $response.Content.Headers.ContentRange.Length
+    } else {
+      $null
+    }
+    if ($null -ne $contentRangeLength) {
+      $total = [Nullable[long]] $contentRangeLength
+    } elseif ($null -ne $response.Content.Headers.ContentLength) {
+      $total = [Nullable[long]] (
+        $Offset + $response.Content.Headers.ContentLength)
+    }
+
+    $mode = if ($append) {
+      [IO.FileMode]::OpenOrCreate
+    } else {
+      [IO.FileMode]::Create
+    }
+    $fileStream = [IO.File]::Open(
+      $PartialPath,
+      $mode,
+      [IO.FileAccess]::Write,
+      [IO.FileShare]::Read)
+    if ($append) {
+      $fileStream.SetLength($Offset)
+      $fileStream.Position = $Offset
+    }
+    $contentStream = $response.Content.ReadAsStream()
+    $buffer = [byte[]]::new(1MB)
+    $downloaded = $Offset
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $lastProgress = [datetime]::UtcNow
+    while ($true) {
+      $remaining = $OverallDeadline - [datetime]::UtcNow
+      if ($remaining.TotalMilliseconds -le 0) {
+        throw [TimeoutException]::new("Zig download exceeded its overall timeout")
+      }
+      $readTimeout = [Math]::Min(
+        $StallTimeoutSeconds,
+        [Math]::Max(0.001, $remaining.TotalSeconds))
+      $readCancellation = [Threading.CancellationTokenSource]::new(
+        [TimeSpan]::FromSeconds($readTimeout))
+      try {
+        try {
+          $read = $contentStream.ReadAsync(
+            $buffer,
+            0,
+            $buffer.Length,
+            $readCancellation.Token).GetAwaiter().GetResult()
+        } catch [OperationCanceledException] {
+          if ([datetime]::UtcNow -ge $OverallDeadline) {
+            throw [TimeoutException]::new(
+              "Zig download exceeded its overall timeout")
+          }
+          throw [TimeoutException]::new(
+            "Zig download stalled for $StallTimeoutSeconds seconds")
+        }
+      } finally {
+        $readCancellation.Dispose()
+      }
+      if ($read -eq 0) {
+        break
+      }
+      $fileStream.Write($buffer, 0, $read)
+      $downloaded += $read
+      $now = [datetime]::UtcNow
+      if (($now - $lastProgress).TotalSeconds -ge $ProgressIntervalSeconds) {
+        Write-ZigDownloadProgress `
+          $downloaded `
+          $total `
+          ($downloaded - $Offset) `
+          $stopwatch.Elapsed.TotalSeconds
+        $lastProgress = $now
+      }
+    }
+    $fileStream.Flush()
+    Write-ZigDownloadProgress `
+      $downloaded `
+      $total `
+      ($downloaded - $Offset) `
+      $stopwatch.Elapsed.TotalSeconds
+    if ($null -ne $total -and $downloaded -ne $total) {
+      throw [IO.EndOfStreamException]::new(
+        "Zig download ended at $downloaded of $total bytes")
+    }
+  } finally {
+    if ($fileStream) {
+      $fileStream.Dispose()
+    }
+    if ($contentStream) {
+      $contentStream.Dispose()
+    }
+    if ($response) {
+      $response.Dispose()
+    }
+    $request.Dispose()
+    $client.Dispose()
+  }
+}
+
 function Install-Zig([string] $Version, [string] $Sha256) {
   $destination = Join-Path $ToolRoot "zig-$Version"
   $executable = Join-Path $destination "zig.exe"
@@ -70,12 +289,96 @@ function Install-Zig([string] $Version, [string] $Sha256) {
   }
 
   $archive = Join-Path $ToolRoot "zig-$Version.zip"
-  Invoke-WebRequest `
-    -Uri "https://ziglang.org/download/$Version/zig-x86_64-windows-$Version.zip" `
-    -OutFile $archive
-  if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $Sha256) {
-    throw "Zig $Version archive checksum mismatch"
+  $partialArchive = "$archive.partial"
+  if (Test-Path -LiteralPath $archive -PathType Leaf) {
+    if ((Get-FileHash $archive -Algorithm SHA256).Hash -eq $Sha256) {
+      Write-Host "Reusing checksum-verified Zig $Version archive: $archive"
+      Remove-Item `
+        -LiteralPath $partialArchive `
+        -Force `
+        -ErrorAction SilentlyContinue
+    } else {
+      Write-Warning "Removing corrupt cached Zig $Version archive: $archive"
+      Remove-Item -LiteralPath $archive -Force
+    }
   }
+
+  if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+    $baseUri = [uri] $ZigBaseUrl
+    if (-not $baseUri.IsAbsoluteUri -or
+        $baseUri.Scheme -notin @("http", "https")) {
+      throw "Zig base URL must be an absolute HTTP or HTTPS URL: $ZigBaseUrl"
+    }
+    $uri = [uri] (
+      "$($ZigBaseUrl.TrimEnd('/'))/download/$Version/" +
+      "zig-x86_64-windows-$Version.zip")
+    $maxAttempts = $ZigRetryCount + 1
+    $deadline = [datetime]::UtcNow.AddSeconds($ZigOverallTimeoutSeconds)
+    $progressInterval = if ($env:CI) { 60 } else { 10 }
+    $completed = $false
+    $attemptsMade = 0
+    $lastFailure = ""
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+      if ([datetime]::UtcNow -ge $deadline) {
+        $lastFailure = "overall timeout of $ZigOverallTimeoutSeconds seconds expired"
+        break
+      }
+      $attemptsMade = $attempt
+      $offset = if (Test-Path -LiteralPath $partialArchive -PathType Leaf) {
+        (Get-Item -LiteralPath $partialArchive).Length
+      } else {
+        0
+      }
+      $startDescription = if ($offset -gt 0) {
+        "resuming at $(Format-ZigDownloadSize $offset)"
+      } else {
+        "starting from zero"
+      }
+      Write-Host (
+        "Downloading Zig $Version, attempt $attempt/$maxAttempts, " +
+        "$startDescription from $($uri.Host).")
+      try {
+        Invoke-ZigHttpDownloadAttempt `
+          -Uri $uri `
+          -PartialPath $partialArchive `
+          -Offset $offset `
+          -StallTimeoutSeconds $ZigStallTimeoutSeconds `
+          -OverallDeadline $deadline `
+          -ProgressIntervalSeconds $progressInterval
+        $actualHash = (Get-FileHash $partialArchive -Algorithm SHA256).Hash
+        if ($actualHash -ne $Sha256) {
+          Remove-Item -LiteralPath $partialArchive -Force
+          throw [IO.InvalidDataException]::new(
+            "Zig $Version archive checksum mismatch from $uri")
+        }
+        Move-Item -LiteralPath $partialArchive -Destination $archive -Force
+        Write-Host "Verified Zig $Version archive checksum."
+        $completed = $true
+        break
+      } catch {
+        $lastFailure = $_.Exception.Message
+        if ($attempt -lt $maxAttempts -and [datetime]::UtcNow -lt $deadline) {
+          Write-Warning (
+            "Zig $Version download attempt $attempt failed: $lastFailure " +
+            "Retrying with the partial archive when available.")
+          Start-Sleep -Seconds ([Math]::Min($attempt, 5))
+        }
+      }
+    }
+    if (-not $completed) {
+      $partialState = if (
+        Test-Path -LiteralPath $partialArchive -PathType Leaf
+      ) {
+        "Partial archive preserved for the next run: $partialArchive"
+      } else {
+        "No resumable partial archive remains."
+      }
+      throw (
+        "Downloading Zig $Version failed after $attemptsMade attempts: " +
+        "$lastFailure. $partialState")
+    }
+  }
+
   $extracted = Join-Path $ToolRoot "zig-x86_64-windows-$Version"
   if (Test-Path -LiteralPath $extracted) {
     Remove-Item -LiteralPath $extracted -Recurse -Force
@@ -97,7 +400,6 @@ function Install-Zig([string] $Version, [string] $Sha256) {
   Move-Item `
     -LiteralPath (Join-Path $ToolRoot "zig-x86_64-windows-$Version") `
     -Destination $destination
-  Remove-Item -LiteralPath $archive -Force
   return $executable
 }
 
