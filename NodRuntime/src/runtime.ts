@@ -84,8 +84,14 @@ export class NodRuntime {
     this.stager = new HunkStager(log, cwd);
     this.stager.onLateDecision = (hunk) => this.steer(lateDecisionNote(hunk));
     if (options.goal?.trim()) {
-      const evaluatorModel = settings.goalEvaluatorModel ?? (options.engine.kind === "claude" ? "haiku" : "");
-      this.goal = new GoalEvaluator(options.goal, (prompt, model) => options.engine.ask(prompt, model || undefined), evaluatorModel, log);
+      // Copilot has no fixed cheap model to name; its judge runs on the session's default.
+      const evaluatorModel = settings.goalEvaluatorModel ?? (options.engine.kind === "claude" ? "haiku" : "default");
+      this.goal = new GoalEvaluator(
+        options.goal,
+        (prompt, model) => options.engine.ask(prompt, model === "default" ? undefined : model),
+        evaluatorModel,
+        log,
+      );
     }
   }
 
