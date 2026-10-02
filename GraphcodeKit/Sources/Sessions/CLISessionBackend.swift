@@ -307,7 +307,7 @@ extension CLISessionBackend {
 
   public static let attachedClients: @Sendable (LoopNode, String?) async -> Int? = {
     node, path in
-    ZmxSessionLauncher.attachedClients(node, projectPath: path)
+    await ZmxSessionLauncher.attachedClients(node, projectPath: path)
   }
 
   /// Returns whether an earlier conversation was resumed.
@@ -361,7 +361,7 @@ extension CLISessionBackend {
   /// The liveness hook `GraphStore` is wired with — session-level like `terminate`,
   /// so it needs no per-backend adapter.
   public static let sessionAlive: @Sendable (LoopNode, String?) async -> Bool = { node, path in
-    ZmxSessionLauncher.isSessionAlive(node, projectPath: path)
+    await ZmxSessionLauncher.isSessionAlive(node, projectPath: path)
   }
 
   public static let readPresence: @Sendable (LoopNode, String?) async -> PresenceReading = {

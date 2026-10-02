@@ -70,7 +70,7 @@ struct RemoteCLIShimTests {
       ["node", "send", Self.project, nodeID.uuidString, "the", "API", "changed"])
 
     #expect(run.status == 0)
-    #expect(run.stdout.contains("delivered"))
+    #expect(run.stdout.contains("accepted — typing it in now"))
     #expect(
       run.commands.dropFirst().first
         == .graphCommand(

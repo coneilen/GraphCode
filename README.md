@@ -128,6 +128,12 @@ loop. A workspace holds projects; a terminal workspace holds panes.
 
 ## Building from source
 
+Windows contributors should start with the
+[Windows contributor quick start](graphcode-windows/README.md#windows-contributor-quick-start).
+It uses the pinned Windows toolchains and a checkout-owned profile for the
+production daemon and shell; the Windows port remains a preview rather than a
+shipping-platform claim.
+
 Needs [mise](https://mise.jdx.dev) (Xcode, tuist, swiftlint, zig come through it) and the submodules.
 Start with `make doctor` — it checks every prerequisite and prints the fix for anything missing.
 

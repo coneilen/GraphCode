@@ -248,6 +248,7 @@ struct MessageAndSpawnTests {
 
     await store.handle(
       .messageNode(target.id, text: "the API changed", from: sender.id, followUp: nil))
+    await store.finishSessionTyping()
 
     #expect(delivered.value.count == 1)
     #expect(delivered.value[0].nodeTitle == "Review")
@@ -261,6 +262,7 @@ struct MessageAndSpawnTests {
     let target = await store.graph.nodes[1]
 
     await store.handle(.messageNode(target.id, text: "wrap it up", from: nil, followUp: nil))
+    await store.finishSessionTyping()
 
     #expect(delivered.value == [Delivery(nodeTitle: "Review", text: "[graphcode] wrap it up")])
   }
