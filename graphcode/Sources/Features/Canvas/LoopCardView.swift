@@ -212,15 +212,15 @@ struct LoopCardView: View {
   private func nodAsk(_ ask: NodCardDetail.Ask) -> some View {
     HStack(spacing: 7) {
       if ask.answerableFromCard {
+        // Action blue, as in the chat pane: orange is the Needs-you state, which the pill
+        // and border already carry.
         Button("Allow once") { onAllowOnce?(ask.askID) }
           .buttonStyle(.plain)
           .font(.system(size: 11, weight: .bold))
-          .foregroundStyle(Color(red: 0.141, green: 0.090, blue: 0.012))
+          .foregroundStyle(.white)
           .padding(.vertical, 3)
           .padding(.horizontal, 9)
-          .background(
-            Color(red: 1.0, green: 0.624, blue: 0.039).opacity(0.9),
-            in: RoundedRectangle(cornerRadius: 5))
+          .background(Theme.paneFocusTint, in: RoundedRectangle(cornerRadius: 5))
         Button("Review in chat", action: onPrimaryAction)
           .buttonStyle(.plain)
           .font(.system(size: 11))
