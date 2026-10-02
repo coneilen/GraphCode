@@ -102,16 +102,72 @@ public struct NodPlanStep: Codable, Equatable, Sendable {
   public var size: Size?
   /// Set once a human has rewritten the step, so Nod treats it as theirs.
   public var editedByHuman: Bool
+  /// The step that verifies the others. Run as Composite makes it the composite's check
+  /// rather than a child loop.
+  public var doneCheck: Bool
 
   public init(
     id: String, text: String, files: [String] = [], size: Size? = nil,
-    editedByHuman: Bool = false
+    editedByHuman: Bool = false, doneCheck: Bool = false
   ) {
     self.id = id
     self.text = text
     self.files = files
     self.size = size
     self.editedByHuman = editedByHuman
+    self.doneCheck = doneCheck
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(String.self, forKey: .id)
+    text = try container.decode(String.self, forKey: .text)
+    files = try container.decodeIfPresent([String].self, forKey: .files) ?? []
+    size = try? container.decodeIfPresent(Size.self, forKey: .size)
+    editedByHuman = try container.decodeIfPresent(Bool.self, forKey: .editedByHuman) ?? false
+    doneCheck = try container.decodeIfPresent(Bool.self, forKey: .doneCheck) ?? false
+  }
+}
+
+/// What a loop inherits from the loop it came from — a composite child from the planning
+/// conversation, a fork from the message it branched at. Written as JSON by the app before
+/// the loop is created (`LoopLineage.briefPath`); the launcher passes `--inherit <path>` on
+/// a fresh start, never on a resume, and the runtime sends it as turn 1 with origin
+/// `handoff`.
+public struct NodBrief: Codable, Equatable, Sendable {
+  public enum Kind: String, Codable, Sendable {
+    case compositeChild
+    case fork
+  }
+
+  /// Where a fork branches: the parent's engine conversation, cut after `messageID`.
+  public struct ForkPoint: Codable, Equatable, Sendable {
+    public var conversationID: String?
+    public var messageID: String
+
+    public init(conversationID: String? = nil, messageID: String) {
+      self.conversationID = conversationID
+      self.messageID = messageID
+    }
+  }
+
+  public var v: Int
+  public var kind: Kind
+  public var fromNodeID: UUID
+  public var text: String
+  public var attachments: [NodAttachment]
+  public var fork: ForkPoint?
+
+  public init(
+    kind: Kind, fromNodeID: UUID, text: String, attachments: [NodAttachment] = [],
+    fork: ForkPoint? = nil
+  ) {
+    self.v = NodProtocol.version
+    self.kind = kind
+    self.fromNodeID = fromNodeID
+    self.text = text
+    self.attachments = attachments
+    self.fork = fork
   }
 }
 

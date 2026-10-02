@@ -208,6 +208,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// When the goal was last replaced; `nil` means it is still the one the loop was created
   /// with. A backend verdict recorded before this belongs to an earlier goal.
   public var goalSetAt: Date?
+  public var lineage: LoopLineage?
   public var state: LoopState
   public var createdAt: Date
 
@@ -239,6 +240,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     lastMailroomRead: Int? = nil,
     mailroomWatch: MailroomWatch? = nil,
     stallReason: String? = nil,
+    lineage: LoopLineage? = nil,
     state: LoopState = .idle,
     createdAt: Date = Date()
   ) {
@@ -269,6 +271,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.lastMailroomRead = lastMailroomRead
     self.mailroomWatch = mailroomWatch
     self.stallReason = stallReason
+    self.lineage = lineage
     self.state = state
     self.createdAt = createdAt
   }
@@ -587,7 +590,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
     case summary, board, heartbeatIntervalSeconds, stallReason, attachments
     case createdFromTemplateID, templateFollow, sessionRestarts, launchFailure, resolution
-    case pendingCompletion, goalSetAt
+    case pendingCompletion, goalSetAt, lineage
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -654,6 +657,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     pendingCompletion =
       try? container.decodeIfPresent(LoopResolution.self, forKey: .pendingCompletion)
     goalSetAt = try? container.decodeIfPresent(Date.self, forKey: .goalSetAt)
+    lineage = try? container.decodeIfPresent(LoopLineage.self, forKey: .lineage)
     state = try container.decodeIfPresent(LoopState.self, forKey: .state) ?? .idle
     createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
   }

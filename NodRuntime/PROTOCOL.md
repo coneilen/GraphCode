@@ -57,7 +57,7 @@ Every line carries `v`, `seq` (strictly increasing from 1) and `at`.
 | `goalCheck` | `turn`, `evaluatorModel`, `clauses[{text, met, evidence?}]`, `met` | run each time Nod tries to stop |
 | `turnEnded` | `turn`, `filesChanged`, `added`, `removed`, `summary?` | |
 | `usage` | `inputTokens`, `outputTokens`, `costUSD?`, `premiumRequests?`, `contextUsed` (0…1) | running totals for the run, so the newest one is the answer |
-| `planProposed` | `planID`, `title`, `steps[{id, text, files[], size?, editedByHuman}]` | |
+| `planProposed` | `planID`, `title`, `steps[{id, text, files[], size?, editedByHuman, doneCheck}]` | `files` are repository-relative, so Run as Composite can group steps by area; `doneCheck` (absent = false) marks the step that verifies the others |
 | `mailDraft` | `draftID`, `toNodeID`, `inReplyTo?`, `text` | sent only on `sendDraft` |
 | `compacted` | `fromTurn`, `throughTurn` | |
 | `activity` | `line` | the canvas card's live line |
@@ -79,6 +79,46 @@ Every line carries `v`, `seq` (strictly increasing from 1) and `at`.
 | `markGoalDone` | |
 
 The runtime answers each command line with `{"ok":true}` or `{"ok":false,"error":"…"}`.
+
+## Inherited briefs — `--inherit <path>`
+
+A composite child made from a plan, and a fork, start from another loop's conversation. The
+app writes a `NodBrief` to `<support-dir>/nod/briefs/<uuid>.json` before creating the loop
+and records the path in `LoopNode.lineage.briefPath`. The launcher passes
+`--inherit <path>` on a fresh start only, never with `--resume`. The runtime sends the
+brief as turn 1 with origin `handoff`.
+
+| field | notes |
+|---|---|
+| `v` | protocol version |
+| `kind` | `compositeChild` or `fork` |
+| `fromNodeID` | the loop it came from |
+| `text` | the brief itself |
+| `attachments[]` | `NodAttachment`s, usually the source's `loopTranscript` |
+| `fork?` | `{conversationID?, messageID}`: resume the source's engine conversation forked after `messageID` (Claude Agent SDK `resume` + `forkSession`), instead of summarising it |
+
+## The graphcode MCP server
+
+`src/mcp/` is the built-in server Nod always mounts (`serverName` = `graphcode`).
+`createGraphcodeTools(ctx)` returns engine-neutral tool definitions for the runtime to
+adapt. It reads and writes through graphcoded's socket (`$GRAPHCODE_SOCKET`, else
+`$GRAPHCODE_SUPPORT_DIR/graphcoded.sock`), the same RPC the CLI speaks. It never reads
+graph files. `ctx.projectPath` comes from `$NOD_PROJECT_PATH`.
+
+| tool | does |
+|---|---|
+| `siblings` | other loops at this loop's level: type, state, brief, live line, relation (`from` `to` `beside` `none`) |
+| `edges` | edges touching this loop, or all of them |
+| `handoff_briefs` | upstream sources: what each was handed, its result, what the edge carries |
+| `mailroom`, `mailroom_read` | the board, read-only; the read cursor never moves |
+| `ask` | message a loop, optionally `inReplyTo` a message id |
+| `handoff` | send `Handoff: <brief>` downstream, or to a named loop |
+
+`ask` and `handoff` follow `NodSettings.messagesOtherLoops`, read on every call.
+`draftForMe` emits `mailDraft` and sends nothing. `send` sends `messageNode` as this loop.
+`never` refuses. The runtime answers `sendDraft` with `sendDraft(ctx, {toNodeID, text})`.
+`classifyInbound(line, graph, nodeID)` maps a typed `[graphcode] <Sender>: …` line to the
+sending loop, so a drafted reply goes to the right place.
 
 ## Example
 
