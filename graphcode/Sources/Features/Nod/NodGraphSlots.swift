@@ -18,19 +18,28 @@ struct NodGraphSlots {
   var mailDraft: ((NodEvent.MailDraft) -> AnyView)?
   /// Replaces the pane's plain plan card (design section 4).
   var plan: ((NodEvent.PlanProposed) -> AnyView)?
+  /// A turn's opening message from another loop — mail, a handoff — drawn in place of the
+  /// prompt bubble when this returns a view.
+  var inboundMessage: ((NodEvent.UserMessage, NodTurnOrigin) -> AnyView?)?
+  /// Drawn under a goal-check card: "Hand off to Release notes…?" once the goal holds.
+  var afterGoalCheck: ((NodEvent.GoalCheck) -> AnyView?)?
 
   init(
     contextStrip: (() -> AnyView)? = nil,
     afterTurn: ((Int) -> AnyView?)? = nil,
     aboveComposer: (() -> AnyView)? = nil,
     mailDraft: ((NodEvent.MailDraft) -> AnyView)? = nil,
-    plan: ((NodEvent.PlanProposed) -> AnyView)? = nil
+    plan: ((NodEvent.PlanProposed) -> AnyView)? = nil,
+    inboundMessage: ((NodEvent.UserMessage, NodTurnOrigin) -> AnyView?)? = nil,
+    afterGoalCheck: ((NodEvent.GoalCheck) -> AnyView?)? = nil
   ) {
     self.contextStrip = contextStrip
     self.afterTurn = afterTurn
     self.aboveComposer = aboveComposer
     self.mailDraft = mailDraft
     self.plan = plan
+    self.inboundMessage = inboundMessage
+    self.afterGoalCheck = afterGoalCheck
   }
 }
 

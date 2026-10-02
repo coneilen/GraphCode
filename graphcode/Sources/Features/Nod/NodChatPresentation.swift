@@ -176,7 +176,8 @@ enum NodChatPresentation {
   }
 
   static func duration(ms: Int) -> String {
-    ms < 1000 ? String(format: "%.1fs", Double(ms) / 1000) : "\(Int((Double(ms) / 1000).rounded()))s"
+    ms < 1000
+      ? String(format: "%.1fs", Double(ms) / 1000) : "\(Int((Double(ms) / 1000).rounded()))s"
   }
 }
 

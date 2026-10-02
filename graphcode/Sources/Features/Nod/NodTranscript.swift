@@ -132,103 +132,131 @@ struct NodTranscript: Equatable {
     lastSeq = record.seq
     lastAt = max(lastAt, record.at)
 
+    if !applyLifecycle(record) && !applyResolution(record.event) {
+      applyContent(record.event)
+    }
+  }
+
+  /// Records about the run and its turns rather than any one card.
+  private mutating func applyLifecycle(_ record: NodEventRecord) -> Bool {
     switch record.event {
-    case .sessionStarted(let started):
-      closeRunningTurn(at: record.at)
-      session = Session(
-        engine: started.engine, model: started.model, conversationID: started.conversationID)
-      if failure?.kind == .signInExpired || failure?.kind == .engineError { failure = nil }
+    case .sessionStarted(let started): startSession(started, at: record.at)
+    case .turnStarted(let started): startTurn(started, at: record.at)
+    case .turnEnded(let ended): endTurn(ended, at: record.at)
+    case .usage(let usage): add(usage)
+    case .compacted(let compacted): compact(compacted)
+    case .activity(let activity): self.activity = activity.line
+    case .failure(let failure): self.failure = failure
+    default: return false
+    }
+    return true
+  }
 
-    case .turnStarted(let started):
-      closeRunningTurn(at: record.at)
-      var turn = Turn(number: started.turn, origin: started.origin, startedAt: record.at)
-      if started.origin.carriesPrompt, !queued.isEmpty {
-        turn.prompt = queued.removeFirst()
+  /// Records that settle a card already in the transcript.
+  private mutating func applyResolution(_ event: NodEvent) -> Bool {
+    switch event {
+    case .toolResult(let result): resolveTool(result)
+    case .hunkResolved(let resolved): resolveHunk(resolved)
+    case .permissionResolved(let resolved): resolvePermission(resolved)
+    default: return false
+    }
+    return true
+  }
+
+  /// Records that add to the transcript.
+  private mutating func applyContent(_ event: NodEvent) {
+    let openTurn = currentTurn?.number ?? turns.last?.number ?? 0
+    switch event {
+    case .userMessage(let message): receive(message)
+    case .assistantText(let text): appendText(text)
+    case .toolCall(let call): append(.tool(ToolCard(call: call)), toTurn: call.turn)
+    case .hunkStaged(let staged): append(.hunk(HunkCard(staged: staged)), toTurn: staged.turn)
+    case .permissionAsked(let ask): append(.permission(PermissionCard(ask: ask)), toTurn: openTurn)
+    case .goalCheck(let check): recordGoalCheck(check)
+    case .planProposed(let plan): append(.plan(plan), toTurn: openTurn)
+    case .mailDraft(let draft): append(.mailDraft(draft), toTurn: openTurn)
+    default: break
+    }
+  }
+
+  private mutating func startSession(_ started: NodEvent.SessionStarted, at date: Date) {
+    closeRunningTurn(at: date)
+    session = Session(
+      engine: started.engine, model: started.model, conversationID: started.conversationID)
+    clearFailure([.signInExpired, .engineError])
+  }
+
+  private mutating func startTurn(_ started: NodEvent.TurnStarted, at date: Date) {
+    closeRunningTurn(at: date)
+    var turn = Turn(number: started.turn, origin: started.origin, startedAt: date)
+    if started.origin.carriesPrompt, !queued.isEmpty {
+      turn.prompt = queued.removeFirst()
+    }
+    turns.append(turn)
+    clearFailure([.spendCap, .permissionUnavailable])
+  }
+
+  private mutating func endTurn(_ ended: NodEvent.TurnEnded, at date: Date) {
+    guard let index = turns.lastIndex(where: { $0.number == ended.turn }) else { return }
+    turns[index].ended = ended
+    turns[index].endedAt = date
+    activity = nil
+  }
+
+  private mutating func add(_ usage: NodEvent.Usage) {
+    self.usage = usage
+    totalCostUSD += usage.costUSD ?? 0
+    totalPremiumRequests += usage.premiumRequests ?? 0
+  }
+
+  private mutating func compact(_ compacted: NodEvent.Compacted) {
+    let range = compacted.fromTurn...compacted.throughTurn
+    for index in turns.indices where range.contains(turns[index].number) {
+      turns[index].isCompacted = true
+    }
+    clearFailure([.contextFull])
+  }
+
+  private mutating func recordGoalCheck(_ check: NodEvent.GoalCheck) {
+    lastGoalCheck = check
+    goalCheckCount += 1
+    append(.goalCheck(check), toTurn: check.turn)
+  }
+
+  /// A failure stays up until what ends it happens: a new run for sign-in, the next turn
+  /// for a spend cap, a compaction for a full context.
+  private mutating func clearFailure(_ kinds: Set<NodFailureKind>) {
+    if let kind = failure?.kind, kinds.contains(kind) { failure = nil }
+  }
+
+  private mutating func resolveTool(_ result: NodEvent.ToolResult) {
+    updateItems { item in
+      guard case .tool(var card) = item, card.call.callID == result.callID else { return false }
+      card.result = result
+      item = .tool(card)
+      return true
+    }
+  }
+
+  private mutating func resolveHunk(_ resolved: NodEvent.HunkResolved) {
+    updateItems { item in
+      guard case .hunk(var card) = item, card.staged.hunkID == resolved.hunkID else {
+        return false
       }
-      turns.append(turn)
-      if failure?.kind == .spendCap || failure?.kind == .permissionUnavailable { failure = nil }
+      card.resolution = resolved
+      item = .hunk(card)
+      return true
+    }
+  }
 
-    case .userMessage(let message):
-      receive(message)
-
-    case .assistantText(let text):
-      appendText(text)
-
-    case .toolCall(let call):
-      append(.tool(ToolCard(call: call)), toTurn: call.turn)
-
-    case .toolResult(let result):
-      updateItems { item in
-        guard case .tool(var card) = item, card.call.callID == result.callID else { return false }
-        card.result = result
-        item = .tool(card)
-        return true
+  private mutating func resolvePermission(_ resolved: NodEvent.PermissionResolved) {
+    updateItems { item in
+      guard case .permission(var card) = item, card.ask.askID == resolved.askID else {
+        return false
       }
-
-    case .hunkStaged(let staged):
-      append(.hunk(HunkCard(staged: staged)), toTurn: staged.turn)
-
-    case .hunkResolved(let resolved):
-      updateItems { item in
-        guard case .hunk(var card) = item, card.staged.hunkID == resolved.hunkID else {
-          return false
-        }
-        card.resolution = resolved
-        item = .hunk(card)
-        return true
-      }
-
-    case .permissionAsked(let ask):
-      let turn = currentTurn?.number ?? turns.last?.number ?? 0
-      append(.permission(PermissionCard(ask: ask)), toTurn: turn)
-
-    case .permissionResolved(let resolved):
-      updateItems { item in
-        guard case .permission(var card) = item, card.ask.askID == resolved.askID else {
-          return false
-        }
-        card.decision = resolved.decision
-        item = .permission(card)
-        return true
-      }
-
-    case .goalCheck(let check):
-      lastGoalCheck = check
-      goalCheckCount += 1
-      append(.goalCheck(check), toTurn: check.turn)
-
-    case .turnEnded(let ended):
-      guard let index = turns.lastIndex(where: { $0.number == ended.turn }) else { return }
-      turns[index].ended = ended
-      turns[index].endedAt = record.at
-      activity = nil
-
-    case .usage(let usage):
-      self.usage = usage
-      totalCostUSD += usage.costUSD ?? 0
-      totalPremiumRequests += usage.premiumRequests ?? 0
-
-    case .planProposed(let plan):
-      append(.plan(plan), toTurn: currentTurn?.number ?? turns.last?.number ?? 0)
-
-    case .mailDraft(let draft):
-      append(.mailDraft(draft), toTurn: currentTurn?.number ?? turns.last?.number ?? 0)
-
-    case .compacted(let compacted):
-      for index in turns.indices
-      where (compacted.fromTurn...compacted.throughTurn).contains(turns[index].number) {
-        turns[index].isCompacted = true
-      }
-      if failure?.kind == .contextFull { failure = nil }
-
-    case .activity(let activity):
-      self.activity = activity.line
-
-    case .failure(let failure):
-      self.failure = failure
-
-    case .unknown:
-      break
+      card.decision = resolved.decision
+      item = .permission(card)
+      return true
     }
   }
 

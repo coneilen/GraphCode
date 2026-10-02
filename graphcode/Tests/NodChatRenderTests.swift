@@ -74,14 +74,16 @@ struct NodChatRenderTests {
       "`ExportRoute` is registered before `UsageGate`. Moving it into the paid group and adding `testExportBlocksPastCap`.",
       turn: 4, id: "m1")
     for (index, file) in ["UsageGate.swift", "Routes.swift", "ExportRoute.swift"].enumerated() {
-      log.tool("r\(index)", turn: 4, tool: "Read", title: "Read \(file)", summary: "84 lines", ms: 300)
+      log.tool(
+        "r\(index)", turn: 4, tool: "Read", title: "Read \(file)", summary: "84 lines", ms: 300)
     }
     log.tool("s1", turn: 4, tool: "Grep", title: "Search \"paid\"", summary: "9 hits", ms: 400)
     log.tool("e1", turn: 4, tool: "Edit", title: "Edit Routes.swift", summary: "+3 −1", ms: 50)
     log.tool(
       "e2", turn: 4, tool: "Edit", title: "Edit UsageCapTests.swift", summary: "+22", ms: 50)
     log.hunk(
-      "h2", turn: 4, file: "Tests/UsageCapTests.swift", header: "@@ 18,4 @@ testExportBlocksPastCap",
+      "h2", turn: 4, file: "Tests/UsageCapTests.swift",
+      header: "@@ 18,4 @@ testExportBlocksPastCap",
       diff: """
         + for _ in 0..<50 { try await app.export(user) }
         + let res = try await app.export(user)
@@ -110,7 +112,8 @@ struct NodChatRenderTests {
     var log = NodLog.monetization
     log.add("permissionResolved", ["askID": "a1", "decision": "allowOnce"])
     log.add("hunkResolved", ["hunkID": "h1", "decision": "accept"])
-    log.add("toolResult", ["callID": "c4", "status": "ok", "summary": "exit 0", "durationMs": 9000])
+    log.add(
+      "toolResult", ["callID": "c4", "status": "ok", "summary": "exit 0", "durationMs": 9000])
     log.say(
       "Two ways to gate /export: move it into the paid group, or check the cap inside the handler.",
       turn: 2, id: "m3")
@@ -130,7 +133,8 @@ struct NodChatRenderTests {
   @Test
   func theThreeFailureBanners() throws {
     var expired = NodLog.monetization
-    expired.failure("signInExpired", "Copilot sign-in expired. Nod paused after turn 6, and nothing was lost.")
+    expired.failure(
+      "signInExpired", "Copilot sign-in expired. Nod paused after turn 6, and nothing was lost.")
     var context = NodLog.monetization
     context.usage(cost: 0.2, context: 0.82)
     var cap = NodLog.monetization
@@ -180,5 +184,35 @@ struct NodChatRenderTests {
     .frame(maxHeight: .infinity, alignment: .top)
     .background(NodStyle.paneBackground)
     try render("7-composer", width: 720, height: 700, column)
+  }
+
+  @Test
+  func theGraphLayerSlots() throws {
+    var log = NodLog.monetization
+    log.goalCheck(turn: 2, met: true, clauses: [("Every paid route is capped", true, "4 / 4")])
+    let placeholder = { (text: String) in
+      AnyView(
+        Text(text)
+          .font(.system(size: 12))
+          .foregroundStyle(NodStyle.actionInk)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(10)
+          .overlay(
+            RoundedRectangle(cornerRadius: 8)
+              .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+              .foregroundStyle(NodStyle.actionInk)))
+    }
+    let slots = NodGraphSlots(
+      contextStrip: { placeholder("contextStrip") },
+      afterTurn: { placeholder("afterTurn \($0)") },
+      aboveComposer: { placeholder("aboveComposer") },
+      inboundMessage: { message, _ in
+        message.id == "u1" ? placeholder("inboundMessage: \(message.text)") : nil
+      },
+      afterGoalCheck: { $0.met ? placeholder("afterGoalCheck: handoff offer") : nil })
+    try render(
+      "8-graph-slots", width: 900, height: 1500,
+      NodChatPaneView(store: store(log), projectName: "graphcode")
+        .environment(\.nodGraphSlots, slots))
   }
 }

@@ -29,8 +29,9 @@ struct NodLog {
     object["seq"] = seq
     object["at"] = ISO8601DateFormatter().string(from: clock)
     object["type"] = type
-    let data = try! JSONSerialization.data(withJSONObject: object)
-    let record = try! NodProtocol.makeDecoder().decode(NodEventRecord.self, from: data)
+    guard let data = try? JSONSerialization.data(withJSONObject: object),
+      let record = try? NodProtocol.makeDecoder().decode(NodEventRecord.self, from: data)
+    else { preconditionFailure("not a \(type) record: \(object)") }
     records.append(record)
     return record
   }
@@ -38,7 +39,7 @@ struct NodLog {
   var jsonLines: Data {
     let encoder = NodProtocol.makeEncoder()
     return records.reduce(into: Data()) { data, record in
-      data.append(try! encoder.encode(record))
+      data.append((try? encoder.encode(record)) ?? Data())
       data.append(UInt8(ascii: "\n"))
     }
   }
@@ -168,7 +169,8 @@ struct NodLog {
     log.endTurn(1, files: 1, added: 3, removed: 1)
     log.usage(cost: 0.42, context: 0.31)
     log.turn(2, origin: "goalCheck")
-    log.say("LegacyExportTests still posts to /export without a plan. Updating it.", turn: 2, id: "m2")
+    log.say(
+      "LegacyExportTests still posts to /export without a plan. Updating it.", turn: 2, id: "m2")
     log.ask(
       "a1", subject: "swift package resolve",
       reason: "Fetches dependencies over the network. Not in this project's allowlist.")

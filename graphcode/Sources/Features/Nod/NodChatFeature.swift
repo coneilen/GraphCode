@@ -38,6 +38,8 @@ struct NodChatFeature {
     var commentingHunkID: String?
     var hunkComment = ""
     var sendError: String?
+    /// `NodCommand.type`s this runtime has refused — their actions show disabled.
+    var unavailableCommands: Set<String> = []
 
     init(
       nodeID: UUID, stateDirectory: URL? = nil, loopTitle: String, loopType: LoopType,
@@ -95,7 +97,8 @@ struct NodChatFeature {
     case editGoalTapped
     case forkMenuToggled(messageID: String?)
     case forkChosen(messageID: String, asSibling: Bool)
-    case runPlanTapped(planID: String, mode: NodCommand.RunPlan.Mode)
+    /// `steps` are the plan as the human left it; nil runs it as Nod proposed it.
+    case runPlanTapped(planID: String, mode: NodCommand.RunPlan.Mode, steps: [NodPlanStep]? = nil)
     case sendDraftTapped(draftID: String, text: String)
     case compactNowTapped
     case signInTapped
@@ -123,12 +126,17 @@ struct NodChatFeature {
 
   enum NodCommandOutcome: Equatable {
     case sent(NodCommand)
-    case failed(String)
+    case failed(NodCommand, NodControlError)
   }
+
+  /// Commands the runtime refuses until the graph layer behind them ships. A refusal of
+  /// one of these greys its action out instead of showing an error.
+  static let gatedCommands: Set<String> = ["fork", "sendDraft", "runPlan"]
 
   private enum CancelID { case events }
 
   @Dependency(\.nodClient) var nodClient
+  @Dependency(\.nodAllowlist) var nodAllowlist
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -265,10 +273,10 @@ struct NodChatFeature {
         if asSibling { return .send(.delegate(.forkAsSibling(messageID: messageID))) }
         return command(.fork(.init(messageID: messageID)), state)
 
-      case .runPlanTapped(let planID, let mode):
+      case .runPlanTapped(let planID, let mode, let edited):
         if mode == .composite { return .send(.delegate(.runPlanAsComposite(planID: planID))) }
-        guard let plan = state.transcript.plan(id: planID) else { return .none }
-        return command(.runPlan(.init(planID: planID, steps: plan.steps, mode: .here)), state)
+        guard let steps = edited ?? state.transcript.plan(id: planID)?.steps else { return .none }
+        return command(.runPlan(.init(planID: planID, steps: steps, mode: .here)), state)
 
       case .sendDraftTapped(let draftID, let text):
         return command(.sendDraft(.init(draftID: draftID, text: text)), state)
@@ -289,10 +297,14 @@ struct NodChatFeature {
       case .commandFinished(.sent(let command)):
         state.sendError = nil
         if case .setModel(let payload) = command { state.chosenModel = payload.model }
-        return .none
+        return persistAlwaysAllow(command, state)
 
-      case .commandFinished(.failed(let message)):
-        state.sendError = message
+      case .commandFinished(.failed(let command, let error)):
+        if case .rejected = error, Self.gatedCommands.contains(command.type) {
+          state.unavailableCommands.insert(command.type)
+          return .none
+        }
+        state.sendError = error.localizedDescription
         return .none
 
       case .delegate:
@@ -340,10 +352,22 @@ struct NodChatFeature {
       do {
         try await nodClient.send(directory, command)
         await send(.commandFinished(.sent(command)))
+      } catch let error as NodControlError {
+        await send(.commandFinished(.failed(command, error)))
       } catch {
-        await send(.commandFinished(.failed(error.localizedDescription)))
+        await send(.commandFinished(.failed(command, .unreachable(error.localizedDescription))))
       }
     }
+  }
+
+  /// The runtime keeps "Always" for the session only; the project's shell allowlist is
+  /// what makes it outlive the run. Other kinds have no allowlist to land in.
+  private func persistAlwaysAllow(_ command: NodCommand, _ state: State) -> Effect<Action> {
+    guard case .resolvePermission(let resolved) = command, resolved.decision == .alwaysAllow,
+      let ask = state.transcript.ask(id: resolved.askID), ask.kind == .shell
+    else { return .none }
+    let subject = ask.subject
+    return .run { _ in await nodAllowlist.allowShellCommand(subject) }
   }
 
   private func replaceMentionQuery(_ state: inout State, with title: String) {
@@ -353,6 +377,15 @@ struct NodChatFeature {
 }
 
 extension NodTranscript {
+  func ask(id: String) -> NodEvent.PermissionAsked? {
+    for turn in turns.reversed() {
+      for item in turn.items.reversed() {
+        if case .permission(let card) = item, card.ask.askID == id { return card.ask }
+      }
+    }
+    return nil
+  }
+
   func plan(id: String) -> NodEvent.PlanProposed? {
     for turn in turns.reversed() {
       for item in turn.items.reversed() {

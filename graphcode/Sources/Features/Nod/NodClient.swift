@@ -172,3 +172,28 @@ extension DependencyValues {
     set { self[NodClient.self] = newValue }
   }
 }
+
+/// Where "Always in <project>" outlives the run: `GraphcodeSettings.nod.shellAllowlist`,
+/// the list Settings › Agents › Nod edits.
+struct NodAllowlistClient: Sendable {
+  var allowShellCommand: @Sendable (String) async -> Void
+}
+
+extension NodAllowlistClient: DependencyKey {
+  static let liveValue = NodAllowlistClient { command in
+    await MainActor.run {
+      let model = SettingsModel.shared
+      guard !model.settings.nod.shellAllowlist.contains(command) else { return }
+      model.settings.nod.shellAllowlist.append(command)
+    }
+  }
+
+  static let testValue = NodAllowlistClient { _ in }
+}
+
+extension DependencyValues {
+  var nodAllowlist: NodAllowlistClient {
+    get { self[NodAllowlistClient.self] }
+    set { self[NodAllowlistClient.self] = newValue }
+  }
+}

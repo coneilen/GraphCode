@@ -436,6 +436,7 @@ struct NodGoalClauseList: View {
 
 /// Design 3e: a branch stays inside the loop; a sibling gets its own worktree and card.
 struct NodForkMenuView: View {
+  var canBranch = true
   let onBranch: () -> Void
   let onSibling: () -> Void
 
@@ -449,8 +450,14 @@ struct NodForkMenuView: View {
         .padding(.top, 8)
         .padding(.bottom, 2)
       option(
-        "Branch in this loop", "Try the other approach. Switch with ‹ 1 / 2 › on the message.",
-        action: onBranch)
+        "Branch in this loop",
+        canBranch
+          ? "Try the other approach. Switch with ‹ 1 / 2 › on the message."
+          : "Not available in this version of Nod yet.",
+        action: onBranch
+      )
+      .disabled(!canBranch)
+      .opacity(canBranch ? 1 : 0.5)
       option(
         "New sibling loop", "Its own worktree and its own card on the canvas, so both run at once.",
         action: onSibling)
@@ -484,6 +491,7 @@ struct NodForkMenuView: View {
 /// `NodGraphSlots.plan`.
 struct NodPlanCardView: View {
   let plan: NodEvent.PlanProposed
+  var canRun = true
   let onRun: (NodCommand.RunPlan.Mode) -> Void
 
   var body: some View {
@@ -507,6 +515,9 @@ struct NodPlanCardView: View {
         Spacer()
         Button("Run as Composite") { onRun(.composite) }.buttonStyle(NodButtonStyle())
         Button("Run here") { onRun(.here) }.buttonStyle(NodButtonStyle(weight: .primary))
+          .disabled(!canRun)
+          .opacity(canRun ? 1 : 0.5)
+          .help(canRun ? "" : "Not available in this version of Nod yet.")
       }
     }
     .padding(12)
@@ -519,6 +530,7 @@ struct NodPlanCardView: View {
 /// `NodGraphSlots.mailDraft`.
 struct NodMailDraftCardView: View {
   let draft: NodEvent.MailDraft
+  var canSend = true
   let onSend: () -> Void
 
   var body: some View {
@@ -529,6 +541,9 @@ struct NodMailDraftCardView: View {
       HStack {
         Spacer()
         Button("Send reply", action: onSend).buttonStyle(NodButtonStyle(weight: .primary))
+          .disabled(!canSend)
+          .opacity(canSend ? 1 : 0.5)
+          .help(canSend ? "" : "Not available in this version of Nod yet.")
       }
     }
     .padding(12)

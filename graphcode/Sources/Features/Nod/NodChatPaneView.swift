@@ -144,7 +144,9 @@ struct NodChatPaneView: View {
   @ViewBuilder
   private func turnView(_ turn: NodTranscript.Turn) -> some View {
     VStack(alignment: .leading, spacing: 10) {
-      if let prompt = turn.prompt {
+      if let prompt = turn.prompt, let inbound = slots.inboundMessage?(prompt, turn.origin) {
+        inbound
+      } else if let prompt = turn.prompt {
         promptBubble(prompt, origin: turn.origin)
       } else if turn.origin == .timer || turn.origin == .goalCheck {
         Text(turn.origin == .timer ? "Timed run · turn \(turn.number)" : "Goal check")
@@ -254,17 +256,24 @@ struct NodChatPaneView: View {
         check: check, goalTint: goalTint,
         onMarkDone: { store.send(.markGoalDoneTapped) },
         onEditGoal: { store.send(.editGoalTapped) })
+      if let offer = slots.afterGoalCheck?(check) {
+        offer
+      }
     case .plan(let plan):
       if let slot = slots.plan {
         slot(plan)
       } else {
-        NodPlanCardView(plan: plan) { store.send(.runPlanTapped(planID: plan.planID, mode: $0)) }
+        NodPlanCardView(plan: plan, canRun: !store.unavailableCommands.contains("runPlan")) {
+          store.send(.runPlanTapped(planID: plan.planID, mode: $0))
+        }
       }
     case .mailDraft(let draft):
       if let slot = slots.mailDraft {
         slot(draft)
       } else {
-        NodMailDraftCardView(draft: draft) {
+        NodMailDraftCardView(
+          draft: draft, canSend: !store.unavailableCommands.contains("sendDraft")
+        ) {
           store.send(.sendDraftTapped(draftID: draft.draftID, text: draft.text))
         }
       }
@@ -282,6 +291,7 @@ struct NodChatPaneView: View {
   private func assistantText(_ message: NodTranscript.Message) -> some View {
     NodAssistantMessageView(
       message: message, isForkMenuOpen: store.forkMenuMessageID == message.id,
+      canBranch: !store.unavailableCommands.contains("fork"),
       onFork: { store.send(.forkMenuToggled(messageID: message.id)) },
       onBranch: { store.send(.forkChosen(messageID: message.id, asSibling: false)) },
       onSibling: { store.send(.forkChosen(messageID: message.id, asSibling: true)) })
@@ -412,6 +422,7 @@ struct NodBannerView: View {
 struct NodAssistantMessageView: View {
   let message: NodTranscript.Message
   let isForkMenuOpen: Bool
+  let canBranch: Bool
   let onFork: () -> Void
   let onBranch: () -> Void
   let onSibling: () -> Void
@@ -439,7 +450,7 @@ struct NodAssistantMessageView: View {
         .font(.system(size: 11))
         .opacity(isHovering || isForkMenuOpen ? 1 : 0)
         if isForkMenuOpen {
-          NodForkMenuView(onBranch: onBranch, onSibling: onSibling)
+          NodForkMenuView(canBranch: canBranch, onBranch: onBranch, onSibling: onSibling)
         }
       }
     }

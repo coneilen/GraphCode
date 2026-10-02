@@ -86,7 +86,8 @@ struct NodComposerView: View {
       .fixedSize()
 
       Menu {
-        ForEach(NodModelCatalog.models(for: store.transcript.session?.engine), id: \.self) { model in
+        ForEach(NodModelCatalog.models(for: store.transcript.session?.engine), id: \.self) {
+          model in
           Button(NodChatPresentation.modelLabel(model)) { store.send(.modelChosen(model)) }
         }
       } label: {
@@ -114,7 +115,8 @@ struct NodComposerView: View {
 
       Spacer(minLength: 8)
       Text(
-        store.transcript.isRunning ? "⏎ queue · ⌘⏎ steer · esc stop" : "⏎ send · @ loops · / commands"
+        store.transcript.isRunning
+          ? "⏎ queue · ⌘⏎ steer · esc stop" : "⏎ send · @ loops · / commands"
       )
       .font(.system(size: 11))
       .foregroundStyle(Color.white.opacity(0.5))
