@@ -421,7 +421,13 @@ struct ProjectCanvasView: View {
       originLane: entryPorts(derived).isEmpty ? 0 : CanvasBand.originLane)
   }
 
+  @ViewBuilder
   private func edgesLayer(focus: EdgeFocus?) -> some View {
+    ForEach(store.canvasGraph.forkLinks, id: \.to) { link in
+      if let from = store.nodePositions[link.from], let to = store.nodePositions[link.to] {
+        ForkLineView(from: from, to: to)
+      }
+    }
     ForEach(store.canvasGraph.edges) { edge in
       if let from = store.nodePositions[edge.from], let to = store.nodePositions[edge.to] {
         EdgeLineView(

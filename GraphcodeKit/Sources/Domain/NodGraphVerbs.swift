@@ -251,6 +251,8 @@ public struct NodHandoffOffer: Equatable, Sendable {
     let text = brief.trimmingCharacters(in: .whitespacesAndNewlines)
     let targets = targets.map { LoopNode(id: $0.id, title: $0.title) }
     return NodGraphVerb.handoffCommands(from: nodeID, to: targets, brief: text)
-      + [.completeNode(nodeID, result: text.split(separator: "\n").first.map(String.init), from: nil)]
+      + [
+        .completeNode(nodeID, result: text.split(separator: "\n").first.map(String.init), from: nil)
+      ]
   }
 }

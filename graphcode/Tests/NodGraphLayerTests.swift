@@ -8,7 +8,8 @@ import Testing
 struct NodCompositeGroupingTests {
   /// The design's plan: steps 1, 2 and 4 touch the server, 3 the app, 4 is the done check.
   static let usageCapSteps = [
-    NodPlanStep(id: "1", text: "Move /export behind UsageGate", files: ["Sources/Server/Routes.swift"]),
+    NodPlanStep(
+      id: "1", text: "Move /export behind UsageGate", files: ["Sources/Server/Routes.swift"]),
     NodPlanStep(
       id: "2", text: "Return 402 with { limit, resetsAt }, and log the block",
       files: ["Sources/Server/UsageGate.swift"], editedByHuman: true),
@@ -105,7 +106,8 @@ struct NodCompositeGroupingTests {
     let brief = made.briefs[0].brief
     #expect(brief.kind == .compositeChild)
     #expect(brief.fromNodeID == source.id)
-    #expect(brief.attachments == [NodAttachment(kind: .loopTranscript, reference: source.id.uuidString)])
+    #expect(
+      brief.attachments == [NodAttachment(kind: .loopTranscript, reference: source.id.uuidString)])
     #expect(brief.text.contains("→ 1. Move /export behind UsageGate"))
     #expect(brief.text.contains("  3. Upgrade banner"))
     #expect(brief.text.contains("✓ 4. Tests"))
@@ -153,7 +155,9 @@ struct NodForkTests {
     #expect(fork.draft.goal == source.goal)
     #expect(fork.draft.backend == .nod)
     #expect(fork.draft.createdBy == nil)
-    #expect(fork.draft.lineage == LoopLineage(kind: .fork, sourceNodeID: source.id, briefPath: "/b/f.json"))
+    #expect(
+      fork.draft.lineage
+        == LoopLineage(kind: .fork, sourceNodeID: source.id, briefPath: "/b/f.json"))
     #expect(fork.worktree.repositoryPath == "/work/repo")
     #expect(fork.worktree.branch == "loop/monetization-fork2")
     #expect(fork.worktree.worktreePath == "/work/repo-loop-monetization-fork2")
@@ -170,7 +174,8 @@ struct NodForkTests {
     var second = first.draft.makeNode()
     second = LoopNode(
       id: second.id, title: second.title, loopType: second.loopType, lineage: second.lineage)
-    let next = NodFork(of: source, in: Self.graph([source, second]), atMessage: "m", briefPath: "/b")
+    let next = NodFork(
+      of: source, in: Self.graph([source, second]), atMessage: "m", briefPath: "/b")
     #expect(first.worktree.branch == "nod/Spike-fork2")
     #expect(first.worktree.startPoint == nil)
     #expect(first.worktree.worktreePath == "/work/repo-nod-Spike-fork2")
@@ -248,7 +253,8 @@ struct NodGraphVerbTests {
     let named = try NodGraphVerb.parse("/handoff @billing check the 402").get()
     #expect(
       try named.commands(from: Self.me.id, in: Self.graph).get().first
-        == .messageNode(Self.billing.id, text: "Handoff: check the 402", from: Self.me.id, followUp: true))
+        == .messageNode(
+          Self.billing.id, text: "Handoff: check the 402", from: Self.me.id, followUp: true))
   }
 
   @Test
@@ -334,7 +340,8 @@ struct NodInboundMailTests {
     #expect(bare.kind == .handoff && bare.body.isEmpty)
     let named = try #require(
       NodInboundMail.classify(
-        Self.message("[graphcode] BillingUI: Handoff: banner done", from: NodGraphVerbTests.billing.id),
+        Self.message(
+          "[graphcode] BillingUI: Handoff: banner done", from: NodGraphVerbTests.billing.id),
         nodeID: NodGraphVerbTests.me.id, in: NodGraphVerbTests.graph))
     #expect(named.kind == .handoff && named.body == "banner done")
   }
@@ -342,7 +349,9 @@ struct NodInboundMailTests {
   @Test
   func humanTypingAndDaemonNoticesAreNotMail() {
     let graph = NodGraphVerbTests.graph
-    #expect(NodInboundMail.classify(Self.message("fix /export"), nodeID: NodGraphVerbTests.me.id, in: graph) == nil)
+    #expect(
+      NodInboundMail.classify(
+        Self.message("fix /export"), nodeID: NodGraphVerbTests.me.id, in: graph) == nil)
     #expect(
       NodInboundMail.classify(
         Self.message("[graphcode] Stop requested from the graph."), nodeID: NodGraphVerbTests.me.id,
@@ -359,7 +368,8 @@ struct NodInboundMailTests {
     let events: [NodEvent] = [
       .mailDraft(.init(draftID: "d1", toNodeID: to, inReplyTo: "u1", text: "402")),
       .mailDraft(.init(draftID: "d2", toNodeID: to, inReplyTo: "other", text: "no")),
-      .mailDraft(.init(draftID: "d3", toNodeID: to, inReplyTo: "u1", text: "402 { limit, resetsAt }")),
+      .mailDraft(
+        .init(draftID: "d3", toNodeID: to, inReplyTo: "u1", text: "402 { limit, resetsAt }")),
     ]
     #expect(mail.draft(in: events)?.draftID == "d3")
   }
@@ -370,7 +380,9 @@ struct NodHandoffOfferTests {
   static let met = NodEvent.GoalCheck(
     turn: 4, evaluatorModel: "haiku",
     clauses: [
-      NodGoalClause(text: "Every paid route goes through UsageGate", met: true, evidence: "4 of 4 paid routes capped"),
+      NodGoalClause(
+        text: "Every paid route goes through UsageGate", met: true,
+        evidence: "4 of 4 paid routes capped"),
       NodGoalClause(text: "swift test passes", met: true, evidence: "31 tests pass"),
     ], met: true)
 
@@ -396,15 +408,20 @@ struct NodHandoffOfferTests {
   func notOfferedUnmetOrWithNothingDownstream() {
     var unmet = Self.met
     unmet.met = false
-    #expect(NodHandoffOffer.make(check: unmet, nodeID: NodGraphVerbTests.me.id, in: NodGraphVerbTests.graph) == nil)
-    #expect(NodHandoffOffer.make(check: Self.met, nodeID: NodGraphVerbTests.notes.id, in: NodGraphVerbTests.graph) == nil)
+    #expect(
+      NodHandoffOffer.make(
+        check: unmet, nodeID: NodGraphVerbTests.me.id, in: NodGraphVerbTests.graph) == nil)
+    #expect(
+      NodHandoffOffer.make(
+        check: Self.met, nodeID: NodGraphVerbTests.notes.id, in: NodGraphVerbTests.graph) == nil)
   }
 }
 
 @Suite
 struct NodEditablePlanTests {
   static var plan: NodEditablePlan {
-    NodEditablePlan(planID: "p1", title: "Usage caps", steps: NodCompositeGroupingTests.usageCapSteps)
+    NodEditablePlan(
+      planID: "p1", title: "Usage caps", steps: NodCompositeGroupingTests.usageCapSteps)
   }
 
   @Test

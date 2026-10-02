@@ -56,7 +56,8 @@ public struct NodCompositePlan: Equatable, Sendable {
     var areasByStep = steps.map { Set($0.files.map(area(ofFile:))) }
     if let firstWithFiles = areasByStep.firstIndex(where: { !$0.isEmpty }) {
       for index in areasByStep.indices where areasByStep[index].isEmpty {
-        areasByStep[index] = index < firstWithFiles
+        areasByStep[index] =
+          index < firstWithFiles
           ? areasByStep[firstWithFiles] : areasByStep[index - 1]
       }
     } else {
@@ -116,7 +117,8 @@ public struct NodCompositePlan: Equatable, Sendable {
       lines.append("\(marker) \(number). \(step.text)\(files)")
     }
     lines.append("")
-    lines.append("→ marks your steps. Other loops take the rest; ✓ is how the composite is checked.")
+    lines.append(
+      "→ marks your steps. Other loops take the rest; ✓ is how the composite is checked.")
     if group.steps.contains(where: \.editedByHuman) {
       lines.append("Steps a human rewrote are theirs: do them as written.")
     }
