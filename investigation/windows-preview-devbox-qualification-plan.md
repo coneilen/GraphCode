@@ -47,8 +47,8 @@ GraphCode-DevBox-Handoff\
     graphcode-windows-x86_64.zip.sha256
     candidate-manifest.json
   source\
-    GraphCode-source.bundle
-    GraphCode-source.bundle.sha256
+    GraphCode-source-custody.zip
+    GraphCode-source-custody.zip.sha256
   plans\
     windows-preview-devbox-qualification-plan.md
   approvals\
@@ -87,7 +87,7 @@ Stop immediately if a required file is absent.
    ```
 
 2. Verify `hashes.sha256`.
-3. Verify ZIP and source-bundle SHA-256 against the candidate manifest.
+3. Verify product and source-custody ZIP SHA-256 against the candidate manifest.
 4. Verify every Approval A field is filled.
 5. Verify the plan file hash matches the manifest.
 6. Record Dev Box:
@@ -150,16 +150,26 @@ corporate resource names, unrelated processes, or unrelated environment data.
 Git may be installed on the Dev Box.
 
 ```powershell
-git clone C:\GraphCode-Handoff\source\GraphCode-source.bundle C:\GraphCode-Evidence\source
+Expand-Archive `
+  -LiteralPath C:\GraphCode-Handoff\source\GraphCode-source-custody.zip `
+  -DestinationPath C:\GraphCode-Evidence\source-custody
+powershell.exe -NoProfile `
+  -File C:\GraphCode-Evidence\source-custody\Restore-GraphCodeSource.ps1 `
+  -Command Verify -ArtifactRoot C:\GraphCode-Evidence\source-custody
+powershell.exe -NoProfile `
+  -File C:\GraphCode-Evidence\source-custody\Restore-GraphCodeSource.ps1 `
+  -Command Restore -ArtifactRoot C:\GraphCode-Evidence\source-custody `
+  -Destination C:\GraphCode-Evidence\source
 Set-Location C:\GraphCode-Evidence\source
-git checkout --detach <candidate-sha>
 git rev-parse HEAD
 git rev-parse "<local-tag>^{commit}"
 git status --short
 ```
 
 Require HEAD and the peeled tag to equal the candidate manifest SHA. Require a
-clean checkout.
+clean checkout and the restore command's positive materialized-LFS count. Do not
+set `GIT_LFS_SKIP_SMUDGE` as a workaround and do not accept pointer-only or
+dirty source.
 
 The source checkout is used only for evidence scripts and inspection. The
 installed product must execute from the package installation.
@@ -459,4 +469,3 @@ The Dev Box agent does not publish. It returns evidence to the local plan.
 - [ ] uninstall/reinstall lifecycle passed
 - [ ] cleanup passed
 - [ ] return bundle hashed and transferred
-

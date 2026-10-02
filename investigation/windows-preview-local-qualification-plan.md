@@ -173,8 +173,8 @@ GraphCode-DevBox-Handoff\
     graphcode-windows-x86_64.zip.sha256
     candidate-manifest.json
   source\
-    GraphCode-source.bundle
-    GraphCode-source.bundle.sha256
+    GraphCode-source-custody.zip
+    GraphCode-source-custody.zip.sha256
   plans\
     windows-preview-devbox-qualification-plan.md
   approvals\
@@ -193,21 +193,31 @@ GraphCode-DevBox-Handoff\
 - package unsigned state;
 - provider/toolchain identities;
 - Dev Box plan SHA-256;
+- source custody ZIP SHA-256, embedded candidate/tag identity, and LFS
+  object/file counts;
 - Approval A values;
 - creation UTC and operator.
 
-### Source bundle
+### Source custody
 
-Create a Git bundle containing the candidate commit and local tag:
+Create a deterministic custody ZIP containing the candidate's annotated tag,
+Git bundle, exact candidate-tree LFS objects, integrity manifest, and standalone
+restore script:
 
 ```powershell
-git bundle create GraphCode-source.bundle <candidate-sha> "refs/tags/<approved-tag>"
-git bundle verify GraphCode-source.bundle
+pwsh -NoProfile -File Tools\windows\source-custody.ps1 -Command Create `
+  -Repository . -Candidate <candidate-sha> -Tag <approved-tag> `
+  -Artifact GraphCode-source-custody.zip
+pwsh -NoProfile -File Tools\windows\source-custody.ps1 -Command Verify `
+  -Artifact GraphCode-source-custody.zip
 ```
 
-The source bundle is for evidence scripts and source inspection on the Dev Box.
-The installed product must still run from the package installation, not the
-checkout.
+Do not substitute a bare Git bundle. Git bundles do not contain LFS media, and a
+bundle file is not a valid Git LFS standalone-file remote. The custody verifier
+requires the bundle, annotated tag, candidate SHA, restore script, and every
+manifested LFS object to agree. The source custody ZIP is for evidence scripts
+and source inspection on the Dev Box. The installed product must still run from
+the package installation, not the checkout.
 
 ### Handoff integrity
 
@@ -332,4 +342,3 @@ Only after Approval B:
 - [ ] tester packet complete
 - [ ] Approval B received
 - [ ] exact release published and verified
-

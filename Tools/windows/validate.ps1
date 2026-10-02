@@ -1244,6 +1244,10 @@ function Invoke-Task([string] $name) {
     }
     "packaging" {
       if ($PackagingPart -ne "real") {
+        & (Join-Path $repoRoot "Tools\windows\Tests\SourceCustody.Tests.ps1")
+        if ($LASTEXITCODE -ne 0) {
+          throw "Windows source custody tests failed with exit code $LASTEXITCODE"
+        }
         & (Join-Path $repoRoot "Tools\windows\Tests\Release.Tests.ps1")
         & (Join-Path $repoRoot "Tools\windows\Tests\PreviewCore.Tests.ps1")
         & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Signing.Tests.ps1")
