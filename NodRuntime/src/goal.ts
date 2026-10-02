@@ -6,11 +6,11 @@ export type Judge = (prompt: string, model: string) => Promise<string>;
 
 /**
  * Splits a goal into checkable clauses: list items, then `;`, then a top-level "and".
- * "and" inside backticks, quotes or brackets never splits, and a piece too short to be a
+ * "and" inside backticks, quotes or brackets never splits, and a single word that can't be a
  * claim of its own ("resetsAt") is joined back onto the one before it.
  */
 export function splitGoal(goal: string): string[] {
-  const body = goal.trim().replace(/^(done when|goal:|the goal is( that)?)\s*/i, "");
+  const body = goal.trim().replace(/^(?:done when\s*:?|goal\s*:|the goal is(?: that)?\b)\s*/i, "");
   const items = body
     .split(/\n+/)
     .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, "").trim())
@@ -21,7 +21,7 @@ export function splitGoal(goal: string): string[] {
       const text = piece.trim().replace(/[.,]$/, "").trim();
       if (!text) return;
       const previous = clauses[clauses.length - 1];
-      if (i > 0 && previous !== undefined && text.split(/\s+/).length < 3) {
+      if (i > 0 && previous !== undefined && text.split(/\s+/).length < 2) {
         clauses[clauses.length - 1] = `${previous} and ${text}`;
       } else {
         clauses.push(text);
