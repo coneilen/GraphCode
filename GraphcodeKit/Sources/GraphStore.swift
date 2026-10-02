@@ -1053,6 +1053,10 @@ public actor GraphStore {
           "composites are nested \(subGraphDepth) deep (limit \(Self.maxSubGraphDepth))",
           broadcastErrors: broadcastErrors)
       }
+      guard draft.effectiveBackend != .nod || NodRuntimeLocator.isRampedOn else {
+        return await reject(
+          Self.nodRampRefusal("node creation refused"), broadcastErrors: broadcastErrors)
+      }
       guard draft.isValid else {
         return await reject(
           "node creation refused: draft is invalid",
@@ -5013,5 +5017,13 @@ private actor DeliveryAttempt {
   func wait() async -> Bool {
     if let result { return result }
     return await withCheckedContinuation { waiter = $0 }
+  }
+}
+
+extension GraphStore {
+  /// One sentence for every refusal the Nod ramp causes, so the CLI and the app say the
+  /// same thing.
+  static func nodRampRefusal(_ prefix: String) -> String {
+    "\(prefix): \(CLISessionBackendKind.nod.fullName) is not enabled on this install yet"
   }
 }

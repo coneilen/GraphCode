@@ -4,7 +4,7 @@
 Runs an isolated daemon (its own support directory and ZMX_DIR, never the installed one)
 and drives it through the CLI the way a human or another loop would:
 
-  launch argv · control.sock delivery · reported presence · Needs you from an open ask
+  ramp refusal · launch argv · control.sock delivery · reported presence · Needs you from an open ask
   · usage · goal verdict resolving the loop · daemon heartbeat into the same conversation
   · restart resuming the banked conversation
 
@@ -27,7 +27,7 @@ bin_dir = sys.argv[1]
 zmx = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser("~/.graphcode/bin/zmx")
 root = tempfile.mkdtemp(prefix="gn", dir="/tmp")  # short: sun_path is 104 bytes
 support, project, zmx_dir = f"{root}/s", f"{root}/proj", f"{root}/zmx"
-for directory in (f"{support}/bin", project, zmx_dir):
+for directory in (f"{support}/bin", f"{support}/nod", project, zmx_dir):
     os.makedirs(directory)
 shutil.copy(zmx, f"{support}/bin/zmx")
 fake = f"{root}/graphcode-nod"
@@ -138,6 +138,13 @@ def node_id_of(title):
 try:
     time.sleep(1)
     threading.Thread(target=watch, daemon=True).start()
+
+    # The ramp is off until the app mirrors it into the flag: both refusals say so.
+    refused = cli("node", "create", project, "--title", "NodOff", "--type", "main", "--backend", "nod")
+    check("with the ramp off, the CLI refuses a Nod loop", "is not enabled on this install" in refused,
+          refused.strip())
+    check("…and nothing was created", node_id_of("NodOff") is None)
+    open(f"{support}/nod/ramp.on", "w").close()
 
     # Goal loop: launch, delivery, presence, Needs you, usage, verdict.
     print(cli("node", "create", project, "--title", "NodGoal", "--type", "goal",

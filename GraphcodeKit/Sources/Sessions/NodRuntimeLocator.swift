@@ -10,6 +10,22 @@ public enum NodRuntimeLocator {
   /// without touching the process environment the rest of the suite reads.
   static var binaryOverride: URL?
 
+  /// Wins over `rampFlag`, for tests only.
+  static var rampOverride: Bool?
+
+  /// Present while `FeatureRamps.nod` is on for this install. The app mirrors the ramp
+  /// here because `graphcoded` and the CLI have no ramps of their own; deleting
+  /// docs/ramps.json's entry is the kill switch for both, from the app's next launch.
+  public static var rampFlag: URL {
+    SupportDirectory.url.appendingPathComponent("nod", isDirectory: true)
+      .appendingPathComponent("ramp.on")
+  }
+
+  /// Whether Nod may be created or launched at all on this install.
+  public static var isRampedOn: Bool {
+    rampOverride ?? FileManager.default.fileExists(atPath: rampFlag.path)
+  }
+
   /// The runtime's directory inside the app bundle — `graphcode-nod` with what it loads
   /// beside it (NodRuntime/scripts/package.sh).
   public static let bundledDirectory = "Contents/Helpers/nod"
@@ -20,6 +36,7 @@ public enum NodRuntimeLocator {
   /// `DaemonBootstrap` installs under the support directory's `bin` — the only one
   /// `graphcoded` can see, since it runs from there with no bundle of its own.
   public static func binaryURL(bundle: Bundle = .main) -> URL? {
+    guard isRampedOn else { return nil }
     if let binaryOverride { return binaryOverride }
     if let path = NodRuntimeLocation.developmentOverride {
       return URL(fileURLWithPath: path)

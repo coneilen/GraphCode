@@ -2,6 +2,7 @@ import Foundation
 import Testing
 
 @testable import GraphcodeKit
+@testable import graphcode
 
 #if canImport(Darwin)
   import Darwin
@@ -245,7 +246,11 @@ struct NodLaunchArgumentTests {
   @Test
   func theDaemonLaunchesTheBundledRuntimeWithItsStateDirectory() throws {
     NodRuntimeLocator.binaryOverride = URL(fileURLWithPath: "/Apps/GraphCode.app/bin/graphcode-nod")
-    defer { NodRuntimeLocator.binaryOverride = nil }
+    NodRuntimeLocator.rampOverride = true
+    defer {
+      NodRuntimeLocator.binaryOverride = nil
+      NodRuntimeLocator.rampOverride = nil
+    }
     let node = LoopNode(
       id: nodeID, title: "Cap", loopType: .turnBased, checkDescription: "tests pass",
       backend: .nod)
@@ -299,7 +304,11 @@ struct NodLaunchArgumentTests {
   @Test
   func aMainLoopWithNothingToSayStillLaunches() throws {
     NodRuntimeLocator.binaryOverride = URL(fileURLWithPath: "/r/graphcode-nod")
-    defer { NodRuntimeLocator.binaryOverride = nil }
+    NodRuntimeLocator.rampOverride = true
+    defer {
+      NodRuntimeLocator.binaryOverride = nil
+      NodRuntimeLocator.rampOverride = nil
+    }
     let node = LoopNode(id: nodeID, title: "Chat", loopType: .sketch, backend: .nod)
     let arguments = try #require(
       ZmxSessionLauncher.arguments(forNode: node, settings: GraphcodeSettings()))
@@ -319,8 +328,62 @@ struct NodLaunchArgumentTests {
       #expect(ZmxSessionLauncher.arguments(forNode: node, settings: GraphcodeSettings()) == nil)
     }
     NodRuntimeLocator.binaryOverride = URL(fileURLWithPath: "/r/graphcode-nod")
-    defer { NodRuntimeLocator.binaryOverride = nil }
+    NodRuntimeLocator.rampOverride = true
+    defer {
+      NodRuntimeLocator.binaryOverride = nil
+      NodRuntimeLocator.rampOverride = nil
+    }
     #expect(ZmxSessionLauncher.executable(forNode: node, projectPath: "ssh://host/repo") == nil)
+  }
+
+  /// The ramp is the kill switch: off, nothing launches even with a runtime in hand.
+  @Test
+  func theRampTurnedOffLaunchesNothing() {
+    NodRuntimeLocator.binaryOverride = URL(fileURLWithPath: "/r/graphcode-nod")
+    NodRuntimeLocator.rampOverride = false
+    defer {
+      NodRuntimeLocator.binaryOverride = nil
+      NodRuntimeLocator.rampOverride = nil
+    }
+    let node = LoopNode(id: nodeID, title: "Chat", loopType: .sketch, backend: .nod)
+    #expect(NodRuntimeLocator.binaryURL() == nil)
+    #expect(ZmxSessionLauncher.arguments(forNode: node, settings: GraphcodeSettings()) == nil)
+  }
+
+  @Test
+  func theAppMirrorsTheRampIntoTheFlagTheDaemonReads() throws {
+    let flag = FileManager.default.temporaryDirectory
+      .appendingPathComponent("nod-\(UUID().uuidString)/ramp.on")
+    defer { try? FileManager.default.removeItem(at: flag.deletingLastPathComponent()) }
+    FeatureRamps.publishNodFlag(enabled: true, flag: flag)
+    #expect(FileManager.default.fileExists(atPath: flag.path))
+    FeatureRamps.publishNodFlag(enabled: false, flag: flag)
+    #expect(!FileManager.default.fileExists(atPath: flag.path))
+  }
+
+  @Test
+  func theCLIAndTheDaemonRefuseNodWhileTheRampIsOff() async throws {
+    NodRuntimeLocator.rampOverride = false
+    defer { NodRuntimeLocator.rampOverride = nil }
+    let draft = NodeDraft(title: "Chat", loopType: .sketch, backend: .nod)
+    let store = GraphStore()
+    let result = await store.handle(.createNode(draft))
+    if case .rejected(let message, _) = result {
+      #expect(message.contains("GraphCode Nod is not enabled"))
+    } else {
+      Issue.record("expected a refusal, got \(result)")
+    }
+    #expect(await store.graph.nodes.isEmpty)
+    #expect(
+      throws: GraphcodeCommand.ParseError.nodNotEnabled,
+      performing: {
+        try GraphcodeCommand.parse([
+          "node", "create", "/p", "--title", "Chat", "--type", "main", "--backend", "nod",
+        ])
+      })
+    #expect(
+      GraphcodeCommand.describe(.nodNotEnabled)
+        == "refused: GraphCode Nod is not enabled on this install yet")
   }
 
   @Test
