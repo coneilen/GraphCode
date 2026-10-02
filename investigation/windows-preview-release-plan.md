@@ -10,23 +10,24 @@ The critical path is terminal correctness plus a packaged production-daemon
 flight, followed by fixes for any reproduced core bugs. It is not closing all
 36 Partial rows, and it is not just visual polish.
 
-Assessment date: **2026-10-01**. Accepted repository source floor:
-`ca535d0c4042a60ab748f7ff01d6460e9c9ec0d1` (`origin/main` after
-[#593](https://github.com/scgopi/GraphCode/pull/593)). The first-wave source
-floor remains `7d382687eadbce24b0f72eb23633896414153671`; its post-wave
-documentation reconciliation [#584](https://github.com/scgopi/GraphCode/pull/584)
-merged as `f1c5a57f3ba7e9f5743c34a87628806992e1089f`. The second wave then
-merged resilient Zig downloads [#586](https://github.com/scgopi/GraphCode/pull/586)
-as `c19e277eef2728ef5046770a34fef8f0bbd63f33`, app-native stack `#595`
+Assessment date: **2026-10-02**. The approved qualification candidate is
+`e62583b192a13dd92986f68fb7883f3358eb9d23`, which was `origin/main` when
+Approval A was granted and again immediately before the local tag was created.
+It includes the qualification runbooks
+[#598](https://github.com/scgopi/GraphCode/pull/598), GraphCode Nod runtime and
+launch foundations [#590](https://github.com/scgopi/GraphCode/pull/590) and
+[#592](https://github.com/scgopi/GraphCode/pull/592), and Nod setup
+[#589](https://github.com/scgopi/GraphCode/pull/589). `origin/main` advanced
+after tagging and was
+`9ff1442c38a970f0556cd3af5b7d280c6e18e1ae` when the handoff was finalized;
+that later movement does not alter the approved local tag or candidate bytes.
+The earlier implementation history remains relevant: resilient Zig downloads
+[#586](https://github.com/scgopi/GraphCode/pull/586), app-native stack `#595`
 (not a GitHub PR) containing [#585](https://github.com/scgopi/GraphCode/pull/585)
-and [#594](https://github.com/scgopi/GraphCode/pull/594) atomically as
-`7d5cf3be8a86b7562b527f90d854845a52f2ac82`, and redirected-profile
-daemon fix [#593](https://github.com/scgopi/GraphCode/pull/593) from accepted
-head `285b73e8e5a7634a9033b8e72f950efc703b4f60` as the current main
-merge. Exact-head #593 checks include successful Windows shell, Windows Swift
-production coverage, and the mandatory macOS shared regression.
+and [#594](https://github.com/scgopi/GraphCode/pull/594), and redirected-profile
+daemon fix [#593](https://github.com/scgopi/GraphCode/pull/593).
 
-At this audited HEAD, a row-by-row review of the
+At this approved candidate, a row-by-row review of the
 [parity ledger](ui-parity-matrix.md) still contains exactly **98 surfaces:
 62 Validated and 36 Partial**, with zero Missing, Blocked, or Divergent rows.
 These source, contributor-flow, and evidence-pipeline fixes supply no installed
@@ -56,8 +57,9 @@ to promote a parity row.
 The live release API was checked on this date:
 [v0.1.77](https://github.com/scgopi/GraphCode/releases/tag/v0.1.77), published
 2026-09-29, is the latest stable release and contains only
-`graphcode-macos-arm64.dmg`, not a Windows ZIP. No package was built, installed,
-or published for this documentation assessment.
+`graphcode-macos-arm64.dmg`, not a Windows ZIP. The candidate described below
+was built locally and remains unpublished and uninstalled; no GitHub release or
+remote tag was created.
 
 **Engineering distance:** if the proposed profile passes the production flight,
 the remaining release work is bounded qualification and tester handoff, not a
@@ -66,6 +68,80 @@ resize corrupts output, or persistence fails, real implementation work remains
 before even this narrow preview. Those paths are not sufficiently witnessed to
 give a credible calendar estimate. A successful package build or one harness
 pass cannot settle that uncertainty.
+
+### 2026-10-02 local qualification execution record
+
+The local plan was executed through creation of the Dev Box handoff:
+
+- **Phase L0 repository audit — Passed.** Approval A selected
+  `e62583b192a13dd92986f68fb7883f3358eb9d23`, with parents
+  `58399616572542086e80ca81ff7a57221e41395d` and
+  `3583790f158b1214fca23f1529ebaee8986c1575`. `origin/main` matched that SHA
+  immediately before tagging. A separate clean detached worktree was used so
+  the candidate could not include this plan's uncommitted documentation update.
+  The ledger parser found a positive **98** rows: **62 Validated** and
+  **36 Partial**, with no Missing, Blocked, or Divergent rows.
+- **Dependency/provenance audit — Passed.** `Package.resolved` SHA-256 was
+  `65c114f5f233c83529930782a0d422aa7a4b7c86160e66c1c955149c398288b8`;
+  `provider-pins.json` SHA-256 was
+  `c1c927e3995cb1b241894658e10698a4c6ca256066254f2a321a5aabb1b675f9`.
+  The declared identities remain Swift 6.3.3, shell Zig 0.15.2, zmx Zig 0.16.0,
+  Winghostty `6286560d0aa3103e068b2b7afa81eac373d870c9`, zmx
+  `785b3fd15dcafd1882b495c831a10f98c201b908`,
+  `swift-collections` 1.6.0 at
+  `a0cb0954ecb21e4e31b0070e6ed5674e8556685a`, and
+  `swift-identified-collections` 1.1.1 at
+  `322d9ffeeba85c9f7c4984b39422ec7cc3c56597`.
+- **Concurrent-change audit — Passed as an inventory, not candidate
+  substitution.** Open candidate-critical work was recorded before selection.
+  Main advanced after the tag, but the approved source, peeled tag, package and
+  handoff identities remained fixed. Any candidate-byte change still requires a
+  new candidate and restarts downstream evidence.
+- **Approval A reconciliation — Passed.** Approval A fixes version/tag
+  `0.1.78-beta1`, a new corporate Microsoft Dev Box, fixed 2560x1440 sessions,
+  separate 100%/150% profiles, a minimum 1280x820 app window, screenshot but no
+  video permission, UIA plus native keyboard scope, US and US-International
+  dead keys, fixture-only single-line clipboard tests, three named disposable
+  roots, Copilot CLI 1.0.91 with the default Dev Box model/tier in attended
+  mode, exactly two turns or USD 5 equivalent, no predecessor, and deferred/
+  guarded Worktrees with no full dump. Publication remains unauthorized.
+- **Phase L1 preparation — Passed.** The stale fixed-120x40/no-resize account in
+  `graphcode-windows/README.md` was reconciled with current source: pane bounds
+  and cell metrics determine the grid, topology changes queue `zmx resize`, and
+  real backend acceptance/visible wrapping remain unqualified. The Dev Box plan
+  already distinguishes Git as an evidence-checkout prerequisite from installed
+  startup independence. `Tools/windows/Tests/PreviewCore.Qualification.ps1`
+  remains the reused core evidence harness; no new manifest field was justified.
+  `pwsh -NoProfile -File Tools\windows\Tests\PreviewCore.Tests.ps1 -Case All`
+  passed **37/37** pure contract cases, explicitly reporting that no production
+  flight ran. A six-check README/source contract and the positive ledger-count
+  assertion also passed.
+- **Phase L2 candidate build — Passed.** Bootstrap resolved Swift 6.3.3, shell
+  Zig 0.15.2, zmx Zig 0.16.0, Winghostty
+  `6286560d0aa3103e068b2b7afa81eac373d870c9`, and zmx
+  `785b3fd15dcafd1882b495c831a10f98c201b908`. The local annotated tag
+  `0.1.78-beta1` peels to the approved SHA and is not remote. The unpublished
+  release build used neither `-Publish` nor `-AllowTagMismatch`.
+- **Candidate verification — Passed.** Both the repository verifier and the
+  extracted standalone `GraphCode-Setup.ps1 -Command Verify` reported one
+  positive PASS. The unsigned 47,718,509-byte ZIP has SHA-256
+  `9b5b78478e665ace0d7d297769e707dfb1face46e9ee973386b6216a70ab24e5`;
+  its payload manifest contains **50** files and has SHA-256
+  `3eb7e37ad7689af53ed8fda75ddde2a89b455d244a4a87322ae8cbaf38dfe677`.
+  Source SHA, peeled tag SHA and package version agree; signing is
+  `UNSIGNED (not code signed)`; publication is false.
+- **Phase L3 handoff — Passed.** The self-contained
+  `GraphCode-DevBox-Handoff-0.1.78-beta1` contains the candidate, Approval A,
+  Dev Box plan and a verified source bundle containing the annotated tag.
+  `hashes.sha256` verified all **8** other handoff files. The source-bundle
+  SHA-256 is
+  `a0dd217c00c50bdad36554613b171a26da2825c3d50af53eff91ce92a4ca41df`.
+- **Phases L4-L6 — NotExecuted.** No Dev Box installation, native UI/backend
+  turn, destructive fixture, uninstall/reinstall, returned evidence review,
+  tester packet, Approval B, pushed tag or release asset exists. Upgrade and
+  rollback are explicitly NotExecuted for this pass and must be unsupported in
+  the tester packet. The exact-artifact gate is complete; the other six alpha
+  gates remain open.
 
 ## Delivery lanes
 
@@ -96,7 +172,7 @@ Use these states literally rather than treating "merged" as "release-ready":
 | **Deferred** | Work is deliberately outside the current critical path unless a concrete dependency appears. |
 | **Evidence-only** | The work changes documentation, attribution, or observation reliability without itself changing the product behavior being assessed. |
 
-| Delivery | Accepted mapping | State at `ca535d0c` | Residual |
+| Delivery | Accepted mapping | State at audited main | Residual |
 |---|---|---|---|
 | Audit reconciliation | [#572](https://github.com/scgopi/GraphCode/pull/572) | **Evidence-only**, merged | Superseded by this post-wave audit; no product or parity-row change. |
 | Post-wave documentation reconciliation | [#584](https://github.com/scgopi/GraphCode/pull/584) | **Evidence-only**, merged as `f1c5a57f3ba7e9f5743c34a87628806992e1089f` | Superseded by this second-wave audit; no product or parity-row change. |
@@ -111,7 +187,7 @@ Use these states literally rather than treating "merged" as "release-ready":
 | Checkout-owned build/run/stop | App-native stack `#595`: [#585](https://github.com/scgopi/GraphCode/pull/585) closes [#557](https://github.com/scgopi/GraphCode/issues/557) | **Source/tooling-fixed; real pinned cycle qualified** at merge `7d5cf3be8a86b7562b527f90d854845a52f2ac82` | The final pinned build produced all four executables; run started production daemon before shell in owned roots; stop removed only captured checkout-owned processes and preserved the real profile. This is not installation, native UI, agent, persistence, accessibility, or packaging evidence. |
 | Contributor quick-start documentation | App-native stack `#595`: [#594](https://github.com/scgopi/GraphCode/pull/594) closes [#552](https://github.com/scgopi/GraphCode/issues/552) | **Evidence-only**, merged atomically with #585 | Documents measured bootstrap/build/run/stop durations, status markers, and honest failure/evidence limits; it changes no product behavior or parity status. |
 | Redirected `USERPROFILE` daemon startup | [#593](https://github.com/scgopi/GraphCode/pull/593) closes [#558](https://github.com/scgopi/GraphCode/issues/558) | **Source-fixed; locally/CI qualified** by the direct-process RED/GREEN, 101 XCTest plus 6 Swift Testing cases, release builds, clean smoke, and exact-head Windows/macOS CI | Removes the `0xC000001D` trap. It does not substitute for the installed production-core, onboarding, native-input, terminal, or persistence flight. |
-| Worktrees UIA timeout attribution | Open [#587](https://github.com/scgopi/GraphCode/pull/587) at head `c249b9f8731741167bd11ca400691f26f0639903`, part of open [#560](https://github.com/scgopi/GraphCode/issues/560) | **Evidence-only harness boundary; required integration failing** | Bounded workers and cleanup establish product UI-thread starvation during synchronous worktree inspection, but an authorized full process dump and child-process inventory are required before changing shared `App.zig` / `WorktreeStatus.zig`. |
+| Worktrees UIA timeout attribution | Open [#587](https://github.com/scgopi/GraphCode/pull/587) at head `c249b9f8731741167bd11ca400691f26f0639903`, part of open [#560](https://github.com/scgopi/GraphCode/issues/560) | **Evidence-only harness boundary; required integration failing** | Bounded workers and cleanup establish product UI-thread starvation during synchronous worktree inspection. Approval A defers and guards Worktrees for this candidate and authorizes no dump; qualification must prove the starving path is unreachable with an honest unavailable reason. A future source fix still requires separately authorized dump-backed attribution before changing shared `App.zig` / `WorktreeStatus.zig`. |
 
 ## Provider work deferred for preview prioritization
 
@@ -120,7 +196,7 @@ than continue expanding validation before attempting the installed GraphCode
 core workflow. Preserve their open draft PRs, branches, working changes and
 evidence; pausing is not completion, abandonment or a passing check. Accepted
 GraphCode repository floor is
-`ca535d0c4042a60ab748f7ff01d6460e9c9ec0d1`; neither provider change is
+`e62583b192a13dd92986f68fb7883f3358eb9d23`; neither provider change is
 included in its pinned provider. No parity status changes here.
 
 The pause is a priority reset, not a permanent prohibition or a requirement for
@@ -207,18 +283,18 @@ ordinary packaged install has yet demonstrated first launch through connected
 Welcome with owned desktop keyboard input.
 
 - **Terminal:** the [Windows shell README](../graphcode-windows/README.md)
-  describes a default legacy ASCII path/current 120x40 text grid and an opt-in
+  describes a default legacy ASCII path/current pane-sized text grid and an opt-in
   `GRAPHCODE_EXPERIMENTAL_TERMINAL_VT` parser. The existing pinned VT library
   retains grapheme metadata, but the native host still uses narrow,
   single-codepoint 5x7 patterns. Unsupported opt-in host cells explicitly refuse
   publication and retain old pixels while accessible text may advance. That
-  is an honest failure, not matching visible output. The ledger separately
-  records pane-bound-derived backend surface sizing and a minimize/restore
-  state fix; this does not resolve the README's fixed-grid account or prove
-  actual PTY resize negotiation. Record visible grid, PTY dimensions and
-  wrapping in the production flight rather than selecting the optimistic
-  description. Scrollback/wheel/selection, native glyph/caret rendering and
-  terminal UIA conformance remain incomplete or unqualified. An ASCII-only
+  is an honest failure, not matching visible output. Current source derives the
+  grid from pane bounds and measured cell metrics, preserves the old size across
+  zero geometry, and queues `zmx resize` after topology changes. Unit/headless
+  state evidence does not prove that a real backend accepted the resize or that
+  visible pixels, wrapping, and PTY dimensions agree. Record those values in the
+  production flight. Scrollback/wheel/selection, native glyph/caret rendering
+  and terminal UIA conformance remain incomplete or unqualified. An ASCII-only
   promise is not sufficient for a Copilot/Claude/Codex TUI without witnessing
   its actual output and required interaction.
 - **Packaging:** [existing packaging machinery](../Tools/windows/PACKAGING.md)
@@ -326,18 +402,21 @@ input, clipboard, display and destructive tests need an owned Windows desktop
 lease or equivalent authorized hosted evidence. No desktop available means a
 proof gap, not PASS; hosted server evidence must not be relabelled client proof.
 
-- [ ] **Exact artifact:** record candidate source SHA, version, peeled tag SHA,
-  package SHA-256, manifest and provider provenance. Tag/source must match.
-  Verify the actual ZIP and extracted standalone setup with the existing
-  package verifier; confirm the declared unsigned state and bundled production
-  daemon/CLI/runtime inputs, not substitutes.
+- [x] **Exact artifact:** candidate source
+  `e62583b192a13dd92986f68fb7883f3358eb9d23`, version/tag
+  `0.1.78-beta1`, peeled tag SHA, package SHA-256, manifest and provider
+  provenance are recorded in the handoff. Tag/source match. The actual ZIP and
+  extracted standalone setup both passed verification; the package explicitly
+  declares `UNSIGNED (not code signed)` and contains production daemon/CLI/
+  runtime inputs.
 - [ ] **Clean installation and recovery:** install the extracted candidate on
   the declared client profile without Git/Swift/Zig/SDK developer dependencies.
   Observe the installed scheduled daemon endpoint and normal app launch.
-  Perform a real manual upgrade, locked-upgrade refusal/rollback and uninstall;
-  compare fixture user-data bytes before/after. Uninstall preserves data by
-  default, and failure reports actual recovery paths. Existing CI supports,
-  but does not replace, this chosen-package check.
+  Approval A requires uninstall with data preservation and reinstall, with
+  fixture user-data bytes compared before/after. Upgrade, locked-upgrade
+  refusal and rollback are NotExecuted for this pass, remain unsupported, and
+  keep the broader recovery gate open. Existing CI supports, but does not
+  replace, this chosen-package check.
 - [ ] **Production core flow:** with production `graphcoded`, not the protocol
   stub or gate-seeded model, open an owned fixture project; create exactly one
   intended loop, render/select it, rename and edit basic fields, then reopen
@@ -375,8 +454,9 @@ proof gap, not PASS; hosted server evidence must not be relabelled client proof.
   steps, recovery locations and a bug-report route. Never ask testers to bypass
   security policy. Invite only after the core gates have actual evidence.
 
-All **seven** gates remain open. Their execution requires permissions and
-evidence that source, hosted CI, and hidden-window tests cannot manufacture:
+The **exact-artifact gate passed**. The other **six** gates remain open and
+require evidence that source, hosted CI, and hidden-window tests cannot
+manufacture:
 
 | Required external capability | Exact permission/evidence needed |
 |---|---|
@@ -452,9 +532,9 @@ product evidence.
 | [#555](https://github.com/scgopi/GraphCode/issues/555) | **Closed** by [#577](https://github.com/scgopi/GraphCode/pull/577) | Source-fixed; focused contract and 177/177 DaemonClient tests | Prove the production daemon starts/connects from an empty support directory in the packaged core flight. |
 | [#556](https://github.com/scgopi/GraphCode/issues/556) | **Open; source-fixed/evidence-remaining** through app-native stack `#581` ([#579](https://github.com/scgopi/GraphCode/pull/579) + [#580](https://github.com/scgopi/GraphCode/pull/580)) | Local/CI and shown-window probe evidence; no packaged/native-client qualification | Witness ordinary install → first launch → onboarding → connected Welcome with production `graphcoded`, desktop-level keyboard input, and any claimed assistive-technology behavior. |
 | [#557](https://github.com/scgopi/GraphCode/issues/557) | **Closed** by [#585](https://github.com/scgopi/GraphCode/pull/585), merged with upper [#594](https://github.com/scgopi/GraphCode/pull/594) in app-native stack `#595` at `7d5cf3be8a86b7562b527f90d854845a52f2ac82` | Source/tooling-fixed; 4 focused behavioral cases plus a real pinned build/run/stop cycle | The supported entry point builds the runnable layout, launches production daemon before shell in checkout-owned roots, and stops only revalidated captured identities. Full validation and every native/product release gate remain separate. |
-| [#558](https://github.com/scgopi/GraphCode/issues/558) | **Closed** by [#593](https://github.com/scgopi/GraphCode/pull/593), current main `ca535d0c4042a60ab748f7ff01d6460e9c9ec0d1` from head `285b73e8e5a7634a9033b8e72f950efc703b4f60` | Source-fixed; direct-process behavioral regression, Swift production suite, Windows shell, and mandatory macOS shared CI passed at exact head | The redirected-profile trap is fixed. Continue to use explicit owned support/temp roots for qualification isolation; this closure does not prove installed-product behavior. |
+| [#558](https://github.com/scgopi/GraphCode/issues/558) | **Closed** by [#593](https://github.com/scgopi/GraphCode/pull/593), accepted source-fix merge `ca535d0c4042a60ab748f7ff01d6460e9c9ec0d1` from head `285b73e8e5a7634a9033b8e72f950efc703b4f60` | Source-fixed; direct-process behavioral regression, Swift production suite, Windows shell, and mandatory macOS shared CI passed at exact head | The redirected-profile trap is fixed. Continue to use explicit owned support/temp roots for qualification isolation; this closure does not prove installed-product behavior. |
 | [#559](https://github.com/scgopi/GraphCode/issues/559) | **Closed** by [#586](https://github.com/scgopi/GraphCode/pull/586), merged as `c19e277eef2728ef5046770a34fef8f0bbd63f33` | Source/tooling-fixed; 12/12 bootstrap tests plus deterministic Range/resume/stall/mirror/cache/checksum fixtures | Preserve checksum enforcement, bounded retry/timeout behavior, useful partial archives, and explicit mirror semantics. Real ziglang.org transport was not claimed by the PR. |
-| [#560](https://github.com/scgopi/GraphCode/issues/560) | **Open; product-attributed evidence lane** with harness-only [#587](https://github.com/scgopi/GraphCode/pull/587) at `c249b9f8731741167bd11ca400691f26f0639903` | Bounded worker/reacquisition/cleanup contracts pass; exact-head Windows shell integration still fails during synchronous product worktree inspection | Obtain an authorized full process dump at the first post-click timeout and a child-process inventory with command lines. Confirm the UI thread in `applyOverviewLaneAction → inspectWorktreesImpl → WorktreeStatus.inspect` or capture provider locks before changing shared `App.zig` / `WorktreeStatus.zig`. |
+| [#560](https://github.com/scgopi/GraphCode/issues/560) | **Open; product-attributed evidence lane** with harness-only [#587](https://github.com/scgopi/GraphCode/pull/587) at `c249b9f8731741167bd11ca400691f26f0639903` | Bounded worker/reacquisition/cleanup contracts pass; exact-head Windows shell integration still fails during synchronous product worktree inspection | For candidate `0.1.78-beta1`, verify Worktrees is guarded and the starving path cannot be invoked; no dump is authorized and #560 stays open. Any later source fix requires separate dump authorization, child-process inventory and stack/lock attribution before changing shared product files. |
 | [#561](https://github.com/scgopi/GraphCode/issues/561) | **Closed** by [#575](https://github.com/scgopi/GraphCode/pull/575) | Source/tooling-fixed; deep-root positive execution and 21 regression logs | No product gate; preserve positive execution counts and bounded fixture roots. |
 | [#562](https://github.com/scgopi/GraphCode/issues/562) | **Closed** by [#576](https://github.com/scgopi/GraphCode/pull/576) | Source/tooling-fixed; 4/4 isolation tests and 380 runner contracts | Qualification isolation is accepted; installed-product profile behavior remains a separate flight. |
 | [#564](https://github.com/scgopi/GraphCode/issues/564) | **Open; deferred** | No extraction accepted | Keep deferred unless a concrete next-wave overlap requires one small ownership extraction; do not turn the broad split into a preview prerequisite. |
@@ -468,11 +548,11 @@ publication, and parity promotion retain their separate evidence standards.
 The bounded source/tooling queue is complete. Remaining work is bottom-up and
 permission-bound; it should not start with another parity-row sweep:
 
-1. **Installed production-core and onboarding qualification - #556:** build an
-   exact source-bound local candidate from
-   `ca535d0c4042a60ab748f7ff01d6460e9c9ec0d1` or a newer explicitly audited
-   main through [#578](https://github.com/scgopi/GraphCode/pull/578)'s supported
-   route, verify provenance, then use an authorized owned Windows client to run
+1. **Installed production-core and onboarding qualification - #556:** the
+   exact source-bound local candidate from approved source
+   `e62583b192a13dd92986f68fb7883f3358eb9d23` was built through
+   [#578](https://github.com/scgopi/GraphCode/pull/578)'s supported route.
+   That candidate and handoff now exist; use the authorized Dev Box to run
    install → first launch → onboarding → connected Welcome → local project →
    one named authenticated backend → readable input/output → persisted reopen
    → safe exit. This packaged/native-client flight **can close #556** only when
@@ -482,13 +562,13 @@ permission-bound; it should not start with another parity-row sweep:
 2. **Authorized timeout attribution - #560 / #587:** keep open
    [#587](https://github.com/scgopi/GraphCode/pull/587) harness-only and
    evidence-only at head `c249b9f8731741167bd11ca400691f26f0639903`.
-   Its bounded workers and cleanup are useful but cannot close #560 while
-   required integration still times out. On an authorized owned desktop,
-   capture a full process dump at the first timeout plus a child-process
-   inventory and command lines. Only then make the smallest source change
-   supported by the stacks/locks, rerun the targeted regression and exact-head
-   integration, and decide whether that combined evidence can close #560.
-3. **Keep the release gates honest:** all **seven** gates remain open. The
+   Approval A explicitly defers and guards Worktrees for this candidate,
+   authorizes no full dump, and keeps #560 open. The Dev Box flight must verify
+   that the supported preview cannot invoke the starving path and instead shows
+   an honest unavailable/deferred reason. A future dump-backed diagnosis
+   requires separate authorization and a new candidate if code changes.
+3. **Keep the release gates honest:** the exact-artifact gate passed; the other
+   **six** gates remain open. The
    installed production-core result, native input and destructive fixture
    permission, named authenticated backend authorization, exact artifact
    provenance, and publication permission are independent. A green
