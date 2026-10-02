@@ -155,7 +155,8 @@ struct NodChatPaneView: View {
         blockView(block)
       }
       if turn.isRunning, let activity = store.transcript.activity,
-        turn.number == store.transcript.currentTurn?.number
+        turn.number == store.transcript.currentTurn?.number,
+        !turn.items.contains(where: Self.isRunningTool)
       {
         HStack(spacing: 8) {
           NodSpinner()
@@ -175,6 +176,12 @@ struct NodChatPaneView: View {
       }
     }
     .opacity(turn.isCompacted ? 0.6 : 1)
+  }
+
+  /// A running tool card already says what the activity line would.
+  static func isRunningTool(_ item: NodTranscript.Item) -> Bool {
+    if case .tool(let card) = item { return card.status == .running }
+    return false
   }
 
   private func promptBubble(_ message: NodEvent.UserMessage, origin: NodTurnOrigin) -> some View {
@@ -273,41 +280,11 @@ struct NodChatPaneView: View {
   }
 
   private func assistantText(_ message: NodTranscript.Message) -> some View {
-    VStack(alignment: .leading, spacing: 6) {
-      Text(Self.markdown(message.text))
-        .font(.system(size: 13.5))
-        .lineSpacing(4)
-        .foregroundStyle(NodStyle.body)
-        .textSelection(.enabled)
-        .frame(maxWidth: .infinity, alignment: .leading)
-      if message.isFinal {
-        HStack(spacing: 14) {
-          Button("Copy") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(message.text, forType: .string)
-          }
-          Button("Fork from here") { store.send(.forkMenuToggled(messageID: message.id)) }
-          Spacer()
-        }
-        .buttonStyle(NodLinkButtonStyle())
-        .font(.system(size: 11))
-        .opacity(store.forkMenuMessageID == message.id ? 1 : 0.7)
-        if store.forkMenuMessageID == message.id {
-          NodForkMenuView(
-            onBranch: { store.send(.forkChosen(messageID: message.id, asSibling: false)) },
-            onSibling: { store.send(.forkChosen(messageID: message.id, asSibling: true)) })
-        }
-      }
-    }
-  }
-
-  /// Inline code and emphasis from the model's markdown; block structure stays plain text
-  /// so a half-streamed fence never reflows the column.
-  static func markdown(_ text: String) -> AttributedString {
-    (try? AttributedString(
-      markdown: text,
-      options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-      ?? AttributedString(text)
+    NodAssistantMessageView(
+      message: message, isForkMenuOpen: store.forkMenuMessageID == message.id,
+      onFork: { store.send(.forkMenuToggled(messageID: message.id)) },
+      onBranch: { store.send(.forkChosen(messageID: message.id, asSibling: false)) },
+      onSibling: { store.send(.forkChosen(messageID: message.id, asSibling: true)) })
   }
 
   private func steerRow(_ message: NodEvent.UserMessage) -> some View {
@@ -427,5 +404,54 @@ struct NodBannerView: View {
     case .other:
       EmptyView()
     }
+  }
+}
+
+/// One message of Nod's prose. Copy and Fork from here show while the pointer is on it
+/// (design 3e), and stay while the fork menu it opened is up.
+struct NodAssistantMessageView: View {
+  let message: NodTranscript.Message
+  let isForkMenuOpen: Bool
+  let onFork: () -> Void
+  let onBranch: () -> Void
+  let onSibling: () -> Void
+
+  @State private var isHovering = false
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Text(Self.markdown(message.text))
+        .font(.system(size: 13.5))
+        .lineSpacing(4)
+        .foregroundStyle(NodStyle.body)
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+      if message.isFinal {
+        HStack(spacing: 14) {
+          Button("Copy") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(message.text, forType: .string)
+          }
+          Button("Fork from here", action: onFork)
+          Spacer()
+        }
+        .buttonStyle(NodLinkButtonStyle())
+        .font(.system(size: 11))
+        .opacity(isHovering || isForkMenuOpen ? 1 : 0)
+        if isForkMenuOpen {
+          NodForkMenuView(onBranch: onBranch, onSibling: onSibling)
+        }
+      }
+    }
+    .onHover { isHovering = $0 }
+  }
+
+  /// Inline code and emphasis from the model's markdown; block structure stays plain text
+  /// so a half-streamed fence never reflows the column.
+  static func markdown(_ text: String) -> AttributedString {
+    (try? AttributedString(
+      markdown: text,
+      options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+      ?? AttributedString(text)
   }
 }

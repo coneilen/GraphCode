@@ -102,6 +102,7 @@ struct NodTranscript: Equatable {
   private(set) var activity: String?
   private(set) var failure: NodEvent.Failure?
   private(set) var lastSeq = 0
+  private var lastAt = Date.distantPast
 
   var currentTurn: Turn? { turns.last.flatMap { $0.isRunning ? $0 : nil } }
   var isRunning: Bool { currentTurn != nil }
@@ -123,12 +124,13 @@ struct NodTranscript: Equatable {
 
   mutating func apply(_ record: NodEventRecord) {
     // `seq` restarts at 1 when a resumed runtime opens a new run, which it announces with
-    // `sessionStarted`; anything else at or below the last seen seq is a replay.
-    if case .sessionStarted = record.event {
-    } else if record.seq <= lastSeq {
-      return
+    // a `sessionStarted` newer than anything seen; anything else at or below the last
+    // seen seq is a replay.
+    if record.seq <= lastSeq {
+      guard case .sessionStarted = record.event, record.at > lastAt else { return }
     }
     lastSeq = record.seq
+    lastAt = max(lastAt, record.at)
 
     switch record.event {
     case .sessionStarted(let started):

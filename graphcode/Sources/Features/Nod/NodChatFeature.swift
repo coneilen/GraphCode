@@ -105,6 +105,7 @@ struct NodChatFeature {
     case commandFinished(NodCommandOutcome)
     case delegate(Delegate)
 
+    @CasePathable
     enum Delegate: Equatable {
       /// "Open in zsh tab": type the command into a plain shell tab beside the chat.
       case openInShellTab(command: String)

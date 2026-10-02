@@ -30,8 +30,8 @@ struct NodComposerView: View {
     .padding(.vertical, 10)
     .background(RoundedRectangle(cornerRadius: 12).fill(NodStyle.composerBackground))
     .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.12), lineWidth: 1))
-    .overlay(alignment: .bottomLeading) {
-      menu.alignmentGuide(.bottom) { $0[.top] - 6 }
+    .overlay(alignment: .topLeading) {
+      menu.alignmentGuide(.top) { $0[.bottom] + 6 }
     }
     .onDrop(of: [.fileURL], isTargeted: nil, perform: dropFiles)
   }
@@ -80,7 +80,8 @@ struct NodComposerView: View {
       } label: {
         Text("＋").font(.system(size: 11)).foregroundStyle(NodStyle.muted)
       }
-      .menuStyle(.borderlessButton)
+      .menuStyle(.button)
+      .buttonStyle(.plain)
       .menuIndicator(.hidden)
       .fixedSize()
 
@@ -91,7 +92,8 @@ struct NodComposerView: View {
       } label: {
         NodChip { Text("\(NodChatPresentation.modelLabel(store.model ?? "Model")) ▾") }
       }
-      .menuStyle(.borderlessButton)
+      .menuStyle(.button)
+      .buttonStyle(.plain)
       .menuIndicator(.hidden)
       .fixedSize()
 
@@ -105,7 +107,8 @@ struct NodComposerView: View {
       } label: {
         NodChip { Text("\(Self.editPolicyLabel(store.editPolicy)) ▾") }
       }
-      .menuStyle(.borderlessButton)
+      .menuStyle(.button)
+      .buttonStyle(.plain)
       .menuIndicator(.hidden)
       .fixedSize()
 

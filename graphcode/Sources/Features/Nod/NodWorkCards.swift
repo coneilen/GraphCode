@@ -21,7 +21,7 @@ struct NodToolCardView: View {
           } else {
             Text(isExpanded ? "▾" : "▸").font(.system(size: 9))
           }
-          Text(card.call.tool).foregroundStyle(NodStyle.secondary)
+          Text(verb == .other ? card.call.tool : verb.label).foregroundStyle(NodStyle.secondary)
           Text(subject).font(NodStyle.mono).lineLimit(1).truncationMode(.middle)
           if let summary = card.result?.summary, !summary.isEmpty {
             Text("· \(summary)")
