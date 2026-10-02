@@ -516,6 +516,132 @@ root/child identity, escaped-key/string, defaults/precedence, malformed-input,
 temporary-lifetime, and exhaustive allocation-failure regressions. This is pure
 decoder evidence, not live graph rendering or a parity-status promotion.
 
+## Windows contributor quick start
+
+This is the shortest supported route from a Windows checkout to a running
+development shell. It uses the repository-pinned toolchains and providers,
+starts the production daemon before the shell, and isolates app state under
+this checkout by default.
+
+### Prerequisites
+
+- Windows 11 x64 with Visual Studio Build Tools 2022 (MSVC) and a Windows SDK.
+- PowerShell 7 (`pwsh`), Git, and `winget`.
+- A short checkout path when possible, such as `C:\src\GraphCode`.
+
+The bootstrap installs Swift 6.3.3 through `winget` when it is absent. The
+current `Swift.Toolchain` 6.3.3 package declares Python 3.10 and the x64 Visual
+C++ redistributable as dependencies. It also downloads Zig 0.15.2 for the
+shell, Zig 0.16.0 for zmx, and the exact provider commits in
+`provider-pins.json`; do not substitute tools found on `PATH`.
+
+From the repository root:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\bootstrap.ps1 `
+  -ToolRoot .\.graphcode-tools `
+  -ProviderRoot .\.graphcode-tools\providers
+. .\.graphcode-tools\environment.ps1
+```
+
+Load `environment.ps1` again in each new shell. The explicit roots keep every
+download and provider checkout owned by this worktree and are the locations
+`Tools\windows\dev.ps1` expects.
+
+Reference timings from one Windows x64 worktree on 2026-10-01 are not
+performance guarantees: the initial bootstrap took **34 minutes 24 seconds**
+(mostly provider network transfer), initial provider/Swift/shell artifact
+population took **8 minutes 9 seconds**, an unchanged cached build took
+**10.7 seconds**, launch took **1.2 seconds**, and stop took **0.7 seconds**.
+
+### Build, run, and stop
+
+```powershell
+pwsh -NoProfile -File Tools\windows\dev.ps1 -Build
+pwsh -NoProfile -File Tools\windows\dev.ps1 -Run
+
+# After process-level checks or development, stop only this checkout's run.
+pwsh -NoProfile -File Tools\windows\dev.ps1 -Stop
+```
+
+`-Build` publishes the runnable layout under `.build\windows\dev\bin`:
+
+- `graphcoded.exe` - production daemon
+- `graphcode.exe` - CLI
+- `graphcode-windows.exe` - Windows shell
+- `zmx.exe` - pinned terminal-session provider
+
+The script prints `LAYOUT_ROOT=...`, `DAEMON_ARTIFACT=...`,
+`CLI_ARTIFACT=...`, `SHELL_ARTIFACT=...`, and `ZMX_ARTIFACT=...`. A
+successful build ends with `BUILD_STATUS=BUILT`. A successful launch prints
+`LAUNCH_STATUS=LAUNCHED runId=...`, followed by `SUPPORT_ROOT`,
+`LOCALAPPDATA_ROOT`, and `TEMP_ROOT`. The run record is
+`.build\windows\dev\run.json`.
+
+By default, every launch creates fresh roots under
+`.build\windows\dev\runs\<run-id>`. The daemon starts first and must create its
+rendezvous state before the shell starts. Because the support root is fresh,
+the shell follows the real first-run onboarding path; the script does not
+pre-seed or dismiss it. It redirects `GRAPHCODE_SUPPORT_DIR`, `LOCALAPPDATA`,
+`TEMP`, and `TMP`, but deliberately does **not** redirect `USERPROFILE`.
+
+Use `-RealProfile` only as an explicit opt-in:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\dev.ps1 -Run -RealProfile
+```
+
+That mode inherits normal profile roots and can read or modify real GraphCode
+state. The default sandbox is the safe contributor choice.
+
+`-Stop` reads `run.json`, revalidates each captured executable path and process
+creation identity, discovers only run-prefixed zmx processes from this
+checkout's layout, and then removes the run record. It refuses an identity
+mismatch rather than terminating a reused PID or an unrelated process. Running
+`-Stop` when no checkout-owned run is recorded is safe.
+
+### Current remedies
+
+- **Deep paths / `MAX_PATH`:** move the checkout to a short root such as
+  `C:\src\GraphCode`. Bootstrap enables provider-local `core.longpaths=true`,
+  but Swift, Zig, Windows tools, and test fixtures can still exceed legacy path
+  limits.
+- **Slow Zig downloads:** bootstrap suppresses progress rendering, so a
+  `ziglang.org` download can appear idle. Let the transfer finish; if it fails,
+  rerun the same bootstrap command. Checksums remain mandatory, and using a
+  different Zig from `PATH` is not a supported workaround.
+- **Missing or invalid pinned environment:** rerun bootstrap and reload
+  `.graphcode-tools\environment.ps1`; do not hand-build an environment.
+- **An existing `run.json` blocks build or launch:** run
+  `pwsh -NoProfile -File Tools\windows\dev.ps1 -Stop`. If stop reports an
+  identity mismatch, preserve the message and inspect the record instead of
+  deleting it or killing by process name.
+- **Local packaging from an untagged commit:** release-provenance packaging
+  requires a release tag. Use the documented `package.ps1 -Command Build
+  -Local` route in [Windows release packaging](../Tools/windows/PACKAGING.md)
+  for an unmistakably local, non-publishable package.
+
+### Evidence limits
+
+This entrypoint is for iteration, not qualification. It always prints
+`VALIDATION_STATUS=NOT_RUN`; a green build/run/stop cycle proves runnable
+artifacts, process readiness, daemon-before-shell ordering, checkout-owned
+profile roots, and guarded cleanup only. It does not prove onboarding
+interaction, native keyboard input, terminal rendering, accessibility,
+authenticated agent behavior, persistence, packaging, installation, or
+macOS parity.
+
+Run the relevant repository gates separately:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\validate.ps1 -Task windows-shell -SkipTrayLive
+pwsh -NoProfile -File Tools\windows\validate.ps1 -Task packaging
+```
+
+Keep claims aligned with the
+[Windows UI parity ledger](../investigation/ui-parity-matrix.md) and the
+[preview-readiness plan](../investigation/windows-preview-release-plan.md).
+
 ## Build
 
 From a fresh checkout, bootstrap the exact Zig toolchains, Swift 6.3.3, and

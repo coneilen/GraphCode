@@ -141,7 +141,10 @@ extension CLISessionBackend {
         await ZmxSessionLauncher.restart(node, projectPath: projectPath)
       },
       sendInput: { node, text, projectPath in
-        await ZmxSessionLauncher.send(text, to: node, projectPath: projectPath)
+        if kind == .nod, let delivered = await NodSessionLog.deliver(text, to: node) {
+          return delivered
+        }
+        return await ZmxSessionLauncher.send(text, to: node, projectPath: projectPath)
       },
       // The one operation that is genuinely per-backend, because how a session can be
       // asked what it is doing is the thing the three CLIs differ on most. Claude Code
@@ -155,14 +158,18 @@ extension CLISessionBackend {
           return await CopilotSessionLog.presence(of: node, projectPath: projectPath)
         case .codex:
           return await ZmxSessionLauncher.codexPresence(of: node, projectPath: projectPath)
-        case .openCode, .pi, .nod:
+        case .openCode, .pi:
           // Its plugin (pi's extension) writes the same labels Claude Code's hooks do, so the same reader
           // serves both — see `OpenCodePresencePlugin`.
           return await ZmxSessionLauncher.presence(of: node, projectPath: projectPath)
+        case .nod:
+          return await NodSessionLog.presence(of: node, projectPath: projectPath)
         }
       },
       usage: { node, projectPath in
-        await ZmxSessionLauncher.usage(of: node, projectPath: projectPath)
+        kind == .nod
+          ? await NodSessionLog.usage(of: node, projectPath: projectPath)
+          : await ZmxSessionLauncher.usage(of: node, projectPath: projectPath)
       },
       // Per-backend for the same reason `presence` is, and it was not: the label this
       // used to read for all three is written by a hook only Claude Code has, so Copilot
@@ -176,8 +183,10 @@ extension CLISessionBackend {
           return await CopilotSessionLog.activity(of: node, projectPath: projectPath)
         case .codex:
           return await CodexSessionLog.activity(of: node, projectPath: projectPath)
-        case .openCode, .pi, .nod:
+        case .openCode, .pi:
           return await ZmxSessionLauncher.activity(of: node, projectPath: projectPath)
+        case .nod:
+          return await NodSessionLog.activity(of: node, projectPath: projectPath)
         }
       },
       // Every backend narrates before it acts, and all three write that narration to disk
@@ -212,8 +221,7 @@ extension CLISessionBackend {
           // card without one rather than with a rail that guesses.
           reading = nil
         case .nod:
-          // Nod's turns are already structured events; its rail will read those.
-          reading = nil
+          reading = await NodSessionLog.summary(of: node, projectPath: projectPath)
         }
         // The optional second pass, which is the only part of this that costs anything.
         // Off, `applied` returns what it was given untouched.
@@ -307,7 +315,7 @@ extension CLISessionBackend {
 
   public static let attachedClients: @Sendable (LoopNode, String?) async -> Int? = {
     node, path in
-    ZmxSessionLauncher.attachedClients(node, projectPath: path)
+    await ZmxSessionLauncher.attachedClients(node, projectPath: path)
   }
 
   /// Returns whether an earlier conversation was resumed.
@@ -361,7 +369,7 @@ extension CLISessionBackend {
   /// The liveness hook `GraphStore` is wired with — session-level like `terminate`,
   /// so it needs no per-backend adapter.
   public static let sessionAlive: @Sendable (LoopNode, String?) async -> Bool = { node, path in
-    ZmxSessionLauncher.isSessionAlive(node, projectPath: path)
+    await ZmxSessionLauncher.isSessionAlive(node, projectPath: path)
   }
 
   public static let readPresence: @Sendable (LoopNode, String?) async -> PresenceReading = {

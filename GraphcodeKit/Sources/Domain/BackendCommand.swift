@@ -18,9 +18,9 @@ extension CLISessionBackendKind {
     case .codex: return "codex"
     case .openCode: return "opencode"
     case .pi: return "pi"
-    // Launchable once NodRuntime ships its `graphcode-nod` binary — until then `isSpiked`
-    // keeps every loop type off it.
-    case .nod: return nil
+    // Never looked up on PATH: the launchers resolve it from the app bundle
+    // (`NodRuntimeLocator`), and `isSpiked` keeps loop types off it until it is there.
+    case .nod: return "graphcode-nod"
     }
   }
 
@@ -165,8 +165,30 @@ extension CLISessionBackendKind {
               preamble: SessionBriefing.pointer(toBriefingAt: briefingPath), prompt: prompt))
         ]
     case .nod:
-      return model
+      // The briefing by path, like Claude Code's: the runtime reads it into its system
+      // prompt, so the prompt stays the human's own words.
+      return model + (briefingPath.map { ["--briefing", $0] } ?? []) + ["--prompt", prompt]
     }
+  }
+
+  /// What a Nod session is launched with ahead of `launchArguments`: which node it is
+  /// (where its state lives, what the graphcode MCP server reports as "self"), the loop
+  /// type that picks its model, and the engine. Empty for every CLI.
+  public func nodArguments(
+    nodeID: UUID, loopType: LoopType, settings: GraphcodeSettings,
+    workingDirectory: String? = nil, goalFile: String? = nil, inheritFile: String? = nil,
+    unattended: Bool = false
+  ) -> [String] {
+    guard self == .nod else { return [] }
+    let nod = settings.nod
+    var arguments = ["--node", nodeID.uuidString]
+    if let workingDirectory { arguments += ["--cwd", workingDirectory] }
+    arguments += ["--engine", nod.engine.rawValue, "--loop-type", loopType.nodArgument]
+    if let model = nod.model(for: loopType) { arguments += ["--model", model] }
+    if let goalFile { arguments += ["--goal-file", goalFile] }
+    if let inheritFile { arguments += ["--inherit", inheritFile] }
+    if unattended { arguments.append("--unattended") }
+    return arguments
   }
 
   /// pi reads a positional argument that starts with `-` as an option and one that starts
@@ -182,9 +204,9 @@ extension CLISessionBackendKind {
   /// same answer `launchArguments` gives.
   public var promptFlag: String? {
     switch self {
-    case .claudeCode, .codex, .pi, .nod: return nil
+    case .claudeCode, .codex, .pi: return nil
     case .copilotCLI: return "--interactive"
-    case .openCode: return "--prompt"
+    case .openCode, .nod: return "--prompt"
     }
   }
 
@@ -234,17 +256,16 @@ extension CLISessionBackendKind {
   /// support changes both paths together rather than one silently drifting.
   public var supportsResume: Bool {
     self == .claudeCode || self == .copilotCLI || self == .codex || self == .openCode
-      || self == .pi
+      || self == .pi || self == .nod
   }
 
   /// The argv that picks `sessionID` back up. OpenCode's `--session` and Codex's
   /// `resume <id>` both name the exact conversation rather than selecting the last one.
   public func resumeArguments(sessionID: String) -> [String] {
     switch self {
-    case .claudeCode, .copilotCLI: return ["--resume", sessionID]
+    case .claudeCode, .copilotCLI, .nod: return ["--resume", sessionID]
     case .codex: return ["resume", sessionID]
     case .openCode, .pi: return ["--session", sessionID]
-    case .nod: return []
     }
   }
 
@@ -317,6 +338,19 @@ extension CLISessionBackendKind {
       return hooksFile.map { ["-e", $0.path] } ?? []
     case .nod:
       return []
+    }
+  }
+}
+
+extension LoopType {
+  /// `graphcode-nod --loop-type`'s spelling — NodRuntime/README.md.
+  public var nodArgument: String {
+    switch self {
+    case .sketch: return "main"
+    case .goalBased: return "goal"
+    case .timeBased: return "timed"
+    case .turnBased: return "turn"
+    case .composite: return "composite"
     }
   }
 }

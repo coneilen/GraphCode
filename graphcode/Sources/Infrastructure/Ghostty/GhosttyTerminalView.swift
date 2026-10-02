@@ -204,6 +204,8 @@ struct GhosttyTerminalView: NSViewRepresentable {
     if let briefingPath {
       if backend == .claudeCode {
         parts.append("--append-system-prompt-file \(briefingPath)")
+      } else if backend == .nod {
+        parts.append("--briefing \(briefingPath)")
       } else if backend.briefingNeedsDirectoryGrant {
         parts.append("--add-dir \((briefingPath as NSString).deletingLastPathComponent)")
       }
@@ -221,6 +223,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// (`resumeCommand`), so a flag every session needs cannot land in one and not the
   /// other.
   func launchPrefix(settings: GraphcodeSettings) -> [String]? {
+    if backend == .nod { return nodLaunchPrefix(settings: settings) }
     guard let executable = backend.executableName else { return nil }
     let tier = ModelTier.resolved(
       pinned: pinnedModelTier, for: loopType, autoSelecting: settings.autoSelectsModel)
@@ -306,8 +309,8 @@ struct GhosttyTerminalView: NSViewRepresentable {
   func sessionEnvironment(briefingPath: String?, hooksFile: URL? = nil) -> [String: String] {
     var environment = backend.presenceEnvironment(hooksFile: hooksFile)
     guard var prompt = initialPrompt else { return environment }
-    if backend != .claudeCode, backend.briefingEnvironment(briefingPath: briefingPath).isEmpty,
-      let briefingPath
+    if backend != .claudeCode, backend != .nod,
+      backend.briefingEnvironment(briefingPath: briefingPath).isEmpty, let briefingPath
     {
       prompt = SessionPrompt.composed(
         preamble: SessionBriefing.pointer(toBriefingAt: briefingPath), prompt: prompt)

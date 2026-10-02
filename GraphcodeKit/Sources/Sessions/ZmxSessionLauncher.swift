@@ -569,7 +569,7 @@ public enum ZmxSessionLauncher {
       return await sendRemote(text, to: node, at: remote)
     }
     guard ZmxLocator.isInstalled, !text.isEmpty else { return false }
-    guard await sessionExists(node) else { return false }
+    guard await sendGate(node) else { return false }
     // Typed as the writes `sendWrites` frames it into — plain keystrokes when it is
     // short, a bracketed paste when it is not, which is what keeps a long message's head
     // from being swallowed by the composer (`maxUnbracketedSendBytes`, issue #277). The
@@ -597,6 +597,18 @@ public enum ZmxSessionLauncher {
     // Clearing the label here is that missing edge — see `codexPresence`.
     if delivered, node.backend == .codex { await clearPresenceLabel(of: node) }
     return delivered
+  }
+
+  /// Issue #215's gate: whether a keystroke typed now reaches the node's agent rather than
+  /// the shell a finished task left behind. Always a listing taken for this send, never
+  /// the shared one: a task that ended after the shared listing was taken is a husk that
+  /// listing still calls alive. Typing runs after the request is acknowledged, so the
+  /// listing costs the sender nothing; it still joins no listing started before it.
+  static func sendGate(_ node: LoopNode, listing: SessionListing = .shared) async -> Bool {
+    let result = await listing.listing(fresh: true)
+    return sessionTaskState(
+      lsStatus: result?.status, lsOutput: result?.output ?? "",
+      sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName) == .alive
   }
 
   /// Reads a session's presence, preferring what the backend reported over what we can
@@ -727,23 +739,28 @@ public enum ZmxSessionLauncher {
   /// swallows anything typed at it (issue #215's `node send` that reported "delivered"
   /// into a session whose `claude` had exited). Only a running task is a session a
   /// keystroke can reach.
-  static func sessionExists(_ node: LoopNode, projectPath: String? = nil) async -> Bool {
+  ///
+  /// `fresh` for a lifecycle decision — a start, a kill, a launch that may have died —
+  /// where the shared listing could predate the very change being checked.
+  static func sessionExists(
+    _ node: LoopNode, projectPath: String? = nil, fresh: Bool = false
+  ) async -> Bool {
     if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
       return await runRemoteRetrying(
         remoteStatusInvocation(forNode: node, label: "presence", at: remote))
     }
-    return await sessionTaskState(node) == .alive
+    return await sessionTaskState(node, fresh: fresh) == .alive
   }
 
   /// What is actually inside the node's zmx session: a running task (`alive`), a
   /// completed one (`exited`, with the exit code when zmx caught it), or no session at
-  /// all (`absent`). One `zmx ls`, the same cost as the `zmx get` existence check it
-  /// replaces, and the one answer both the send gate and the create-only ensure need —
-  /// an ensure keyed on `zmx get` could never revive a husk, because the husk *is* the
-  /// session that check asks about.
-  static func sessionTaskState(_ node: LoopNode) async -> SessionTaskState {
+  /// all (`absent`). Read from the shared listing (`SessionListing`), not a `zmx ls` of
+  /// its own: every `ls` probes every session on the machine, so one per node made a
+  /// presence pass O(N²) probes, and on a CPU-starved machine a send's gate alone took
+  /// longer than the CLI waits for its acknowledgement.
+  static func sessionTaskState(_ node: LoopNode, fresh: Bool = false) async -> SessionTaskState {
     guard ZmxLocator.isInstalled else { return .absent }
-    let result = runZmx(["ls"])
+    let result = await SessionListing.shared.listing(fresh: fresh)
     return sessionTaskState(
       lsStatus: result?.status, lsOutput: result?.output ?? "",
       sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName)
@@ -790,7 +807,9 @@ public enum ZmxSessionLauncher {
     // reporting a session it cannot reach — the daemon behind it is gone, which is as
     // absent as a missing row, and counts as neither alive nor exited.
     guard line.range(of: "\terr=") == nil else { return .absent }
-    guard line.range(of: "\tended=") != nil else { return .alive }
+    guard line.range(of: "\tended=") != nil || line.range(of: "\texit_code=") != nil else {
+      return .alive
+    }
     var exitCode: Int?
     if let range = line.range(of: "\texit_code=") {
       let digits = line[range.upperBound...].prefix { $0.isNumber }
@@ -870,11 +889,11 @@ public enum ZmxSessionLauncher {
     guard ZmxLocator.isInstalled else {
       return .failure(.unavailable("zmx is not installed"))
     }
-    if await sessionExists(node, projectPath: projectPath) {
+    if await sessionExists(node, projectPath: projectPath, fresh: true) {
       return .success(.attached)
     }
     var spawnedProcess: Process?
-    if node.sessionPrompt == nil || node.sessionPrompt?.isEmpty == true {
+    if node.backend != .nod, node.sessionPrompt == nil || node.sessionPrompt?.isEmpty == true {
       guard let executable = node.backend.executableName else {
         return .failure(.unavailable("backend has no executable"))
       }
@@ -904,7 +923,7 @@ public enum ZmxSessionLauncher {
     }
     for delay in [100, 200, 400, 800, 1200] {
       try? await Task.sleep(for: .milliseconds(delay))
-      if await sessionExists(node, projectPath: projectPath) {
+      if await sessionExists(node, projectPath: projectPath, fresh: true) {
         spawnedProcess = nil
         return .success(.started)
       }
@@ -915,12 +934,12 @@ public enum ZmxSessionLauncher {
     }
     await kill(node, projectPath: projectPath)
     for delay in [100, 200, 400] {
-      if await sessionExists(node, projectPath: projectPath) {
+      if await sessionExists(node, projectPath: projectPath, fresh: true) {
         await kill(node, projectPath: projectPath)
       }
       try? await Task.sleep(for: .milliseconds(delay))
     }
-    if await sessionExists(node, projectPath: projectPath) {
+    if await sessionExists(node, projectPath: projectPath, fresh: true) {
       return .failure(.failed("zmx session appeared after startup timeout"))
     }
     return .failure(
@@ -932,12 +951,12 @@ public enum ZmxSessionLauncher {
   public static func terminateResult(
     _ node: LoopNode, projectPath: String? = nil
   ) async -> Result<Void, CLISessionError> {
-    guard await sessionExists(node, projectPath: projectPath) else {
+    guard await sessionExists(node, projectPath: projectPath, fresh: true) else {
       SessionIDStore.remove(forNodeID: node.id)
       return .success(())
     }
     await kill(node, projectPath: projectPath)
-    guard !(await sessionExists(node, projectPath: projectPath)) else {
+    guard !(await sessionExists(node, projectPath: projectPath, fresh: true)) else {
       return .failure(.failed("zmx session remained after terminate"))
     }
     return .success(())
@@ -1038,11 +1057,13 @@ public enum ZmxSessionLauncher {
 
   /// How many terminals are attached to a node's session, or `nil` when that cannot be
   /// told — a remote project, or `zmx` not answering.
-  static func attachedClients(_ node: LoopNode, projectPath: String? = nil) -> Int? {
+  static func attachedClients(_ node: LoopNode, projectPath: String? = nil) async -> Int? {
     if let projectPath, RemoteProjectLocation.parse(projectPath: projectPath) != nil {
       return nil
     }
-    guard ZmxLocator.isInstalled, let result = runZmx(["ls"]), result.status == 0 else {
+    guard ZmxLocator.isInstalled, let result = await SessionListing.shared.listing(),
+      result.status == 0
+    else {
       return nil
     }
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
@@ -1080,13 +1101,14 @@ public enum ZmxSessionLauncher {
   /// structural, which is what the condemned list's later reap is for.
   static func killConfirmingDeath(sessionNamed name: String) async -> Bool {
     for attempt in 1...killAttempts {
-      guard runZmx(["kill", name]) != nil else { return false }
-      if sessionNamedState(name) == .absent { return true }
+      guard await runZmx(["kill", name]) != nil else { return false }
+      await SessionListing.shared.noteChanged()
+      if await sessionNamedState(name) == .absent { return true }
       if attempt < killAttempts {
         try? await Task.sleep(for: .seconds(killRetrySeconds))
       }
     }
-    return sessionNamedState(name) == .absent
+    return await sessionNamedState(name) == .absent
   }
 
   static let killAttempts = 3
@@ -1108,18 +1130,23 @@ public enum ZmxSessionLauncher {
   /// Whether the node's local session is alive and not a husk — the ensure's own
   /// create-or-run check (`aliveCheckCommand`), asked on its own. A remote session
   /// answers `false`: its liveness is read through presence over ssh (`GraphStore`).
-  static func isSessionAlive(_ node: LoopNode, projectPath: String? = nil) -> Bool {
+  static func isSessionAlive(_ node: LoopNode, projectPath: String? = nil) async -> Bool {
     if let projectPath, RemoteProjectLocation.parse(projectPath: projectPath) != nil {
       return false
     }
-    guard ZmxLocator.isInstalled, let result = runZmx(["ls"]), result.status == 0 else {
-      return false
-    }
+    guard ZmxLocator.isInstalled else { return false }
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-    return result.output.split(separator: "\n").contains { line in
-      !line.contains("\tended=") && !line.contains("\terr=")
-        && line.split(whereSeparator: \.isWhitespace).contains("name=\(name)")
+    func alive(in result: ZmxResult?) -> Bool {
+      guard let result, result.status == 0 else { return false }
+      return result.output.split(separator: "\n").contains { line in
+        !line.contains("\tended=") && !line.contains("\texit_code=") && !line.contains("\terr=")
+          && line.split(whereSeparator: \.isWhitespace).contains("name=\(name)")
+      }
     }
+    // Fresh both ways: a "no" decides whether a pane closing resolves the loop, and a
+    // "yes" tells a sender their message to a finished loop will be typed in. The shared
+    // listing can predate the session starting, or its task ending.
+    return alive(in: await SessionListing.shared.listing(fresh: true))
   }
 
   private enum SessionNamedState {
@@ -1128,34 +1155,68 @@ public enum ZmxSessionLauncher {
     case unknown
   }
 
-  private static func sessionNamedState(_ name: String) -> SessionNamedState {
-    guard let result = runZmx(["ls"]), result.status == 0 else { return .unknown }
+  /// A listing of its own rather than the shared one: this is a kill's confirmation, and
+  /// only a listing taken after the kill can confirm it.
+  private static func sessionNamedState(_ name: String) async -> SessionNamedState {
+    guard let result = await runZmx(["ls"]), result.status == 0 else { return .unknown }
     let exists = result.output.split(separator: "\n").contains { line in
       line.split(whereSeparator: \.isWhitespace).contains("name=\(name)")
     }
     return exists ? .present : .absent
   }
 
-  private struct ZmxResult {
+  struct ZmxResult: Equatable, Sendable {
     let status: Int32
     let output: String
   }
 
   /// Kill and confirmation must still work on a machine that has exhausted its PTYs,
   /// so these one-shot commands use pipes rather than `PTYProcessSession`.
-  private static func runZmx(_ arguments: [String]) -> ZmxResult? {
+  static func runZmx(_ arguments: [String]) async -> ZmxResult? {
+    await runCollectingOutput(ZmxLocator.binaryURL, arguments)
+  }
+
+  /// Runs a process to its exit and returns its status and stdout, without parking a
+  /// cooperative-pool thread on either. `readDataToEndOfFile` and `waitUntilExit` both
+  /// block their thread, and with every presence read and send doing it at once on a
+  /// starved machine they held the daemon's pool for as long as `zmx` took to answer.
+  /// The read runs on a GCD thread and the exit arrives through `terminationHandler`,
+  /// set before `run` so it cannot be missed; the two are joined, not sequenced,
+  /// because reading only after the exit deadlocks a child that filled the pipe.
+  static func runCollectingOutput(_ executable: URL, _ arguments: [String]) async -> ZmxResult? {
     let process = Process()
-    process.executableURL = ZmxLocator.binaryURL
+    process.executableURL = executable
     process.arguments = arguments
     let output = Pipe()
     process.standardOutput = output
     process.standardError = FileHandle.nullDevice
-    do { try process.run() } catch { return nil }
-    let data = output.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-    return ZmxResult(
-      status: process.terminationStatus,
-      output: String(data: data, encoding: .utf8) ?? "")
+    process.standardInput = FileHandle.nullDevice
+    let group = DispatchGroup()
+    let collected = CollectedOutput()
+    group.enter()
+    process.terminationHandler = { _ in group.leave() }
+    do { try process.run() } catch {
+      process.terminationHandler = nil
+      return nil
+    }
+    group.enter()
+    DispatchQueue.global(qos: .utility).async {
+      collected.data = output.fileHandleForReading.readDataToEndOfFile()
+      group.leave()
+    }
+    return await withCheckedContinuation { continuation in
+      group.notify(queue: .global(qos: .utility)) {
+        continuation.resume(
+          returning: ZmxResult(
+            status: process.terminationStatus,
+            output: String(data: collected.data, encoding: .utf8) ?? ""))
+      }
+    }
+  }
+
+  /// The reader thread's result; the group orders the write before the read.
+  private final class CollectedOutput: @unchecked Sendable {
+    var data = Data()
   }
 
   /// `zmx get <name>` exits 0 when the session exists and 1 when it doesn't — raw
@@ -1199,12 +1260,16 @@ public enum ZmxSessionLauncher {
     shedPrompt: ShedPromptReport? = nil
   ) -> [String]? {
     guard let prompt = node.sessionPrompt(forProjectPath: projectPath), !prompt.isEmpty else {
-      return nil
+      return node.backend == .nod
+        ? nodRunArguments(forNode: node, projectPath: projectPath, settings: settings) : nil
     }
     // A backend graphcode can't launch has no argv. `canHost` already refuses to create
     // such a node, so this is the belt to that braces — but silently starting the wrong
     // agent is the failure it exists to prevent, so it's worth both.
-    guard let executable = node.backend.executableName else { return nil }
+    guard let executable = executable(forNode: node, projectPath: projectPath) else {
+      return nil
+    }
+    let nodPrefix = nodArguments(forNode: node, projectPath: projectPath, settings: settings)
     // CR/LF are the one thing quoting can't save us from: zmx terminates the command it
     // types with `\r`, and the PTY's line discipline would accept the line early at an
     // embedded one, truncating the prompt. Prompts come from a single-line text field, so
@@ -1294,14 +1359,16 @@ public enum ZmxSessionLauncher {
       ? PresenceHooks.remoteOpenCodeConfigPath : nil
     let remoteHooksSuffix = Self.remoteHooksSuffix(
       forBackend: node.backend, isRemote: remote != nil)
-    let arguments = node.backend.launchArguments(
-      prompt: promptWithMemory, tier: tier, briefingPath: briefingPath,
-      settings: settings,
-      workspacePaths: paths,
-      hooksFile: hooksFile,
-      sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
-      zmxPath: reportingPath,
-      sessionsDirectory: sessionsDirectory)
+    let arguments =
+      nodPrefix
+      + node.backend.launchArguments(
+        prompt: promptWithMemory, tier: tier, briefingPath: briefingPath,
+        settings: settings,
+        workspacePaths: paths,
+        hooksFile: hooksFile,
+        sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
+        zmxPath: reportingPath,
+        sessionsDirectory: sessionsDirectory)
     let command =
       [
         "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
@@ -1310,7 +1377,7 @@ public enum ZmxSessionLauncher {
         of: executable, arguments: arguments,
         environment: Self.environment(
           forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile,
-          remoteHooksPath: remoteEnvironmentPath),
+          remoteHooksPath: remoteEnvironmentPath, nodeID: node.id, projectPath: projectPath),
         scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
 
     // `zmx` types this command into the session's shell, and a tty in canonical mode
@@ -1327,13 +1394,15 @@ public enum ZmxSessionLauncher {
     guard Self.fitsInATypedCommandLine(command) else {
       func shed(prompt: String, briefingPath: String?, extraPath: String?) -> [String] {
         let workspacePaths = paths + (extraPath.map { paths.contains($0) ? [] : [$0] } ?? [])
-        let arguments = node.backend.launchArguments(
-          prompt: prompt, tier: tier, briefingPath: briefingPath, settings: settings,
-          workspacePaths: workspacePaths,
-          hooksFile: hooksFile,
-          sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
-          zmxPath: reportingPath,
-          sessionsDirectory: sessionsDirectory)
+        let arguments =
+          nodPrefix
+          + node.backend.launchArguments(
+            prompt: prompt, tier: tier, briefingPath: briefingPath, settings: settings,
+            workspacePaths: workspacePaths,
+            hooksFile: hooksFile,
+            sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
+            zmxPath: reportingPath,
+            sessionsDirectory: sessionsDirectory)
         return [
           "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
         ]
@@ -1341,7 +1410,7 @@ public enum ZmxSessionLauncher {
             of: executable, arguments: arguments,
             environment: Self.environment(
               forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile,
-              remoteHooksPath: remoteEnvironmentPath),
+              remoteHooksPath: remoteEnvironmentPath, nodeID: node.id, projectPath: projectPath),
             scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
       }
       let unbriefedCommand = shed(prompt: promptWithMemory, briefingPath: nil, extraPath: nil)
@@ -1440,7 +1509,9 @@ public enum ZmxSessionLauncher {
     settings: GraphcodeSettings = GraphcodeSettingsStore.load()
   ) -> [String]? {
     guard node.backend.supportsResume else { return nil }
-    guard let executable = node.backend.executableName else { return nil }
+    guard let executable = executable(forNode: node, projectPath: projectPath) else {
+      return nil
+    }
     let remote = projectPath.flatMap { RemoteProjectLocation.parse(projectPath: $0) }
     let tier = node.effectiveModelTier(autoSelecting: settings.autoSelectsModel)
     let hooksFile = remote == nil ? PresenceHooks.write(forBackend: node.backend) : nil
@@ -1461,7 +1532,8 @@ public enum ZmxSessionLauncher {
       node.backend == .copilotCLI
       ? nil : SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     let resumeArgs =
-      node.backend.launchArguments(
+      nodArguments(forNode: node, projectPath: projectPath, settings: settings)
+      + node.backend.launchArguments(
         prompt: nil, tier: tier, settings: settings,
         workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath),
         hooksFile: hooksFile,
@@ -1479,8 +1551,49 @@ public enum ZmxSessionLauncher {
           briefingPath: Self.resumeBriefingPath(
             forBackend: node.backend, projectPath: projectPath, isRemote: remote != nil,
             settings: settings),
-          hooksFile: hooksFile, remoteHooksPath: remoteEnvironmentPath),
+          hooksFile: hooksFile, remoteHooksPath: remoteEnvironmentPath, nodeID: node.id,
+          projectPath: projectPath),
         scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
+  }
+
+  /// The binary a node's session runs: the backend's CLI by name, which its login shell
+  /// finds on PATH, or Nod's runtime by absolute path (`NodRuntimeLocator`). Nod has no
+  /// remote launch yet — the bundle it would run from is on this machine.
+  static func executable(forNode node: LoopNode, projectPath: String?) -> String? {
+    guard node.backend == .nod else { return node.backend.executableName }
+    guard !NodSessionLog.isRemote(projectPath) else { return nil }
+    return NodRuntimeLocator.binaryURL()?.path
+  }
+
+  /// `nodArguments` for a launch from here: the node's working directory, and its goal
+  /// written where `--goal-file` points. Empty for every other backend. `inheritFile` is
+  /// for a fresh launch only — a resumed conversation already has what it inherited.
+  static func nodArguments(
+    forNode node: LoopNode, projectPath: String?, settings: GraphcodeSettings,
+    inheritFile: String? = nil
+  ) -> [String] {
+    guard node.backend == .nod else { return [] }
+    return node.backend.nodArguments(
+      nodeID: node.id, loopType: node.loopType, settings: settings,
+      workingDirectory: workingDirectory(forNode: node, projectPath: projectPath),
+      goalFile: NodRuntimeLocator.writeGoal(of: node)?.path, inheritFile: inheritFile,
+      unattended: node.loopType == .timeBased)
+  }
+
+  /// A Nod session with nothing to say yet — a main loop with no starting note. Unlike a
+  /// CLI's, its launch still carries arguments: which node it is, and where its state lives.
+  static func nodRunArguments(
+    forNode node: LoopNode, projectPath: String?, settings: GraphcodeSettings
+  ) -> [String]? {
+    guard let executable = executable(forNode: node, projectPath: projectPath) else {
+      return nil
+    }
+    return ["run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d"]
+      + loginShellInvocation(
+        of: executable,
+        arguments: nodArguments(forNode: node, projectPath: projectPath, settings: settings),
+        environment: environment(
+          forBackend: .nod, briefingPath: nil, nodeID: node.id, projectPath: projectPath))
   }
 
   /// Stands in for a remote session ID that this machine cannot know: the ID was written
@@ -1527,8 +1640,11 @@ public enum ZmxSessionLauncher {
   /// (`briefingEnvironment`) and OpenCode's presence plugin (`presenceEnvironment`).
   static func environment(
     forBackend backend: CLISessionBackendKind, briefingPath: String?, hooksFile: URL? = nil,
-    remoteHooksPath: String? = nil
+    remoteHooksPath: String? = nil, nodeID: UUID? = nil, projectPath: String? = nil
   ) -> [String: String] {
+    if backend == .nod, let nodeID {
+      return NodRuntimeLocator.environment(forNodeID: nodeID, projectPath: projectPath)
+    }
     let briefing = backend.briefingEnvironment(briefingPath: briefingPath)
     if backend == .openCode, let remoteHooksPath {
       return briefing.merging(["OPENCODE_CONFIG": remoteHooksPath]) { $1 }
@@ -2577,7 +2693,7 @@ public enum ZmxSessionLauncher {
         DialLog.record(session: name, dial: "first-pass", event: "already-served")
         return
       }
-      guard await sessionExists(node) else {
+      guard await sessionExists(node, fresh: true) else {
         DialLog.record(session: name, dial: "first-pass", event: "no-session")
         return
       }
@@ -2692,7 +2808,7 @@ public enum ZmxSessionLauncher {
   /// count as the death they are.
   private static func sessionDiedImmediately(node: LoopNode) async -> Bool {
     try? await Task.sleep(for: .seconds(resumeSettleSeconds))
-    return await sessionTaskState(node) != .alive
+    return await sessionTaskState(node, fresh: true) != .alive
   }
 
   /// `logFragment` rides inside the run branch, so an ensure whose check found the
@@ -2724,6 +2840,7 @@ public enum ZmxSessionLauncher {
         try process.run()
         await Task.detached { process.waitUntilExit() }.value
       } catch {}
+      await SessionListing.shared.noteChanged()
       return
     #else
       // The stamp rides in the run branch, after the launch it describes and only if
@@ -2744,7 +2861,93 @@ public enum ZmxSessionLauncher {
           workingDirectory: workingDirectory)
       else { return }
       _ = await session.waitUntilFinished()
+      await SessionListing.shared.noteChanged()
     #endif
   }
 
+}
+
+extension ZmxSessionLauncher {
+  /// One `zmx ls`, shared by everyone asking about local sessions at about the same time.
+  ///
+  /// A listing probes every session on the machine, one at a time — and the workspaces
+  /// share one zmx directory, so that is every workspace's sessions. Asked once per node,
+  /// a presence pass cost N listings of N probes each, and a send took a listing of its
+  /// own before typing a key; on a starved machine either took longer than the CLI waits.
+  ///
+  /// So a reader is handed a listing that is fresh enough rather than a new one:
+  /// - during a presence pass (`beginPass`/`endPass`), any listing started since the
+  ///   pass began — one per pass, and a send arriving mid-pass shares it;
+  /// - otherwise, one started within `reuseWindow`;
+  /// - and a listing still being taken is joined rather than duplicated.
+  /// None started before the last session this process started or killed
+  /// (`noteChanged`) is reused, so a launch's own check never reads a listing older than
+  /// the launch. `passReuseLimit` bounds how stale a long pass's listing can get.
+  actor SessionListing {
+    static let shared = SessionListing()
+
+    private let take: @Sendable () async -> ZmxResult?
+    private let reuseWindow: Duration
+    private let passReuseLimit: Duration
+    private let clock = ContinuousClock()
+    private var latest: (startedAt: ContinuousClock.Instant, result: ZmxResult?)?
+    private var inFlight: (startedAt: ContinuousClock.Instant, task: Task<ZmxResult?, Never>)?
+    private var changedAt: ContinuousClock.Instant?
+    private var passStartedAt: ContinuousClock.Instant?
+    private var openPasses = 0
+    private(set) var listingsTaken = 0
+
+    init(
+      reuseWindow: Duration = .seconds(2),
+      passReuseLimit: Duration = .seconds(30),
+      take: @escaping @Sendable () async -> ZmxResult? = { await runZmx(["ls"]) }
+    ) {
+      self.reuseWindow = reuseWindow
+      self.passReuseLimit = passReuseLimit
+      self.take = take
+    }
+
+    /// `fresh` asks for a listing started from now on — joined by later readers, never
+    /// satisfied by an earlier one.
+    func listing(fresh: Bool = false) async -> ZmxResult? {
+      let now = clock.now
+      // Nothing started before these may answer at all; a listing still being taken
+      // finishes after the reader asked, so only these bound joining it.
+      let floor = [changedAt, passStartedAt].compactMap { $0 }.max()
+      let joinBound = fresh ? now : floor
+      var reuseBound = passStartedAt.map { max($0, now - passReuseLimit) } ?? now - reuseWindow
+      if let floor { reuseBound = max(reuseBound, floor) }
+      if !fresh, let latest, latest.startedAt >= reuseBound { return latest.result }
+      // A listing that has run longer than a pass may reuse one is hung, not slow; it
+      // is left to its own caller rather than stalling everyone who joins it.
+      if let inFlight,
+        inFlight.startedAt >= max(joinBound ?? now - passReuseLimit, now - passReuseLimit)
+      {
+        return await inFlight.task.value
+      }
+      let startedAt = clock.now
+      let take = self.take
+      let task = Task { await take() }
+      inFlight = (startedAt, task)
+      listingsTaken += 1
+      let result = await task.value
+      if inFlight?.startedAt == startedAt { inFlight = nil }
+      if latest.map({ $0.startedAt <= startedAt }) ?? true { latest = (startedAt, result) }
+      return result
+    }
+
+    func noteChanged() {
+      changedAt = clock.now
+    }
+
+    func beginPass() {
+      if openPasses == 0 { passStartedAt = clock.now }
+      openPasses += 1
+    }
+
+    func endPass() {
+      openPasses = max(0, openPasses - 1)
+      if openPasses == 0 { passStartedAt = nil }
+    }
+  }
 }
