@@ -29,13 +29,16 @@ enum FeatureRamps {
     /// against a live codespace; `graphcoded` reads it through
     /// `publishCodespaceMultiplexFlag`, having no ramps of its own.
     case codespaceMultiplex
+    /// GraphCode Nod, the chat-native backend. Beta-only: every surface that offers Nod
+    /// (setup, Settings › Agents, the agent menu) checks this as well as `isSpiked`.
+    case nod
 
     /// The key this feature shipped under before it was renamed. ramps.json is fetched
     /// from graphcode.app, so a build that knew only the new spelling would stop seeing
     /// the kill switch the moment it shipped ahead of the deployed file.
     var legacyRawValue: String? {
       switch self {
-      case .codespaces, .codespaceMultiplex: return nil
+      case .codespaces, .codespaceMultiplex, .nod: return nil
       case .mailroom: return "artifactory"
       }
     }
@@ -49,6 +52,7 @@ enum FeatureRamps {
       case .codespaces: return ["beta": 100, "stable": 100]
       case .mailroom: return ["beta": 100, "stable": 100]
       case .codespaceMultiplex: return ["beta": 100, "stable": 0]
+      case .nod: return ["beta": 100, "stable": 0]
       }
     }
   }
