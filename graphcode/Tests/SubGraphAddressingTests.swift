@@ -74,19 +74,26 @@ struct SubGraphAddressingTests {
 
   @Test
   func aMessageAddressedToAChildLoopReachesItsTransport() async {
-    let delivered = LockIsolated<[UUID]>([])
+    let delivered = LockIsolated<[String]>([])
     let worker = LoopNode(title: "Worker", loopType: .turnBased, checkDescription: "?")
     let (store, _) = storeWithComposite(
       subNodes: [worker],
-      onDeliverMessage: { node, _, _ in
-        delivered.withValue { $0.append(node.id) }
+      onDeliverMessage: { node, text, _ in
+        // Slow on purpose: a child store lives for one command, so its sends must be
+        // typed before that command returns, and in the order they were sent.
+        if text.hasSuffix("inbox") { try? await Task.sleep(for: .milliseconds(50)) }
+        delivered.withValue { $0.append("\(node.id == worker.id) \(text)") }
         return true
       })
 
     await store.handle(
       .messageNode(worker.id, text: "prioritize the inbox", from: nil, followUp: nil))
+    await store.handle(.messageNode(worker.id, text: "then the backlog", from: nil, followUp: nil))
 
-    #expect(delivered.value == [worker.id])
+    #expect(
+      delivered.value == [
+        "true [graphcode] prioritize the inbox", "true [graphcode] then the backlog",
+      ])
   }
 
   @Test

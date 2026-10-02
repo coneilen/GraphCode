@@ -35,6 +35,7 @@ struct GoalResolutionFollowUpTests {
     let resolution = await store.graph.nodes[id: id]?.resolution
 
     await store.handle(.messageNode(id, text: "what did you change?", from: nil, followUp: false))
+    await store.finishSessionTyping()
 
     #expect(delivered.value.contains { $0.contains("what did you change?") })
     #expect(!memory.value.contains { $0.hasPrefix("while you were away") })
@@ -49,6 +50,7 @@ struct GoalResolutionFollowUpTests {
     let (store, id) = await finishedTarget(alive: false, delivered: delivered, memory: memory)
 
     await store.handle(.messageNode(id, text: "what did you change?", from: nil, followUp: false))
+    await store.finishSessionTyping()
 
     #expect(!delivered.value.contains { $0.contains("what did you change?") })
     #expect(memory.value.contains { $0.hasPrefix("while you were away") })

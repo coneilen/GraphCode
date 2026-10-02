@@ -288,8 +288,10 @@ do {
       .graphCommand(
         projectPath: projectPath,
         command: .messageNode(nodeID, text: text, from: sender, followUp: followUp)))
-    // Delivery is judged and attempted before the daemon broadcasts, so the first event
-    // back is the verdict: an error means it did not land, the graph means it did.
+    // Deliverability is judged before the daemon broadcasts, so the first event back is
+    // the verdict: an error means it was staged to the loop's memory instead, the graph
+    // means it is on the board and queued for the session. The typing itself happens
+    // after the acknowledgement, and a failure there is staged to memory too.
     let verdict = try client.waitForEvent { event in
       switch event {
       case .graphChanged, .errorOccurred: return true
@@ -299,7 +301,9 @@ do {
     if case .errorOccurred(let message) = verdict { fail(message) }
     // A follow-up to a busy loop is accepted, not typed: it's in the loop's memory now
     // and its session hears it when it next goes idle — "delivered" would overclaim.
-    print(followUp ? "accepted — typed in when the loop next goes idle" : "delivered")
+    print(
+      followUp
+        ? "accepted — typed in when the loop next goes idle" : "accepted — typing it in now")
 
   case .updateNode(let projectPath, let nodeID, let update):
     // Attributed like `node create`/`node send`: run from inside a loop, ZMX_SESSION
