@@ -11,6 +11,7 @@ import Foundation
 /// | Claude Code | transcript `goal_status` attachment, `met: true` without `sentinel` |
 /// | Codex | `~/.codex/goals_1.sqlite` `thread_goals.status = 'complete'` |
 /// | Copilot CLI | `events.jsonl` `session.autopilot_objective_changed`, `status: "completed"` |
+/// | Nod | `$NOD_STATE/events.jsonl` newest `goalCheck` of the current run |
 ///
 /// OpenCode and pi record nothing goal-specific, so they have no reading here. Remote
 /// projects have none yet either: their records live on the other machine.
@@ -42,7 +43,9 @@ public enum GoalVerdictReader {
       return copilotVerdict(
         lines: CopilotSessionLog.tailLines(
           ofLogAt: directory.appendingPathComponent("events.jsonl")))
-    case .openCode, .pi, .nod:
+    case .nod:
+      return NodSessionLog.verdict(of: node)
+    case .openCode, .pi:
       return nil
     }
   }

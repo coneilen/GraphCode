@@ -38,6 +38,10 @@ struct LoopCardView: View {
   /// Set where the card can act on a template follow — `Detach` sits beside the
   /// Follows chip (PROMPT_TEMPLATES.md § Follow vs snapshot).
   var onDetachTemplate: (() -> Void)?
+  /// A Nod loop's goal clauses and open ask, when the node carries them.
+  var nod: NodCardDetail?
+  /// Allow once for an ask answerable from the card; the ask id is the argument.
+  var onAllowOnce: ((String) -> Void)?
 
   enum Metrics {
     static let size = CGSize(width: 250, height: 96)
@@ -56,7 +60,7 @@ struct LoopCardView: View {
   private var needsAttention: Bool { reason != nil }
 
   var body: some View {
-    let card = LoopCardPresentation(node: node, now: now, reclaimOffer: reclaimOffer)
+    let card = LoopCardPresentation(node: node, now: now, reclaimOffer: reclaimOffer, nod: nod)
     return VStack(alignment: .leading, spacing: 6) {
       titleRow
       if entryRole == .unwired {
@@ -70,7 +74,7 @@ struct LoopCardView: View {
         detail(card.detail)
       }
       Spacer(minLength: 0)
-      metaRow(card.meta)
+      metaRow(card.meta, nodGlyph: card.showsNodGlyph)
     }
     .padding(.top, 8)
     .padding(.horizontal, 11)
@@ -196,6 +200,45 @@ struct LoopCardView: View {
           .font(.system(size: 11, weight: .semibold))
           .foregroundStyle(.white.opacity(0.5))
       }
+    case .nodAsk(let ask):
+      nodAsk(ask)
+    }
+  }
+
+  /// Allow once sits on the card only for allowlisted or read-only asks. Anything else
+  /// (a network fetch, a command outside the allowlist) opens the chat, so the person
+  /// sees what led to it before saying yes.
+  @ViewBuilder
+  private func nodAsk(_ ask: NodCardDetail.Ask) -> some View {
+    HStack(spacing: 7) {
+      if ask.answerableFromCard {
+        // Action blue, as in the chat pane: orange is the Needs-you state, which the pill
+        // and border already carry.
+        Button("Allow once") { onAllowOnce?(ask.askID) }
+          .buttonStyle(.plain)
+          .font(.system(size: 11, weight: .bold))
+          .foregroundStyle(.white)
+          .padding(.vertical, 3)
+          .padding(.horizontal, 9)
+          .background(Theme.paneFocusTint, in: RoundedRectangle(cornerRadius: 5))
+        Button("Review in chat", action: onPrimaryAction)
+          .buttonStyle(.plain)
+          .font(.system(size: 11))
+          .foregroundStyle(.white.opacity(0.55))
+      } else {
+        Button("Review in chat", action: onPrimaryAction)
+          .buttonStyle(.plain)
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundStyle(.white.opacity(0.85))
+          .padding(.vertical, 3)
+          .padding(.horizontal, 7)
+          .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 5))
+        Text("\(ask.kind.cardLabel) · needs context")
+          .font(.system(size: 9.5, design: .monospaced))
+          .minimumScaleFactor(0.8)
+          .foregroundStyle(.white.opacity(0.5))
+          .lineLimit(1)
+      }
     }
   }
 
@@ -218,7 +261,7 @@ struct LoopCardView: View {
     }
   }
 
-  private func metaRow(_ parts: [String]) -> some View {
+  private func metaRow(_ parts: [String], nodGlyph: Bool) -> some View {
     HStack(spacing: 5) {
       // A drawn square rather than the kind's SF Symbol: the glyphs have wildly
       // different optical weights, and this row is a line of 10.5pt mono that a stack
@@ -226,6 +269,7 @@ struct LoopCardView: View {
       RoundedRectangle(cornerRadius: 1.5)
         .fill(node.loopType.accent)
         .frame(width: 6, height: 6)
+      if nodGlyph { NodGlyph().help("Nod: presence and quick actions are exact") }
       Text(parts.joined(separator: " · "))
         .font(.system(size: 10.5, design: .monospaced))
         .foregroundStyle(.white.opacity(0.52))
@@ -251,6 +295,18 @@ struct LoopCardView: View {
       case .interior, .unwired: EmptyView()
       }
     }
+  }
+}
+
+/// Nod's mark: a node, drawn monochrome so it never competes with the kind's accent.
+/// Nothing in the graph gets its own hue for being Nod.
+struct NodGlyph: View {
+  var body: some View {
+    ZStack {
+      Circle().stroke(.white.opacity(0.6), lineWidth: 1)
+      Circle().fill(.white.opacity(0.6)).frame(width: 3, height: 3)
+    }
+    .frame(width: 8, height: 8)
   }
 }
 

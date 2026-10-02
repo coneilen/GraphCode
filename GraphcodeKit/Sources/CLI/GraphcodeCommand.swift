@@ -79,6 +79,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
     case missingArgument(String)
     case invalidValue(argument: String, value: String)
     case invalidDraft
+    /// `FeatureRamps.nod` is off for this install — `NodRuntimeLocator.isRampedOn`.
+    case nodNotEnabled
   }
 
   public static let helpText = """
@@ -556,6 +558,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
     // The same validation the daemon applies, run early so the CLI can say what's
     // missing instead of exiting 0 on a command that quietly did nothing.
+    guard draft.effectiveBackend != .nod || NodRuntimeLocator.isRampedOn else {
+      throw ParseError.nodNotEnabled
+    }
     guard draft.isValid else { throw ParseError.invalidDraft }
     return draft
   }
@@ -1029,6 +1034,8 @@ extension GraphcodeCommand {
     case .invalidDraft:
       return "incomplete loop: a turn-based node needs --check, a goal-based one --goal, "
         + "a time-based one --prompt, and the backend must be able to host that type"
+    case .nodNotEnabled:
+      return GraphStore.nodRampRefusal("refused")
     }
   }
 

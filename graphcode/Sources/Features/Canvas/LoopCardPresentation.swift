@@ -25,6 +25,9 @@ struct LoopCardPresentation: Equatable {
     /// what it was. A launch-time modal asking about twenty forgotten branches is the
     /// version people learn to dismiss.
     case reclaim
+    /// A Nod loop waiting on a permission ask. Allow once only when the ask is
+    /// answerable from the card; otherwise the card sends you to the chat.
+    case nodAsk(NodCardDetail.Ask)
   }
 
   struct Progress: Equatable {
@@ -47,18 +50,22 @@ struct LoopCardPresentation: Equatable {
   let detail: Detail
   /// The footer, already ordered: kind, branch, backend when it isn't the default, age.
   let meta: [String]
+  /// Nod's mark in the meta row. Kept even when Nod is the default and its name drops
+  /// off, because it says the card's quick actions work.
+  let showsNodGlyph: Bool
 
   init(
     node: LoopNode, now: Date = Date(), reclaimOffer: WorktreeAssessment? = nil,
-    summarising: Bool = LoopSummaryPresentation.isProducing
+    summarising: Bool = LoopSummaryPresentation.isProducing, nod: NodCardDetail? = nil
   ) {
+    showsNodGlyph = node.backend == .nod
     word = node.displayState.displayWord(for: node.loopType)
     if let reclaimOffer, node.isResolved {
       liveLine = Self.reclaimLine(reclaimOffer)
       detail = .reclaim
     } else {
       liveLine = Self.liveLine(node, summarising: summarising)
-      detail = Self.detail(node, now: now)
+      detail = Self.nodDetail(node, nod) ?? Self.detail(node, now: now)
     }
     meta = Self.meta(node, now: now)
   }
@@ -150,6 +157,19 @@ struct LoopCardPresentation: Equatable {
     if let metric = metricProgress(node) { return .progress(metric) }
     if let schedule = scheduleProgress(node, now: now) { return .progress(schedule) }
     return .none
+  }
+
+  /// A pending ask outranks everything, then the goal's clauses as a bar: "goal 1 / 2".
+  /// Resolved loops show neither, since their last check is already in the live line.
+  private static func nodDetail(_ node: LoopNode, _ nod: NodCardDetail?) -> Detail? {
+    guard node.backend == .nod, let nod, !node.isResolved else { return nil }
+    if let ask = nod.ask { return .nodAsk(ask) }
+    guard let met = nod.goalMet, let total = nod.goalTotal, total > 0 else { return nil }
+    let clamped = Swift.min(Swift.max(met, 0), total)
+    return .progress(
+      Progress(
+        fraction: Double(clamped) / Double(total), readings: "goal \(clamped) / \(total)",
+        change: clamped == total ? "all met" : ""))
   }
 
   private static func action(for state: LoopState) -> Action {

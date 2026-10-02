@@ -75,6 +75,10 @@ struct LoopWorkspaceFeature {
     /// derived from `projectPath`'s last component so it matches the sidebar exactly,
     /// including the global graph — whose path is a reserved URL, not a folder.
     var projectName: String
+    /// Nod's chat, for a loop whose backend opens in one (`AgentSurface.chat`). Built when
+    /// the agent pane first appears rather than here, so every place that makes this
+    /// state gets it without knowing what a chat is.
+    var nodChat: NodChatFeature.State?
 
     var id: UUID { node.id }
   }
@@ -138,6 +142,8 @@ struct LoopWorkspaceFeature {
     case restartLoopTapped
     case showInGraphTapped
     case railTargetTapped(UUID)
+    case chatSurfaceAppeared
+    case nodChat(NodChatFeature.Action)
   }
 
   @Dependency(\.terminalLayoutStore) var terminalLayoutStore
@@ -146,6 +152,7 @@ struct LoopWorkspaceFeature {
   /// `TerminalSurfaceStore` — so without telling it here, a closed pane's terminal would
   /// linger until it aged out of the cache.
   @Dependency(\.terminalSurfaceClient) var terminalSurfaceClient
+  @Dependency(\.nodSettings) var nodSettings
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -342,12 +349,22 @@ struct LoopWorkspaceFeature {
         }
         return .none
 
+      case .chatSurfaceAppeared:
+        return chatSurfaceAppeared(&state)
+
+      case .nodChat(.delegate(let delegate)):
+        return nodChatDelegate(&state, delegate)
+
+      case .nodChat:
+        return .none
+
       case .stopLoopTapped, .restartLoopTapped, .showInGraphTapped, .railTargetTapped,
         .primaryExitAcknowledged, .lastTabClosed:
         // Handled by `AppFeature`'s parent `Reduce` — see the actions' own doc comment.
         return .none
       }
     }
+    .ifLet(\.nodChat, action: \.nodChat) { NodChatFeature() }
   }
 
   private func stepPaneFocus(_ state: inout State, by offset: Int) {
@@ -370,5 +387,45 @@ struct LoopWorkspaceFeature {
 
   private func persist(_ state: State) {
     terminalLayoutStore.save(state.layout, forNode: state.node.id)
+  }
+}
+
+extension LoopWorkspaceFeature {
+  func chatSurfaceAppeared(_ state: inout State) -> Effect<Action> {
+    guard state.node.backend.surface == .chat else { return .none }
+    let node = state.node
+    if state.nodChat == nil {
+      let settings = nodSettings.current()
+      var chat = NodChatFeature.State(
+        nodeID: node.id, loopTitle: node.title, loopType: node.loopType,
+        branch: node.worktreeBinding?.branch, goal: node.goal?.summary)
+      chat.defaultEngine = settings.engine
+      chat.defaultModel = settings.resolvedModel(for: node.loopType, tier: node.modelTier).id
+      chat.editPolicy = settings.editsInWorktree
+      state.nodChat = chat
+    } else {
+      state.nodChat?.loopTitle = node.title
+      state.nodChat?.goal = node.goal?.summary
+    }
+    return .none
+  }
+
+  /// The chat's requests that are about panes and tabs. The rest — the goal, sign-in,
+  /// forks into siblings, plans as Composites — belong to the levels that own those, and
+  /// pass through untouched.
+  func nodChatDelegate(_ state: inout State, _ delegate: NodChatFeature.Action.Delegate)
+    -> Effect<Action>
+  {
+    guard case .openInShellTab(let command) = delegate else { return .none }
+    let shellTab = state.layout.tabs.first { tab in
+      !tab.surfaces.contains(where: \.launchesClaudeCode)
+    }
+    let tab = shellTab ?? TabLayout(primary: SurfaceRef(id: UUID(), launchesClaudeCode: false))
+    if shellTab == nil { state.layout.tabs.append(tab) }
+    state.layout.selectedTabID = tab.id
+    persist(state)
+    // Typed, not run: the human sees the command at the prompt and presses ⏎ themselves.
+    terminalSurfaceClient.typeText(tab.focusedSurface.id, command)
+    return .none
   }
 }

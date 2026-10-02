@@ -247,6 +247,7 @@ struct OnboardingLoopTypesPage: View {
 /// first watcher refuses to be created rather than after.
 struct OnboardingBackendPage: View {
   @Binding var selection: CLISessionBackendKind
+  @State private var nodSetup: NodSetupModel?
 
   var body: some View {
     VStack(spacing: 14) {
@@ -260,7 +261,10 @@ struct OnboardingBackendPage: View {
         .frame(maxWidth: 470)
 
       VStack(spacing: 8) {
-        ForEach(CLISessionBackendKind.allCases, id: \.self) { backend in
+        ForEach(
+          CLISessionBackendKind.allCases.filter { $0 != .nod || FeatureRamps.isEnabled(.nod) },
+          id: \.self
+        ) { backend in
           row(backend)
         }
       }
@@ -269,20 +273,31 @@ struct OnboardingBackendPage: View {
       // No PATH probing and no version strings: nothing in `BackendCapabilities` looks,
       // so claiming to have found something would be the tour making it up.
       Text(
-        "The CLI must be installed and on your PATH — GraphCode launches it, it doesn't "
-          + "bundle it."
+        "A CLI must be installed and on your PATH — GraphCode launches it, it doesn't "
+          + "bundle it. Nod needs only a sign-in."
       )
       .font(.system(size: 11))
       .foregroundStyle(.white.opacity(0.45))
       .multilineTextAlignment(.center)
       .frame(maxWidth: 440)
     }
+    .sheet(item: $nodSetup) { model in
+      NodSetupView(model: model) { nodSetup = nil }
+        .preferredColorScheme(.dark)
+    }
   }
 
+  /// Nod needs an engine and a sign-in, not a binary on PATH, so its row opens setup.
+  /// It becomes the default only once GraphCode can launch it (`isSpiked`).
   private func row(_ backend: CLISessionBackendKind) -> some View {
     let isSelected = selection == backend
     return Button {
-      selection = backend
+      if backend == .nod {
+        nodSetup = NodSetupModel()
+        if backend.isSpiked { selection = backend }
+      } else {
+        selection = backend
+      }
     } label: {
       HStack(spacing: 13) {
         Text(">_")
@@ -300,8 +315,14 @@ struct OnboardingBackendPage: View {
             .foregroundStyle(.white.opacity(0.55))
         }
         Spacer(minLength: 0)
-        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-          .foregroundStyle(isSelected ? Theme.paneFocusTint : .white.opacity(0.25))
+        if backend == .nod && !isSelected {
+          Text("Set up")
+            .font(.system(size: 11.5, weight: .semibold))
+            .foregroundStyle(Theme.paneFocusTint)
+        } else {
+          Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+            .foregroundStyle(isSelected ? Theme.paneFocusTint : .white.opacity(0.25))
+        }
       }
       .padding(.vertical, 13)
       .padding(.horizontal, 15)
