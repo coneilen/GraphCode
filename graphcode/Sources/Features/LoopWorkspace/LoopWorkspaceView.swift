@@ -347,6 +347,8 @@ struct LoopWorkspaceView: View {
   private func chat(tab: TabLayout, ref: SurfaceRef) -> some View {
     if let chatStore = store.scope(state: \.nodChat, action: \.nodChat) {
       NodChatPaneView(store: chatStore, projectName: store.projectName)
+        .environment(\.nodGraphSlots, .workspace(store, chat: chatStore))
+        .nodGoalEditSheet(store)
         .simultaneousGesture(
           TapGesture().onEnded { store.send(.paneFocused(tabID: tab.id, surfaceID: ref.id)) })
     } else {

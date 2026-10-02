@@ -215,4 +215,21 @@ struct NodChatRenderTests {
       NodChatPaneView(store: store(log), projectName: "graphcode")
         .environment(\.nodGraphSlots, slots))
   }
+
+  /// The slots as `LoopWorkspaceView` installs them: the context strip, Billing UI's mail
+  /// with Nod's draft, the editable plan, and the handoff offer under the held goal.
+  @Test
+  func theGraphLayerAsTheWorkspaceInstallsIt() throws {
+    let store = Store(initialState: NodGraphLayerFixture.workspace()) {
+      LoopWorkspaceFeature()
+    } withDependencies: {
+      $0.nodClient = .replaying(NodGraphLayerFixture.log.records)
+    }
+    let scoped: StoreOf<NodChatFeature>? = store.scope(state: \.nodChat, action: \.nodChat)
+    let chat = try #require(scoped)
+    try render(
+      "9-graph-layer-wired", width: 900, height: 1700,
+      NodChatPaneView(store: chat, projectName: "repo")
+        .environment(\.nodGraphSlots, .workspace(store, chat: chat)))
+  }
 }

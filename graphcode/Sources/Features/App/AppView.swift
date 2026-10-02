@@ -31,6 +31,7 @@ struct AppView: View {
       }
     }
     .onReceive(CanvasClock.tick) { now = $0 }
+    .modifier(OpensRequestedSettings())
     // The titlebar is hidden, but the title still names the window in Mission Control
     // and the Window menu — which is where two workspaces on two screens are told apart.
     .navigationTitle(windowTitle)

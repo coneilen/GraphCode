@@ -79,6 +79,13 @@ struct LoopWorkspaceFeature {
     /// the agent pane first appears rather than here, so every place that makes this
     /// state gets it without knowing what a chat is.
     var nodChat: NodChatFeature.State?
+    /// Plan cards as the human has edited them, by plan id, so Run as Composite runs
+    /// what is on screen rather than what Nod proposed.
+    var nodPlanEdits: [String: NodEditablePlan] = [:]
+    /// Goal checks (by turn) whose handoff offer was taken or put away.
+    var nodSettledHandoffs: Set<Int> = []
+    /// The goal being rewritten in the Edit goal sheet; nil while it is closed.
+    var nodGoalDraft: String?
 
     var id: UUID { node.id }
   }
@@ -144,6 +151,14 @@ struct LoopWorkspaceFeature {
     case railTargetTapped(UUID)
     case chatSurfaceAppeared
     case nodChat(NodChatFeature.Action)
+    case nodPlanEdited(NodEditablePlan)
+    case nodHandoffTapped(NodHandoffOffer, brief: String, turn: Int)
+    case nodHandoffDismissed(turn: Int)
+    /// Answer myself: the human's reply to a sibling's mail, sent as this loop.
+    case nodMailAnswered(NodInboundMail, text: String)
+    case nodGoalDraftChanged(String?)
+    case nodGoalSaved
+    case nodGraphActionFailed(String)
   }
 
   @Dependency(\.terminalLayoutStore) var terminalLayoutStore
@@ -153,6 +168,8 @@ struct LoopWorkspaceFeature {
   /// linger until it aged out of the cache.
   @Dependency(\.terminalSurfaceClient) var terminalSurfaceClient
   @Dependency(\.nodSettings) var nodSettings
+  @Dependency(\.nodGraphActions) var nodGraphActions
+  @Dependency(\.orchestratorClient) var orchestratorClient
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -358,6 +375,10 @@ struct LoopWorkspaceFeature {
       case .nodChat:
         return .none
 
+      case .nodPlanEdited, .nodHandoffTapped, .nodHandoffDismissed, .nodMailAnswered,
+        .nodGoalDraftChanged, .nodGoalSaved, .nodGraphActionFailed:
+        return nodGraphLayer(&state, action)
+
       case .stopLoopTapped, .restartLoopTapped, .showInGraphTapped, .railTargetTapped,
         .primaryExitAcknowledged, .lastTabClosed:
         // Handled by `AppFeature`'s parent `Reduce` — see the actions' own doc comment.
@@ -410,13 +431,9 @@ extension LoopWorkspaceFeature {
     return .none
   }
 
-  /// The chat's requests that are about panes and tabs. The rest — the goal, sign-in,
-  /// forks into siblings, plans as Composites — belong to the levels that own those, and
-  /// pass through untouched.
-  func nodChatDelegate(_ state: inout State, _ delegate: NodChatFeature.Action.Delegate)
-    -> Effect<Action>
-  {
-    guard case .openInShellTab(let command) = delegate else { return .none }
+  /// "Open in zsh tab": typed, not run — the human sees the command at the prompt and
+  /// presses ⏎ themselves.
+  func openInShellTab(_ state: inout State, command: String) -> Effect<Action> {
     let shellTab = state.layout.tabs.first { tab in
       !tab.surfaces.contains(where: \.launchesClaudeCode)
     }
@@ -424,7 +441,6 @@ extension LoopWorkspaceFeature {
     if shellTab == nil { state.layout.tabs.append(tab) }
     state.layout.selectedTabID = tab.id
     persist(state)
-    // Typed, not run: the human sees the command at the prompt and presses ⏎ themselves.
     terminalSurfaceClient.typeText(tab.focusedSurface.id, command)
     return .none
   }
