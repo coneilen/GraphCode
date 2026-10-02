@@ -10,7 +10,8 @@ import { ClaudeEngine, toolRequest as claudeToolRequest } from "../src/claudeEng
 import { CopilotEngine, toolRequest as copilotToolRequest } from "../src/copilotEngine";
 import type { ToolRequest, TurnCallbacks } from "../src/engine";
 import { EventLog } from "../src/eventLog";
-import { createGraphcodeTools, type GraphDaemon, type Json, type MailDraftEvent, type MessagePolicy } from "../src/mcp";
+import { createGraphcodeTools, type GraphDaemon, type MailDraftEvent, type MessagePolicy } from "../src/mcp";
+import type { Json } from "../src/mcp/daemon";
 import { loadProjectMcpServers, type McpMount } from "../src/mcpServers";
 import { PermissionGate } from "../src/permissions";
 import { PresenceReporter } from "../src/presence";
