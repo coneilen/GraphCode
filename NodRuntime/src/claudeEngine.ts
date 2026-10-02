@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { extname, isAbsolute, join, resolve } from "node:path";
+import { extname, isAbsolute, resolve } from "node:path";
 import {
   query,
   type HookCallback,
@@ -110,7 +109,11 @@ export class ClaudeEngine implements Engine {
     const options: Options = {
       cwd: start.cwd,
       model: this.model,
-      ...(resuming ? { resume: this.conversationID } : { sessionId: this.conversationID }),
+      ...(resuming
+        ? { resume: this.conversationID }
+        : start.forkFrom
+          ? { resume: start.forkFrom, forkSession: true, sessionId: this.conversationID }
+          : { sessionId: this.conversationID }),
       permissionMode: "default",
       includePartialMessages: true,
       settingSources: ["user", "project", "local"],
@@ -470,16 +473,4 @@ function classifyError(error: unknown): EngineFailure {
   const message = error instanceof Error ? error.message : String(error);
   if (/auth|login|api key|401|403/i.test(message)) return { kind: "signInExpired", message };
   return { kind: "engineError", message };
-}
-
-/** The Claude Code to run: the user's install when there is one, so Nod shares its login and updates. */
-export function findClaudeExecutable(env: Record<string, string | undefined> = process.env): string | undefined {
-  const candidates = [
-    env.GRAPHCODE_NOD_CLAUDE,
-    join(homedir(), ".local", "bin", "claude"),
-    join(homedir(), ".claude", "local", "claude"),
-    "/opt/homebrew/bin/claude",
-    "/usr/local/bin/claude",
-  ];
-  return candidates.find((path): path is string => Boolean(path) && existsSync(path!));
 }

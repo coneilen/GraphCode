@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readBrief, type NodBrief } from "../src/brief";
 import { EventLog } from "../src/eventLog";
 import { PresenceReporter } from "../src/presence";
 import type { NodEventRecord } from "../src/protocol";
@@ -11,6 +12,8 @@ import { FakeEngine, tick, until } from "./fakeEngine";
 
 interface Setup {
   loopType?: LoopType;
+  inherit?: NodBrief;
+  resume?: string;
   goal?: string;
   settings?: Partial<NodSettings>;
   unattended?: boolean;
@@ -37,6 +40,8 @@ function setup(engine: FakeEngine, options: Setup = {}) {
     presence,
     goal: options.goal,
     unattended: options.unattended,
+    inherit: options.inherit,
+    resume: options.resume,
   });
   const types = () => records.map((r) => r.type);
   return { runtime, records, labels, cwd, stateDir, support, types, presence };
@@ -304,6 +309,41 @@ describe("NodRuntime", () => {
     await runtime.start("go");
     await runtime.whenIdle();
     expect(records.at(-1)).toMatchObject({ type: "compacted", throughTurn: 1 });
+  });
+});
+
+describe("inherited briefs", () => {
+  const brief: NodBrief = {
+    kind: "fork",
+    fromNodeID: "9B3408F9-9B16-447F-A439-FC2AA8C02D06",
+    text: "Try the other approach: check the cap inside the handler.",
+    attachments: [{ kind: "loopTranscript", reference: "9B3408F9-9B16-447F-A439-FC2AA8C02D06" }],
+    fork: { conversationID: "parent-conv", messageID: "m7" },
+  };
+
+  test("a fresh start sends the brief as turn 1, a handoff from its loop, forking the parent conversation", async () => {
+    const engine = new FakeEngine();
+    const { runtime, records } = setup(engine, { inherit: brief, goal: "it works" });
+    await runtime.start();
+    await until(() => engine.turns.length > 0);
+    expect(engine.started?.forkFrom).toBe("parent-conv");
+    expect(records.find((r) => r.type === "userMessage")).toMatchObject({ text: brief.text, fromNodeID: brief.fromNodeID, attachments: brief.attachments });
+    expect(records.find((r) => r.type === "turnStarted")).toMatchObject({ origin: "handoff" });
+    expect(engine.turns[0]).toBe(brief.text);
+  });
+
+  test("a resume never replays the brief", async () => {
+    const engine = new FakeEngine();
+    const { runtime, records } = setup(engine, { inherit: brief, resume: "own-conv" });
+    await runtime.start();
+    expect(engine.started?.forkFrom).toBeUndefined();
+    expect(records.some((r) => r.type === "userMessage")).toBe(false);
+  });
+
+  test("readBrief takes the file's fields and drops malformed attachments", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "nod-brief-")), "brief.json");
+    writeFileSync(path, JSON.stringify({ v: 1, kind: "compositeChild", text: "Do step 3", attachments: [{ kind: "file", reference: "A.swift" }, { bad: 1 }] }));
+    expect(readBrief(path)).toEqual({ kind: "compositeChild", fromNodeID: undefined, text: "Do step 3", attachments: [{ kind: "file", reference: "A.swift" }], fork: undefined });
   });
 });
 

@@ -109,7 +109,10 @@ export type NodCommand =
   | { type: "setModel"; model: string }
   | { type: "markGoalDone" };
 
-/** Swift's `.iso8601` date strategy rejects fractional seconds, so `at` never carries them. */
+/**
+ * Second precision, as in PROTOCOL.md: Foundation's `.iso8601` strategy accepts fractional
+ * seconds on current macOS but not on every release the app supports.
+ */
 export function wireDate(date: Date): string {
   return date.toISOString().replace(/\.\d{3}Z$/, "Z");
 }

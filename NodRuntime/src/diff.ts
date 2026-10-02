@@ -9,9 +9,12 @@ export interface Hunk {
 
 type Op = { kind: " " | "-" | "+"; text: string };
 
-/** Lines as `split("\n")` gives them, so joining with "\n" restores the text byte for byte. */
+/**
+ * Lines as `split("\n")` gives them, so joining with "\n" restores the text byte for byte —
+ * except that empty text has no lines, so creating a file diffs as pure additions.
+ */
 export function splitLines(text: string): string[] {
-  return text.split("\n");
+  return text === "" ? [] : text.split("\n");
 }
 
 /** Myers' O(ND) line diff, after trimming the common prefix and suffix. */
@@ -126,9 +129,13 @@ export function hunkHeader(hunk: Hunk): string {
 }
 
 export function hunkStats(hunk: Hunk): { added: number; removed: number } {
+  // A hunk that ends on a change, with no context after it, ends at end of file — and an
+  // empty last line there is the text's final newline, not a line of its own.
+  const last = hunk.lines[hunk.lines.length - 1];
+  const lines = last === "+" || last === "-" ? hunk.lines.slice(0, -1) : hunk.lines;
   return {
-    added: hunk.lines.filter((l) => l.startsWith("+")).length,
-    removed: hunk.lines.filter((l) => l.startsWith("-")).length,
+    added: lines.filter((l) => l.startsWith("+")).length,
+    removed: lines.filter((l) => l.startsWith("-")).length,
   };
 }
 

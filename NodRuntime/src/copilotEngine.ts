@@ -48,6 +48,8 @@ export class CopilotEngine implements Engine {
   private premiumRequests = 0;
   private contextUsed = 0;
   private tools = new Map<string, { name: string; at: number }>();
+  /** Copilot folds `additionalContext` into the tool's result; it is cut back out for the card. */
+  private injectedSteer?: string;
 
   constructor(private readonly options: CopilotEngineOptions) {}
 
@@ -65,7 +67,9 @@ export class CopilotEngine implements Engine {
       hooks: {
         onPostToolUse: () => {
           const steer = this.turn?.callbacks.takeSteer();
-          return steer ? { additionalContext: steer } : undefined;
+          if (!steer) return undefined;
+          this.injectedSteer = steer;
+          return { additionalContext: steer };
         },
       },
     };
@@ -201,7 +205,11 @@ export class CopilotEngine implements Engine {
         const ok = data.success === true;
         const result = data.result as { content?: string } | undefined;
         const error = data.error as { message?: string } | undefined;
-        const output = ok ? (result?.content ?? "") : (error?.message ?? result?.content ?? "failed");
+        let output = ok ? (result?.content ?? "") : (error?.message ?? result?.content ?? "failed");
+        if (this.injectedSteer && output.includes(this.injectedSteer)) {
+          output = output.replace(this.injectedSteer, "").trim();
+          this.injectedSteer = undefined;
+        }
         turn?.callbacks.toolResult(id, ok ? "ok" : "error", summarizeResult(tool?.name ?? "", output, !ok), output, tool ? Date.now() - tool.at : undefined);
         return;
       }

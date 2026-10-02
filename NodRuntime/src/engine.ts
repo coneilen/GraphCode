@@ -6,6 +6,8 @@ export interface EngineStart {
   model?: string;
   /** Continue this conversation instead of starting one. */
   resume?: string;
+  /** Start as a copy of this conversation (a fork); engines that can't fork start fresh. */
+  forkFrom?: string;
   /** Appended to the engine's own system prompt: the briefing and Nod's identity. */
   systemAppend?: string;
 }

@@ -158,7 +158,7 @@ export function isInside(root: string, path: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-function realPath(path: string): string {
+export function realPath(path: string): string {
   if (existsSync(path)) return realpathSync(path);
   const parent = dirname(path);
   return parent === path ? path : join(realPath(parent), basename(path));

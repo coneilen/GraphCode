@@ -73,7 +73,7 @@ describe("EventLog", () => {
     expect(seen).toEqual([1]);
   });
 
-  test("wireDate drops milliseconds, which Swift's .iso8601 strategy rejects", () => {
+  test("wireDate drops milliseconds, as PROTOCOL.md writes dates", () => {
     expect(wireDate(new Date("2026-10-01T20:00:04.999Z"))).toBe("2026-10-01T20:00:04Z");
   });
 });

@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyHunk, diffLines, hunks, HunkConflict } from "../src/diff";
+import { applyHunk, diffLines, hunks, HunkConflict, hunkStats } from "../src/diff";
 import { EventLog } from "../src/eventLog";
 import { HunkStager } from "../src/hunks";
 import type { NodEventRecord } from "../src/protocol";
@@ -55,7 +55,10 @@ describe("diff", () => {
 
   test("creating a file is one hunk of additions", () => {
     const [hunk] = hunks("", "a\nb\n");
-    expect(hunk!.lines).toEqual(["+a", "+b", " "]);
+    expect(hunk!.lines).toEqual(["+a", "+b", "+"]);
+    expect(hunks("", "hello nod").map((h) => [h.oldLines, h.newLines])).toEqual([[0, 1]]);
+    expect(hunkStats(hunk!)).toEqual({ added: 2, removed: 0 });
+    expect(hunkStats(hunks("a\n\n", "")[0]!)).toEqual({ added: 0, removed: 2 });
     expect(applyHunk("", hunk!)).toBe("a\nb\n");
   });
 
@@ -122,6 +125,15 @@ describe("HunkStager", () => {
     stager.resolve("h2", "reject");
     await outcome;
     expect(readFileSync(file, "utf8")).toBe(edit(base, [["line 15", "human was here"], ["line 3", "three"]]));
+  });
+
+  test("names files relative to the real worktree, however the worktree was opened", async () => {
+    const { log, records, dir } = setup();
+    const link = `${dir}-link`;
+    symlinkSync(dir, link);
+    const stager = new HunkStager(log, link);
+    void stager.stageEdit(join(realpathSync(dir), "Sources", "A.swift"), "x\n", 1, true);
+    expect(records.find((r) => r.type === "hunkStaged")).toMatchObject({ file: "Sources/A.swift", added: 1, removed: 0 });
   });
 
   test("rejecting everything leaves the file, and a new file, untouched", async () => {

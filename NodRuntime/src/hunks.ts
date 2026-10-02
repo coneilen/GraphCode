@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, relative } from "node:path";
 import { applyHunk, hunkHeader, hunks, hunkStats, type Hunk } from "./diff";
 import type { EventLog } from "./eventLog";
+import { realPath } from "./permissions";
 import type { NodHunkDecision } from "./protocol";
 
 export interface StagedHunk {
@@ -40,10 +41,15 @@ export class HunkStager {
   private waiters = new Map<string, () => void>();
   private nextID = 1;
 
+  private readonly worktree: string;
+
   constructor(
     private readonly log: EventLog,
-    private readonly worktree: string,
-  ) {}
+    worktree: string,
+  ) {
+    // Engines report real paths; relative names are only right against the real worktree.
+    this.worktree = realPath(worktree);
+  }
 
   /** Called when an auto-accepted hunk is rejected or sent back after it landed. */
   onLateDecision?: (hunk: StagedHunk) => void;
@@ -136,7 +142,7 @@ export class HunkStager {
       type: "hunkStaged",
       turn,
       hunkID: staged.id,
-      file: relative(this.worktree, file),
+      file: relative(this.worktree, realPath(file)),
       header: hunkHeader(hunk),
       diff: [hunkHeader(hunk), ...hunk.lines].join("\n"),
       added: stats.added,
@@ -157,7 +163,7 @@ function outcome(staged: StagedHunk[], worktree: string): EditOutcome {
   const notes = staged
     .filter((h) => h.state !== "accepted")
     .map((h) => {
-      const where = `${relative(worktree, h.file)} ${hunkHeader(h.hunk)}`;
+      const where = `${relative(worktree, realPath(h.file))} ${hunkHeader(h.hunk)}`;
       const verb = h.state === "rejected" ? "was rejected" : "was sent back";
       return `- ${where} ${verb}${h.note ? `: ${h.note}` : ""}`;
     });

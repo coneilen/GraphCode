@@ -8,6 +8,7 @@ import { HunkStager, type StagedHunk } from "./hunks";
 import { PermissionGate } from "./permissions";
 import type { PresenceReporter } from "./presence";
 import type { NodAttachment, NodCommand, NodDelivery, NodTurnOrigin } from "./protocol";
+import type { NodBrief } from "./brief";
 import type { NodSettings } from "./settings";
 import { describeTool } from "./tools";
 
@@ -26,6 +27,8 @@ export interface RuntimeOptions {
   goal?: string;
   briefing?: string;
   resume?: string;
+  /** `--inherit`: sent as turn 1 on a fresh start, never on a resume. */
+  inherit?: NodBrief;
   /** Timed loops and composite children: nobody is there to answer an ask. */
   unattended?: boolean;
   /** Consecutive "not yet" goal checks before Nod stops and waits for a human. */
@@ -97,7 +100,14 @@ export class NodRuntime {
   async start(firstPrompt?: string): Promise<void> {
     const { engine, log, presence, nodeID, cwd } = this.options;
     const systemAppend = this.options.briefing ? `GraphCode briefing for this loop:\n\n${this.options.briefing}` : undefined;
-    const session = await engine.start({ cwd, model: this.options.model, resume: this.options.resume, systemAppend });
+    const inherit = this.options.resume ? undefined : this.options.inherit;
+    const session = await engine.start({
+      cwd,
+      model: this.options.model,
+      resume: this.options.resume,
+      forkFrom: inherit?.fork?.conversationID,
+      systemAppend,
+    });
     this.conversationID = session.conversationID;
     this.model = session.model;
     log.append({
@@ -110,8 +120,9 @@ export class NodRuntime {
     this.writeConversation();
     presence.sessionID(nodeID, session.conversationID, cwd);
     void presence.presence("idle");
+    if (inherit) this.send(inherit.text, "queue", inherit.attachments, "handoff", inherit.fromNodeID);
     if (firstPrompt?.trim()) this.send(firstPrompt, "queue", [], "user");
-    else if (this.goal && !this.options.resume) this.send(this.goal.goal, "queue", [], "user");
+    else if (this.goal && !this.options.resume && !inherit) this.send(this.goal.goal, "queue", [], "user");
   }
 
   /** Resolves once no turn is running and nothing is queued. */

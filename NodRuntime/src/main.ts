@@ -3,11 +3,13 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { parseArgs } from "node:util";
-import { ClaudeEngine, findClaudeExecutable } from "./claudeEngine";
+import { claudeExecutable, copilotRuntime } from "./agentRuntimes";
+import { ClaudeEngine } from "./claudeEngine";
 import { ControlSocket } from "./controlSocket";
 import { CopilotEngine } from "./copilotEngine";
 import { claudeCredentials, githubToken } from "./credentials";
 import type { Engine } from "./engine";
+import { readBrief } from "./brief";
 import { EventLog } from "./eventLog";
 import { PresenceReporter } from "./presence";
 import type { NodEngineKind } from "./protocol";
@@ -17,16 +19,17 @@ import { Transcript } from "./transcript";
 
 const USAGE = `graphcode-nod --node <uuid> --cwd <dir> [--engine claude|copilot] [--model <id>]
               [--loop-type main|goal|timed|turn|composite] [--goal-file <path>]
-              [--briefing <path>] [--resume <conversation-id>] [--prompt <text>] [--unattended]
+              [--briefing <path>] [--resume <conversation-id>] [--inherit <brief.json>]
+              [--prompt <text>] [--unattended]
 graphcode-nod -p <prompt> [--engine claude|copilot] [--model <id>]`;
 
 const loopTypes = new Set(["main", "goal", "timed", "turn", "composite"]);
 
 export function makeEngine(kind: NodEngineKind): Engine {
   if (kind === "copilot") {
-    return new CopilotEngine({ githubToken: githubToken(), cliPath: process.env.GRAPHCODE_NOD_COPILOT });
+    return new CopilotEngine({ githubToken: githubToken(), cliPath: copilotRuntime() });
   }
-  return new ClaudeEngine({ credentials: claudeCredentials(), executable: findClaudeExecutable() });
+  return new ClaudeEngine({ credentials: claudeCredentials(), executable: claudeExecutable() });
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -41,6 +44,7 @@ async function main(argv: string[]): Promise<number> {
       "goal-file": { type: "string" },
       briefing: { type: "string" },
       resume: { type: "string" },
+      inherit: { type: "string" },
       prompt: { type: "string" },
       print: { type: "string", short: "p" },
       unattended: { type: "boolean" },
@@ -93,6 +97,7 @@ async function main(argv: string[]): Promise<number> {
     goal: values["goal-file"] ? readFileSync(values["goal-file"], "utf8") : undefined,
     briefing: values.briefing ? readFileSync(values.briefing, "utf8") : undefined,
     resume: values.resume,
+    inherit: values.inherit && !values.resume ? readBrief(values.inherit) : undefined,
     unattended: values.unattended || undefined,
   });
   const control = new ControlSocket(join(stateDir, "control.sock"), (command) => runtime.handle(command));
