@@ -569,11 +569,7 @@ public enum ZmxSessionLauncher {
       return await sendRemote(text, to: node, at: remote)
     }
     guard ZmxLocator.isInstalled, !text.isEmpty else { return false }
-    // A shared listing can predate a session started outside this process — a pane a
-    // human just opened — so a refusal is confirmed against a listing of its own.
-    if await sessionTaskState(node) != .alive {
-      guard await sessionTaskState(node, freshListing: true) == .alive else { return false }
-    }
+    guard await sendGate(node) else { return false }
     // Typed as the writes `sendWrites` frames it into — plain keystrokes when it is
     // short, a bracketed paste when it is not, which is what keeps a long message's head
     // from being swallowed by the composer (`maxUnbracketedSendBytes`, issue #277). The
@@ -601,6 +597,18 @@ public enum ZmxSessionLauncher {
     // Clearing the label here is that missing edge — see `codexPresence`.
     if delivered, node.backend == .codex { await clearPresenceLabel(of: node) }
     return delivered
+  }
+
+  /// Issue #215's gate: whether a keystroke typed now reaches the node's agent rather than
+  /// the shell a finished task left behind. Always a listing taken for this send, never
+  /// the shared one: a task that ended after the shared listing was taken is a husk that
+  /// listing still calls alive. Typing runs after the request is acknowledged, so the
+  /// listing costs the sender nothing; it still joins no listing started before it.
+  static func sendGate(_ node: LoopNode, listing: SessionListing = .shared) async -> Bool {
+    let result = await listing.listing(fresh: true)
+    return sessionTaskState(
+      lsStatus: result?.status, lsOutput: result?.output ?? "",
+      sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName) == .alive
   }
 
   /// Reads a session's presence, preferring what the backend reported over what we can
@@ -745,11 +753,9 @@ public enum ZmxSessionLauncher {
   /// its own: every `ls` probes every session on the machine, so one per node made a
   /// presence pass O(N²) probes, and on a CPU-starved machine a send's gate alone took
   /// longer than the CLI waits for its acknowledgement.
-  static func sessionTaskState(_ node: LoopNode, freshListing: Bool = false) async
-    -> SessionTaskState
-  {
+  static func sessionTaskState(_ node: LoopNode) async -> SessionTaskState {
     guard ZmxLocator.isInstalled else { return .absent }
-    let result = await SessionListing.shared.listing(fresh: freshListing)
+    let result = await SessionListing.shared.listing()
     return sessionTaskState(
       lsStatus: result?.status, lsOutput: result?.output ?? "",
       sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName)
@@ -796,7 +802,9 @@ public enum ZmxSessionLauncher {
     // reporting a session it cannot reach — the daemon behind it is gone, which is as
     // absent as a missing row, and counts as neither alive nor exited.
     guard line.range(of: "\terr=") == nil else { return .absent }
-    guard line.range(of: "\tended=") != nil else { return .alive }
+    guard line.range(of: "\tended=") != nil || line.range(of: "\texit_code=") != nil else {
+      return .alive
+    }
     var exitCode: Int?
     if let range = line.range(of: "\texit_code=") {
       let digits = line[range.upperBound...].prefix { $0.isNumber }
@@ -1126,7 +1134,7 @@ public enum ZmxSessionLauncher {
     func alive(in result: ZmxResult?) -> Bool {
       guard let result, result.status == 0 else { return false }
       return result.output.split(separator: "\n").contains { line in
-        !line.contains("\tended=") && !line.contains("\terr=")
+        !line.contains("\tended=") && !line.contains("\texit_code=") && !line.contains("\terr=")
           && line.split(whereSeparator: \.isWhitespace).contains("name=\(name)")
       }
     }

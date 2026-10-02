@@ -246,3 +246,55 @@ struct RunCollectingOutputTests {
     #expect(result == nil)
   }
 }
+
+/// Issue #215 through the shared listing: a husk — a session whose task has ended, its
+/// wrapper shell still at the prompt — is never typed into. `zmx ls` marks one with
+/// `ended=`/`exit_code=`, and the listing everyone else shares can be older than the end.
+@Suite
+struct HuskSendGateTests {
+  private static let node = LoopNode(title: "Worker")
+  private static var name: String {
+    SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+  }
+  private static var live: String { "name=\(name)\tpid=1\tclients=0\tcmd=claude\n" }
+  private static var husk: String {
+    "name=\(name)\tpid=1\tclients=0\tcmd=claude\tended=1790000000\texit_code=0\n"
+  }
+
+  private static func listing(_ outputs: [String]) -> ZmxSessionLauncher.SessionListing {
+    let remaining = LockIsolated(outputs)
+    return ZmxSessionLauncher.SessionListing(reuseWindow: .seconds(60)) {
+      let output = remaining.withValue { $0.count > 1 ? $0.removeFirst() : $0[0] }
+      return ZmxSessionLauncher.ZmxResult(status: 0, output: output)
+    }
+  }
+
+  @Test
+  func aLiveSessionPassesTheGate() async {
+    #expect(await ZmxSessionLauncher.sendGate(Self.node, listing: Self.listing([Self.live])))
+  }
+
+  @Test(arguments: [
+    "\tended=1790000000\texit_code=0", "\tended=1790000000", "\texit_code=137",
+  ])
+  func aHuskAtListingTimeIsNeverTypedInto(marker: String) async {
+    let row = "name=\(Self.name)\tpid=1\tclients=0\tcmd=claude\(marker)\n"
+
+    #expect(!(await ZmxSessionLauncher.sendGate(Self.node, listing: Self.listing([row]))))
+  }
+
+  @Test
+  func aSessionThatEndsAfterTheSharedListingIsNeverTypedInto() async {
+    let listing = Self.listing([Self.live, Self.husk])
+    // A presence pass has the session alive in the shared listing; the task then ends.
+    await listing.beginPass()
+    let shared = await listing.listing()
+    #expect(shared?.output == Self.live)
+
+    let typed = await ZmxSessionLauncher.sendGate(Self.node, listing: listing)
+    await listing.endPass()
+
+    #expect(!typed)
+    #expect(await listing.listingsTaken == 2)
+  }
+}
