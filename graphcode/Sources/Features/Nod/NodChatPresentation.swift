@@ -165,6 +165,12 @@ enum NodChatPresentation {
     return String(format: "$%.2f", transcript.totalCostUSD)
   }
 
+  /// The catalog's name for a model this engine offers, else the family read off the id.
+  static func modelLabel(_ model: String?, engine: NodEngine) -> String {
+    guard let model else { return "Model" }
+    return NodModelCatalog.model(id: model, engine: engine)?.displayName ?? modelLabel(model)
+  }
+
   /// `Sonnet`, from `claude-sonnet-4-5` or `sonnet`; anything unrecognised is shown as is.
   static func modelLabel(_ model: String) -> String {
     let lower = model.lowercased()

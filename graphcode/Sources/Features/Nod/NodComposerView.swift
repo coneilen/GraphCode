@@ -86,12 +86,11 @@ struct NodComposerView: View {
       .fixedSize()
 
       Menu {
-        ForEach(NodModelCatalog.models(for: store.transcript.session?.engine), id: \.self) {
-          model in
-          Button(NodChatPresentation.modelLabel(model)) { store.send(.modelChosen(model)) }
+        ForEach(NodModelCatalog.models(for: store.engine)) { model in
+          Button(model.displayName) { store.send(.modelChosen(model.id)) }
         }
       } label: {
-        NodChip { Text("\(NodChatPresentation.modelLabel(store.model ?? "Model")) ▾") }
+        NodChip { Text("\(NodChatPresentation.modelLabel(store.model, engine: store.engine)) ▾") }
       }
       .menuStyle(.button)
       .buttonStyle(.plain)
@@ -196,17 +195,6 @@ struct NodComposerView: View {
     switch policy {
     case .reviewHunks: return "Ask before edits"
     case .auto: return "Auto"
-    }
-  }
-}
-
-/// What the model chip offers. The runtime is the authority — `setModel` fails for a model
-/// the engine does not have — so this is the menu, not a gate.
-enum NodModelCatalog {
-  static func models(for engine: NodEngine?) -> [String] {
-    switch engine {
-    case .copilotSDK: return ["gpt-5", "claude-sonnet-4.5", "gemini-2.5-pro"]
-    case .claudeAgentSDK, nil: return ["opus", "sonnet", "haiku"]
     }
   }
 }

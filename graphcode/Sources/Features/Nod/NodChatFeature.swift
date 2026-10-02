@@ -24,6 +24,9 @@ struct NodChatFeature {
     /// The model picked from the chip since the session started; the log only names the
     /// model a run started on.
     var chosenModel: String?
+    /// What the loop will start on, from Settings, until `sessionStarted` says otherwise.
+    var defaultModel: String?
+    var defaultEngine: NodEngine = .claudeAgentSDK
 
     var draft = ""
     var attachments: [NodAttachment] = []
@@ -53,7 +56,8 @@ struct NodChatFeature {
       self.goal = goal
     }
 
-    var model: String? { chosenModel ?? transcript.session?.model }
+    var model: String? { chosenModel ?? transcript.session?.model ?? defaultModel }
+    var engine: NodEngine { transcript.session?.engine ?? defaultEngine }
 
     var trigger: NodComposerTrigger? { NodComposerTrigger.detect(in: draft) }
 
@@ -136,7 +140,7 @@ struct NodChatFeature {
   private enum CancelID { case events }
 
   @Dependency(\.nodClient) var nodClient
-  @Dependency(\.nodAllowlist) var nodAllowlist
+  @Dependency(\.nodSettings) var nodSettings
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -367,7 +371,7 @@ struct NodChatFeature {
       let ask = state.transcript.ask(id: resolved.askID), ask.kind == .shell
     else { return .none }
     let subject = ask.subject
-    return .run { _ in await nodAllowlist.allowShellCommand(subject) }
+    return .run { _ in await nodSettings.addAllowlistPattern(subject) }
   }
 
   private func replaceMentionQuery(_ state: inout State, with title: String) {

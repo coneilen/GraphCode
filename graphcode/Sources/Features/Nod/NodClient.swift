@@ -173,30 +173,31 @@ extension DependencyValues {
   }
 }
 
-/// Where "Always in <project>" outlives the run: `GraphcodeSettings.nod.shellAllowlist`,
-/// the list Settings › Agents › Nod edits. Trims, and skips blanks and duplicates, the way
-/// that editor's own `NodSettings.addAllowlistPattern` does.
-struct NodAllowlistClient: Sendable {
-  var allowShellCommand: @Sendable (String) async -> Void
+/// The slice of Settings › Agents › Nod the chat reads and writes, through NodSetup's own
+/// `NodSettings` methods so the pane and the settings editor never disagree.
+struct NodSettingsClient: Sendable {
+  var current: @Sendable () -> NodSettings
+  /// "Always in <project>": the runtime keeps it for the session only; the shell allowlist
+  /// is what makes it outlive the run.
+  var addAllowlistPattern: @Sendable (String) async -> Void
 }
 
-extension NodAllowlistClient: DependencyKey {
-  static let liveValue = NodAllowlistClient { command in
-    let pattern = command.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !pattern.isEmpty else { return }
-    await MainActor.run {
-      let model = SettingsModel.shared
-      guard !model.settings.nod.shellAllowlist.contains(pattern) else { return }
-      model.settings.nod.shellAllowlist.append(pattern)
-    }
-  }
+extension NodSettingsClient: DependencyKey {
+  static let liveValue = NodSettingsClient(
+    current: { GraphcodeSettingsStore.load().nod },
+    addAllowlistPattern: { pattern in
+      await MainActor.run {
+        _ = SettingsModel.shared.settings.nod.addAllowlistPattern(pattern)
+      }
+    })
 
-  static let testValue = NodAllowlistClient { _ in }
+  static let testValue = NodSettingsClient(
+    current: { NodSettings() }, addAllowlistPattern: { _ in })
 }
 
 extension DependencyValues {
-  var nodAllowlist: NodAllowlistClient {
-    get { self[NodAllowlistClient.self] }
-    set { self[NodAllowlistClient.self] = newValue }
+  var nodSettings: NodSettingsClient {
+    get { self[NodSettingsClient.self] }
+    set { self[NodSettingsClient.self] = newValue }
   }
 }

@@ -292,7 +292,7 @@ struct NodChatFeatureTests {
       NodChatFeature()
     } withDependencies: {
       $0.nodClient.send = { _, _ in }
-      $0.nodAllowlist.allowShellCommand = { command in saved.withValue { $0.append(command) } }
+      $0.nodSettings.addAllowlistPattern = { command in saved.withValue { $0.append(command) } }
     }
     store.exhaustivity = .off
 

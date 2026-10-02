@@ -37,6 +37,32 @@ struct NodWorkspaceWiringTests {
   }
 
   @Test
+  func theChatStartsOnTheModelSettingsWouldLaunch() async {
+    var settings = NodSettings(engine: .copilotSDK)
+    settings.editsInWorktree = .auto
+    var pinned = workspace(backend: .nod)
+    pinned.node.modelTier = .fast
+    for (state, expected) in [
+      (workspace(backend: .nod), "claude-opus-5.5"), (pinned, "gpt-5.6-luna"),
+    ] {
+      let store = TestStore(initialState: state) {
+        LoopWorkspaceFeature()
+      } withDependencies: {
+        $0.nodSettings.current = { settings }
+      }
+      store.exhaustivity = .off
+      await store.send(.chatSurfaceAppeared)
+      #expect(store.state.nodChat?.model == expected)
+      #expect(store.state.nodChat?.engine == .copilotSDK)
+      #expect(store.state.nodChat?.editPolicy == .auto)
+    }
+    #expect(NodChatPresentation.modelLabel("gpt-6-sol", engine: .copilotSDK) == "GPT-6 Sol")
+    #expect(
+      NodChatPresentation.modelLabel("claude-sonnet-4-5", engine: .claudeAgentSDK) == "Sonnet")
+    #expect(NodChatPresentation.modelLabel(nil, engine: .claudeAgentSDK) == "Model")
+  }
+
+  @Test
   func openInShellTabTypesIntoAPlainShellTabMakingOneIfNeeded() async {
     let box = TypedBox()
     let store = TestStore(initialState: workspace(backend: .nod)) {

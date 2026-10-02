@@ -152,6 +152,7 @@ struct LoopWorkspaceFeature {
   /// `TerminalSurfaceStore` — so without telling it here, a closed pane's terminal would
   /// linger until it aged out of the cache.
   @Dependency(\.terminalSurfaceClient) var terminalSurfaceClient
+  @Dependency(\.nodSettings) var nodSettings
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -394,9 +395,14 @@ extension LoopWorkspaceFeature {
     guard state.node.backend.surface == .chat else { return .none }
     let node = state.node
     if state.nodChat == nil {
-      state.nodChat = NodChatFeature.State(
+      let settings = nodSettings.current()
+      var chat = NodChatFeature.State(
         nodeID: node.id, loopTitle: node.title, loopType: node.loopType,
         branch: node.worktreeBinding?.branch, goal: node.goal?.summary)
+      chat.defaultEngine = settings.engine
+      chat.defaultModel = settings.resolvedModel(for: node.loopType, tier: node.modelTier).id
+      chat.editPolicy = settings.editsInWorktree
+      state.nodChat = chat
     } else {
       state.nodChat?.loopTitle = node.title
       state.nodChat?.goal = node.goal?.summary
