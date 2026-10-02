@@ -12,6 +12,15 @@ public struct NodFork: Equatable, Sendable {
     public var branch: String
     /// What the branch starts from: the source's branch, so the fork sees its edits.
     public var startPoint: String?
+
+    public init(
+      repositoryPath: String, worktreePath: String, branch: String, startPoint: String? = nil
+    ) {
+      self.repositoryPath = repositoryPath
+      self.worktreePath = worktreePath
+      self.branch = branch
+      self.startPoint = startPoint
+    }
   }
 
   public var draft: NodeDraft
