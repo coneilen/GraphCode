@@ -1,0 +1,12 @@
+{
+  "name": "graphcode-nod",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "graphcode-nod": "src/main.ts" },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "bun build src/main.ts --compile --outfile dist/graphcode-nod"
+  }
+}
