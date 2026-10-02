@@ -1232,7 +1232,9 @@ pub const App = struct {
         self.dpi = Win32.dpiForWindow(self.window.hwnd);
         self.tray.test_hook_enabled = self.tray_test_hook_enabled;
         self.tray.add(self.window.hwnd) catch self.setStatus("System tray unavailable; GraphCode remains open");
-        const endpoint = self.client.currentEndpointName(self.allocator) catch &.{};
+        // The startup probe does not require the daemon-created rendezvous
+        // secret; connection retries replace it with the real endpoint.
+        const endpoint = self.client.currentDaemonStartupEndpoint(self.allocator) catch &.{};
         const lock_name = self.client.currentDaemonLockName(self.allocator) catch &.{};
         defer if (endpoint.len != 0) self.allocator.free(endpoint);
         defer if (lock_name.len != 0) self.allocator.free(lock_name);
