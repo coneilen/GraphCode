@@ -57,6 +57,9 @@ struct LoopWorkspaceView: View {
     .onChange(of: store.id) { _, _ in
       store.send(.mailroomContentChanged(hasContent: mailroomHasContent))
     }
+    .onChange(of: store.node.goal?.summary) { _, _ in
+      if store.nodChat != nil { store.send(.chatSurfaceAppeared) }
+    }
     .onDisappear { store.send(.workspaceLeft) }
     // The folder header goes in the toolbar, not in the `VStack` above, and the pane
     // does *not* claim the titlebar inset. Both were tried: `.ignoresSafeArea(.top)`
@@ -318,18 +321,38 @@ struct LoopWorkspaceView: View {
       // 22pt of "which pane is this and does it have the keyboard". The veil below says
       // only the second half, and two identical black rectangles said neither.
       PaneHeaderView(
-        title: ref.launchesClaudeCode ? "agent" : "shell",
+        title: ref.launchesClaudeCode ? (isChat ? "chat" : "agent") : "shell",
         isFocused: isFocused && tab.id == store.layout.selectedTabID,
         detail: ref.launchesClaudeCode ? store.node.backend.displayName.lowercased() : "zsh",
         canClose: tab.isSplit,
         onClose: { store.send(.paneClosed(tabID: tab.id, surfaceID: ref.id)) })
-      terminal(tab: tab, ref: ref)
+      if ref.launchesClaudeCode && isChat {
+        chat(tab: tab, ref: ref)
+      } else {
+        terminal(tab: tab, ref: ref)
+      }
     }
     // `ref.id` (not just this slot's structural position) is a surface's real
     // identity — without this, collapsing a split (which reassigns `tab.primary` to
     // what used to be `tab.secondary`, see `.paneClosed`) would keep reusing the old
     // primary's `NSView`/session instead of picking up the surviving one.
     .id(ref.id)
+  }
+
+  /// Nod's loops open in a chat where a CLI's terminal would be — the same tab strip and
+  /// splits around it, so a zsh tab is still one ⌘-number away.
+  private var isChat: Bool { store.node.backend.surface == .chat }
+
+  @ViewBuilder
+  private func chat(tab: TabLayout, ref: SurfaceRef) -> some View {
+    if let chatStore = store.scope(state: \.nodChat, action: \.nodChat) {
+      NodChatPaneView(store: chatStore, projectName: store.projectName)
+        .simultaneousGesture(
+          TapGesture().onEnded { store.send(.paneFocused(tabID: tab.id, surfaceID: ref.id)) })
+    } else {
+      NodStyle.paneBackground
+        .onAppear { store.send(.chatSurfaceAppeared) }
+    }
   }
 
   private func terminal(tab: TabLayout, ref: SurfaceRef) -> some View {
