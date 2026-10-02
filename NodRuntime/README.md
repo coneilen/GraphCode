@@ -113,40 +113,46 @@ bun src/main.ts -p "hello"     # from source
 
 ## Sign-in
 
-Keychain service `app.graphcode.nod` (`NodSettings.keychainService`), accounts written by
+Keychain service `app.graphcode.nod` (`NodSettings.keychainService`), written by
 Settings › Agents › Nod:
 
 | Account | Used as |
 |---|---|
-| `anthropic-api-key` | `ANTHROPIC_API_KEY` for Claude Code |
-| `claude-oauth-token` | `CLAUDE_CODE_OAUTH_TOKEN` for Claude Code |
-| `github-token` | the Copilot SDK's `gitHubToken` |
+| `anthropic-api-key` | the Claude engine's only credential, passed to Claude Code as `ANTHROPIC_API_KEY` |
+| `github-token` | the Copilot SDK's `gitHubToken`; without it, the Copilot CLI's own GitHub login |
 
-With no Nod entry the engines reuse the Mac's existing logins: Claude Code's own
-(`Claude Code-credentials` in the Keychain), and the Copilot CLI's.
+The Claude engine never uses a claude.ai login (policy, mailroom #1190). Claude Code runs
+with every inherited credential variable stripped and `CLAUDE_CONFIG_DIR` set to
+`~/.graphcode/nod/claude`, so it cannot find the human's login either. Without a key every
+turn fails with `signInExpired`; a key the API rejects fails the turn within seconds instead
+of sitting in Claude Code's retry backoff.
 
 ## Packaging
 
-**Decision: one `bun build --compile` executable, shipped with the Copilot runtime, in
-`Contents/Helpers/nod/`; Claude Code is not shipped.**
+**Decision: one `bun build --compile` executable plus both engines' agent runtimes, in
+`Contents/Helpers/nod/`. Nothing is installed on the Mac and nothing is found on PATH.**
 
-`scripts/package.sh [out-dir] [bun-target]` builds `graphcode-nod` (~64 MB, no Node or Bun
-needed on the Mac) and copies the Copilot SDK's `copilot-runtime` + `runtime.node`
-(~86 MB) beside it. With `SIGN_IDENTITY` set it signs all three with the hardened runtime
-and `packaging/entitlements.plist` — a compiled Bun binary needs the JIT entitlements.
+`scripts/package.sh [out-dir] [bun-target]` writes:
+
+| File | Size | From |
+|---|---|---|
+| `graphcode-nod` | ~64 MB | `bun build --compile` (no Node or Bun needed) |
+| `claude` | ~228 MB | the Claude Code the Agent SDK bundles (keeps Anthropic's signature) |
+| `copilot-runtime`, `runtime.node` | ~86 MB | the Copilot SDK's runtime |
+
+With `SIGN_IDENTITY` set it signs `graphcode-nod` and the Copilot runtime with the hardened
+runtime and `packaging/entitlements.plist` (a compiled Bun binary needs the JIT
+entitlements). The daemon launches `<support-dir>/bin/graphcode-nod`, a symlink into the
+bundle placed by the launch side; the runtime resolves its real path before looking beside
+itself.
 
 A compiled binary cannot load the SDKs' platform packages (they resolve to the build
 machine's `node_modules`), so `agentRuntimes.ts` looks for each agent runtime explicitly:
 
 | Engine | Search order |
 |---|---|
-| Claude | `$GRAPHCODE_NOD_CLAUDE` → the human's Claude Code (`~/.local/bin`, Homebrew, …) → `claude` beside graphcode-nod → `~/.graphcode/nod/bin/claude` |
+| Claude | `$GRAPHCODE_NOD_CLAUDE` (a deliberate override) → `claude` beside graphcode-nod → the SDK's own (source checkouts) |
 | Copilot | `$GRAPHCODE_NOD_COPILOT` → `copilot-runtime` beside graphcode-nod → the SDK's own (source checkouts) → an installed `copilot` CLI |
-
-Claude Code is left out because it is a 228 MB binary that most people choosing the
-Claude engine already have, and using theirs shares their sign-in and their updates. For a
-Mac without it, Setup can place the SDK's platform binary at `~/.graphcode/nod/bin/claude`,
-or packaging can copy it beside graphcode-nod; both are already on the search path.
 
 ## Capabilities
 

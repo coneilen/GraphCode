@@ -7,7 +7,7 @@ import { claudeExecutable, copilotRuntime } from "./agentRuntimes";
 import { ClaudeEngine } from "./claudeEngine";
 import { ControlSocket } from "./controlSocket";
 import { CopilotEngine } from "./copilotEngine";
-import { claudeCredentials, githubToken } from "./credentials";
+import { anthropicAPIKey, githubToken } from "./credentials";
 import type { Engine } from "./engine";
 import { readBrief } from "./brief";
 import { EventLog } from "./eventLog";
@@ -29,7 +29,11 @@ export function makeEngine(kind: NodEngineKind): Engine {
   if (kind === "copilot") {
     return new CopilotEngine({ githubToken: githubToken(), cliPath: copilotRuntime() });
   }
-  return new ClaudeEngine({ credentials: claudeCredentials(), executable: claudeExecutable() });
+  return new ClaudeEngine({
+    apiKey: anthropicAPIKey(),
+    configDir: join(supportDirectory(), "nod", "claude"),
+    executable: claudeExecutable(),
+  });
 }
 
 async function main(argv: string[]): Promise<number> {

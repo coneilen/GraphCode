@@ -10,7 +10,7 @@ import {
   type SDKMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { ClaudeCredentials } from "./credentials";
+import { claudeEnvironment } from "./credentials";
 import type { Engine, EngineFailure, EngineSession, EngineStart, ToolRequest, TurnCallbacks, TurnResult } from "./engine";
 import type { NodAttachment } from "./protocol";
 import { summarizeResult } from "./tools";
@@ -62,10 +62,15 @@ interface ActiveTurn {
 }
 
 export interface ClaudeEngineOptions {
-  credentials: ClaudeCredentials;
+  /** From Nod's Keychain entry; without one every turn fails with `signInExpired`. */
+  apiKey?: string;
+  /** Claude Code's config directory, Nod's own rather than `~/.claude`. */
+  configDir: string;
   /** Claude Code to run; the SDK's bundled build when absent. */
   executable?: string;
 }
+
+const NO_KEY = "Nod needs an Anthropic API key. Add one in Settings › Agents › Nod.";
 
 /**
  * The Claude Agent SDK engine: one long-lived streaming-input query per session, so
@@ -99,7 +104,7 @@ export class ClaudeEngine implements Engine {
     this.start_ = start;
     this.conversationID = start.resume ?? randomUUID();
     this.model = start.model ?? "sonnet";
-    this.open(Boolean(start.resume));
+    if (this.options.apiKey) this.open(Boolean(start.resume));
     return { conversationID: this.conversationID, model: this.model };
   }
 
@@ -116,14 +121,15 @@ export class ClaudeEngine implements Engine {
           : { sessionId: this.conversationID }),
       permissionMode: "default",
       includePartialMessages: true,
-      settingSources: ["user", "project", "local"],
+      // "user" would read Nod's own config directory, not the human's ~/.claude.
+      settingSources: ["project", "local"],
       systemPrompt: { type: "preset", preset: "claude_code", append: start.systemAppend },
       canUseTool: (tool, input, { signal }) => this.canUseTool(tool, input, signal),
       hooks: {
         PreToolUse: [{ hooks: [this.preToolUse] }],
         PostToolUse: [{ hooks: [this.postToolUse] }],
       },
-      env: { ...process.env, ...this.options.credentials.env, CLAUDE_AGENT_SDK_CLIENT_APP: "graphcode-nod" },
+      env: claudeEnvironment(this.options.apiKey ?? "", this.options.configDir),
       ...(this.options.executable ? { pathToClaudeCodeExecutable: this.options.executable } : {}),
       stderr: () => {},
     };
@@ -132,6 +138,7 @@ export class ClaudeEngine implements Engine {
   }
 
   async runTurn(text: string, attachments: NodAttachment[], callbacks: TurnCallbacks): Promise<TurnResult> {
+    if (!this.options.apiKey) return { lastMessage: "", failure: { kind: "signInExpired", message: NO_KEY } };
     if (!this.q) this.open(true);
     return new Promise<TurnResult>((resolve) => {
       this.turn = { callbacks, lastMessage: "", textByMessage: new Map(), interrupted: false, resolve };
@@ -155,6 +162,7 @@ export class ClaudeEngine implements Engine {
   }
 
   async ask(prompt: string, model?: string): Promise<string> {
+    if (!this.options.apiKey) throw new Error(NO_KEY);
     const q = query({
       prompt,
       options: {
@@ -165,13 +173,17 @@ export class ClaudeEngine implements Engine {
         permissionMode: "dontAsk",
         settingSources: [],
         persistSession: false,
-        env: { ...process.env, ...this.options.credentials.env, CLAUDE_AGENT_SDK_CLIENT_APP: "graphcode-nod" },
+        env: claudeEnvironment(this.options.apiKey, this.options.configDir),
         ...(this.options.executable ? { pathToClaudeCodeExecutable: this.options.executable } : {}),
         stderr: () => {},
       },
     });
     let text = "";
     for await (const message of q) {
+      if (message.type === "system" && message.subtype === "api_retry" && isSignInRetry(message.error, message.error_status)) {
+        q.close();
+        throw new Error("The Anthropic API key was rejected. Update it in Settings › Agents › Nod.");
+      }
       if (message.type === "assistant" && !message.parent_tool_use_id) {
         const failure = assistantFailure(message.error);
         if (failure) throw new Error(failure.message);
@@ -252,6 +264,12 @@ export class ClaudeEngine implements Engine {
       case "system":
         if (message.subtype === "init") this.model = message.model;
         else if (message.subtype === "compact_boundary") turn?.callbacks.compacted();
+        else if (message.subtype === "api_retry" && turn && isSignInRetry(message.error, message.error_status)) {
+          // Claude Code retries a rejected key with backoff for minutes; a sign-in problem
+          // is the human's to fix, so the turn stops now and says so.
+          turn.failure = { kind: "signInExpired", message: "The Anthropic API key was rejected. Update it in Settings › Agents › Nod." };
+          void this.interrupt();
+        }
         return;
       case "auth_status":
         if (message.error && turn) turn.failure = { kind: "signInExpired", message: message.error };
@@ -461,6 +479,10 @@ function assistantFailure(error: string | undefined): EngineFailure | undefined 
     default:
       return { kind: "engineError", message: `Claude reported ${error.replace(/_/g, " ")}.` };
   }
+}
+
+export function isSignInRetry(error: string | undefined, status: number | null): boolean {
+  return status === 401 || status === 403 || assistantFailure(error)?.kind === "signInExpired";
 }
 
 function resultFailure(subtype: string, errors: string[], terminal?: string): EngineFailure {

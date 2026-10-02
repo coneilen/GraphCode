@@ -1,7 +1,4 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 
 /** `NodSettings.keychainService`: Nod's own sign-ins, never under `~/.graphcode`. */
 export const KEYCHAIN_SERVICE = "app.graphcode.nod";
@@ -9,7 +6,6 @@ export const KEYCHAIN_SERVICE = "app.graphcode.nod";
 /** Keychain accounts under `KEYCHAIN_SERVICE`, written by Settings › Agents › Nod. */
 export const KeychainAccount = {
   anthropicAPIKey: "anthropic-api-key",
-  claudeOAuthToken: "claude-oauth-token",
   githubToken: "github-token",
 } as const;
 
@@ -24,38 +20,37 @@ export const readKeychain: KeychainReader = (service, account) => {
   return value || undefined;
 };
 
-/** Where Claude Code keeps its own login: the Keychain on macOS, a file elsewhere. */
-export function hasClaudeCodeLogin(read: KeychainReader = readKeychain, home = homedir()): boolean {
-  if (read("Claude Code-credentials")) return true;
-  return existsSync(join(home, ".claude", ".credentials.json"));
-}
-
-export interface ClaudeCredentials {
-  /** Variables for the engine's environment; empty when reusing Claude Code's own login. */
-  env: Record<string, string>;
-  source: "nod-api-key" | "nod-oauth" | "environment" | "claude-code-login" | "none";
-}
-
 /**
- * Nod's Keychain entry first, then an API key already in the environment, then the
- * Claude Code login on this Mac — which needs nothing passed, because the engine runs
- * Claude Code and Claude Code reads its own login.
+ * The Claude engine signs in with an Anthropic API key from Nod's Keychain entry and nothing
+ * else — never a claude.ai login, Claude Code's or anyone's (policy, mailroom #1190).
  */
-export function claudeCredentials(
-  read: KeychainReader = readKeychain,
-  env: Record<string, string | undefined> = process.env,
-  home = homedir(),
-): ClaudeCredentials {
-  const apiKey = read(KEYCHAIN_SERVICE, KeychainAccount.anthropicAPIKey);
-  if (apiKey) return { env: { ANTHROPIC_API_KEY: apiKey }, source: "nod-api-key" };
-  const oauth = read(KEYCHAIN_SERVICE, KeychainAccount.claudeOAuthToken);
-  if (oauth) return { env: { CLAUDE_CODE_OAUTH_TOKEN: oauth }, source: "nod-oauth" };
-  if (env.ANTHROPIC_API_KEY || env.CLAUDE_CODE_OAUTH_TOKEN) return { env: {}, source: "environment" };
-  if (hasClaudeCodeLogin(read, home)) return { env: {}, source: "claude-code-login" };
-  return { env: {}, source: "none" };
+export function anthropicAPIKey(read: KeychainReader = readKeychain): string | undefined {
+  return read(KEYCHAIN_SERVICE, KeychainAccount.anthropicAPIKey);
 }
 
 /** A GitHub token from Nod's Keychain entry; without one, the Copilot CLI's own login is used. */
 export function githubToken(read: KeychainReader = readKeychain): string | undefined {
   return read(KEYCHAIN_SERVICE, KeychainAccount.githubToken);
+}
+
+/** Variables that would let Claude Code sign in some other way; stripped from its environment. */
+export const FOREIGN_CLAUDE_AUTH = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CONFIG_DIR",
+];
+
+/**
+ * Claude Code's environment: the parent's, without any inherited credential, with Nod's key
+ * and a config directory of Nod's own — so Claude Code can't find the human's login there.
+ */
+export function claudeEnvironment(
+  apiKey: string,
+  configDir: string,
+  parent: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+  const env = { ...parent };
+  for (const name of FOREIGN_CLAUDE_AUTH) delete env[name];
+  return { ...env, ANTHROPIC_API_KEY: apiKey, CLAUDE_CONFIG_DIR: configDir, CLAUDE_AGENT_SDK_CLIENT_APP: "graphcode-nod" };
 }
