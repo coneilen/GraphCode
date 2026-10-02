@@ -102,3 +102,26 @@ struct FeatureRampsTests {
         .mailroom, configuration: nowhere, channel: "beta", installID: id))
   }
 }
+
+@Suite
+struct NodRampTests {
+  @Test
+  func nodIsBetaOnlyByDefault() {
+    for _ in 0..<20 {
+      let id = UUID().uuidString
+      #expect(FeatureRamps.isEnabled(.nod, configuration: nil, channel: "beta", installID: id))
+      #expect(!FeatureRamps.isEnabled(.nod, configuration: nil, channel: "stable", installID: id))
+    }
+  }
+
+  @Test
+  func theShippedRampsFileHoldsNodToBeta() throws {
+    let url = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+      .appendingPathComponent("docs/ramps.json")
+    let configuration = try JSONDecoder().decode(
+      FeatureRamps.Configuration.self, from: Data(contentsOf: url))
+
+    #expect(configuration.features["nod"] == ["beta": 100, "stable": 0])
+  }
+}

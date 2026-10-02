@@ -8,6 +8,10 @@
       "beta": 100,
       "stable": 0
     },
+    "nod": {
+      "beta": 100,
+      "stable": 0
+    },
     "mailroom": {
       "beta": 100,
       "stable": 100

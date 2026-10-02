@@ -210,8 +210,9 @@ struct NodeDraftTests {
   func everyBackendHasBeenSpiked() {
     // Claude Code is the reference backend; Copilot was spiked against the real CLI, and
     // Codex against 0.145.0 once it was installed (issue #1). None of these rows is
-    // written from memory, which is the whole point of `isSpiked`.
-    for backend in CLISessionBackendKind.allCases {
+    // written from memory, which is the whole point of `isSpiked`. Nod is the one
+    // backend not yet launchable (`NodBackendTests`).
+    for backend in CLISessionBackendKind.allCases where backend != .nod {
       #expect(backend.isSpiked)
     }
   }
@@ -394,7 +395,7 @@ struct NodeDraftTests {
   @Test
   func everyBackendHostsASketch() {
     // A bare session is the least demanding type — nothing to refuse over.
-    for backend in CLISessionBackendKind.allCases {
+    for backend in CLISessionBackendKind.allCases where backend.isSpiked {
       #expect(backend.canHost(.sketch))
     }
   }

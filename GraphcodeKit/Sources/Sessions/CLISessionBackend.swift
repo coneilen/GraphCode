@@ -155,7 +155,7 @@ extension CLISessionBackend {
           return await CopilotSessionLog.presence(of: node, projectPath: projectPath)
         case .codex:
           return await ZmxSessionLauncher.codexPresence(of: node, projectPath: projectPath)
-        case .openCode, .pi:
+        case .openCode, .pi, .nod:
           // Its plugin (pi's extension) writes the same labels Claude Code's hooks do, so the same reader
           // serves both — see `OpenCodePresencePlugin`.
           return await ZmxSessionLauncher.presence(of: node, projectPath: projectPath)
@@ -176,7 +176,7 @@ extension CLISessionBackend {
           return await CopilotSessionLog.activity(of: node, projectPath: projectPath)
         case .codex:
           return await CodexSessionLog.activity(of: node, projectPath: projectPath)
-        case .openCode, .pi:
+        case .openCode, .pi, .nod:
           return await ZmxSessionLauncher.activity(of: node, projectPath: projectPath)
         }
       },
@@ -210,6 +210,9 @@ extension CLISessionBackend {
         case .pi:
           // Deliberately none: pi loops carry no summary rail, and a nil reading leaves the
           // card without one rather than with a rail that guesses.
+          reading = nil
+        case .nod:
+          // Nod's turns are already structured events; its rail will read those.
           reading = nil
         }
         // The optional second pass, which is the only part of this that costs anything.

@@ -35,7 +35,7 @@ struct SettingsBackendWriteTests {
   func everyBackendSurvivesTheRoundTrip() throws {
     // Copilot and Codex are the two that were reported as not sticking; claudeCode is
     // here so a coercion that quietly forced the default could not pass.
-    for backend in CLISessionBackendKind.allCases {
+    for backend in CLISessionBackendKind.offerableAsDefault {
       let url = makeSettingsURL()
       defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 

@@ -83,7 +83,7 @@ struct CLISessionBackendTests {
   /// goal-based Copilot loop was a node in the graph with no session behind it.
   @Test
   func everySpikedBackendGetsTheZmxBackedAdapterNotTheStub() async {
-    for kind in CLISessionBackendKind.allCases {
+    for kind in CLISessionBackendKind.allCases where kind.isSpiked {
       let backend = CLISessionBackend.backend(for: kind)
       #expect(backend.kind == kind)
       // Behavioral probe that distinguishes the adapters without a live session: the

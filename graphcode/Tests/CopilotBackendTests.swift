@@ -118,8 +118,8 @@ struct CopilotBackendTests {
     #expect(backend.kind == .copilotCLI)
     // Codex used to be the stub — `executableName` was nil, which is what made it host
     // nothing. It has an adapter now (issue #1), so nothing is left pointing at a binary
-    // graphcode can't launch.
-    for kind in CLISessionBackendKind.allCases {
+    // graphcode can't launch. Nod is the one still waiting on its runtime.
+    for kind in CLISessionBackendKind.allCases where kind != .nod {
       #expect(kind.executableName != nil)
       #expect(kind.isSpiked)
     }

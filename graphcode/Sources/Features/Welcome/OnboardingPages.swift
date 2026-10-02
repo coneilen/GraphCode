@@ -350,6 +350,7 @@ struct OnboardingBackendPage: View {
     case .codex: return "OpenAI's agent CLI."
     case .openCode: return "The open-source agent CLI — any model provider."
     case .pi: return "The minimal, extensible agent CLI — any model provider."
+    case .nod: return "GraphCode's own chat agent, on the Claude Agent SDK or Copilot SDK."
     }
   }
 

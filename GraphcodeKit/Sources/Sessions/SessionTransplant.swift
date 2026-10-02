@@ -98,7 +98,7 @@ public enum SessionTransplant {
         sourceWorkingDirectory: workingDirectory,
         files: ["session.jsonl": session])
 
-    case .openCode:
+    case .openCode, .nod:
       // OpenCode's conversations live in one SQLite database shared by every session on
       // the machine, not in a file per session that can be lifted out. Its own
       // `opencode export` could produce one, but nothing imports it back into a *fresh*
@@ -267,7 +267,7 @@ public enum SessionTransplant {
       return "S=$(cat \(idFile) 2>/dev/null); [ -n \"$S\" ] || exit 0; "
         + "F=$(ls -t \"$HOME\"/.pi/agent/sessions/*/*_\"$S\".jsonl 2>/dev/null | head -1); "
         + "[ -n \"$F\" ] || exit 0; exec tar -cf - -C \"$(dirname \"$F\")\" \"$(basename \"$F\")\""
-    case .openCode:
+    case .openCode, .nod:
       return nil
     }
   }
@@ -324,7 +324,7 @@ public enum SessionTransplant {
       return Artifact(
         backend: .pi, sessionID: sessionID,
         sourceWorkingDirectory: workingDirectory, files: ["session.jsonl": only.data])
-    case .openCode:
+    case .openCode, .nod:
       return nil
     }
   }
@@ -366,7 +366,7 @@ public enum SessionTransplant {
     case .copilotCLI: return restoreCopilot(artifact, forNodeID: nodeID)
     case .codex: return restoreCodex(artifact, projectPath: projectPath)
     case .pi: return restorePi(artifact, forNodeID: nodeID, projectPath: projectPath)
-    case .openCode: return nil
+    case .openCode, .nod: return nil
     }
   }
 
@@ -450,7 +450,7 @@ public enum SessionTransplant {
           workingDirectory: location.remotePath)
       else { return nil }
       staged[piSessionFileName(id: freshID)] = rewritten
-    case .codex, .openCode:
+    case .codex, .openCode, .nod:
       return nil
     }
     guard await deliver(files: staged, remoteScript: script, at: location) else { return nil }
@@ -489,7 +489,7 @@ public enum SessionTransplant {
         + "dir=\"$HOME/.pi/agent/sessions/$slug\"; "
         + "mkdir -p \"$dir\" \"$HOME/.graphcode/sessions\"; "
         + "tar -xf - -C \"$dir\"; \(bank)"
-    case .codex, .openCode:
+    case .codex, .openCode, .nod:
       return nil
     }
   }

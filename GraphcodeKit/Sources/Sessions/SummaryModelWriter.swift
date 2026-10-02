@@ -90,6 +90,9 @@ public enum SummaryModelWriter {
       return ["opencode", "run", prompt] + model
     case .pi:
       return ["pi", "-p", "--no-tools", "--no-session", prompt] + model
+    case .nod:
+      // The runtime's one-shot print mode — NodRuntime/README.md.
+      return ["graphcode-nod", "-p", prompt] + model
     }
   }
 
