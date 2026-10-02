@@ -52,21 +52,32 @@ provider dependency.
 This changes delivery priority only: all row names, statuses and runtime evidence
 below are unchanged, and exposed unsafe behavior is not waived.
 
-**2026-10-01 post-wave audit:** accepted main is
-`7d382687eadbce24b0f72eb23633896414153671`. The audit re-read all **98**
-surface rows after [#572](https://github.com/scgopi/GraphCode/pull/572), the
-standalone merged implementation/tooling PRs
-[#573](https://github.com/scgopi/GraphCode/pull/573) through
-[#578](https://github.com/scgopi/GraphCode/pull/578), and app-native stack `#581`
-containing [#579](https://github.com/scgopi/GraphCode/pull/579) and
-[#580](https://github.com/scgopi/GraphCode/pull/580). The exact result remains
-**62 Validated / 36 Partial / 0 Missing / 0 Blocked / 0 Divergent**. The wave
-fixes real source and evidence-pipeline defects, but supplies no exact packaged
+**2026-10-01 post-queue audit:** accepted main is
+`ca535d0c4042a60ab748f7ff01d6460e9c9ec0d1`. The audit re-read all **98**
+surface rows after the first implementation wave, documentation reconciliation
+[#584](https://github.com/scgopi/GraphCode/pull/584) merged as
+`f1c5a57f3ba7e9f5743c34a87628806992e1089f`, resilient Zig bootstrap
+[#586](https://github.com/scgopi/GraphCode/pull/586), app-native stack `#595`
+containing [#585](https://github.com/scgopi/GraphCode/pull/585) and
+[#594](https://github.com/scgopi/GraphCode/pull/594), and redirected-profile
+daemon fix [#593](https://github.com/scgopi/GraphCode/pull/593). The exact
+result remains **62 Validated / 36 Partial / 0 Missing / 0 Blocked /
+0 Divergent**. These changes fix real source, contributor-flow, and
+evidence-pipeline defects, but supply no exact packaged
 production-daemon/native-client flight or matched macOS observation that closes
-the remaining residuals of a whole row. In particular, Four-page onboarding
-is now source-fixed and locally/CI qualified while remaining Partial pending
-the packaged/native evidence tracked by open
-[#556](https://github.com/scgopi/GraphCode/issues/556).
+the remaining residuals of a whole row.
+
+In particular, Four-page onboarding remains source-fixed and locally/CI
+qualified but `Partial` pending the packaged/native evidence tracked by open
+[#556](https://github.com/scgopi/GraphCode/issues/556). The real pinned
+build/run/stop cycle in #585/#594 proves a checkout-owned contributor path, not
+installed onboarding, native keyboard/UIA, authenticated-agent terminal, or
+persistence behavior. The direct-process and exact-head Windows/macOS evidence
+in #593 closes the redirected-profile source defect, not a parity surface.
+Open [#587](https://github.com/scgopi/GraphCode/pull/587) bounds the harness
+worker and cleanup but still fails required integration; [#560](https://github.com/scgopi/GraphCode/issues/560)
+is now product-attributed UI-thread starvation pending an authorized full
+process dump and child-process inventory before shared product changes.
 
 ## Application shell and navigation
 
@@ -247,11 +258,43 @@ case proves ownership only. All existing Partial rows remain Partial.
 
 **Known shared-environment gate instability surfaced while validating the Window toolbar/Update command rows above:** with the local shell toolchain unblocked (PR #433), multiple parity sessions now build and run `graphcode-windows.exe`/`zmx.exe` concurrently on the same interactive desktop. The pre-existing worktree reorder/removal focus-retention stress block in `Tools/windows/uia-live-gate.ps1` (`Retain-FocusWithRetry`, its `Start-Job` concurrent-UIA-read stress, and the plain `Get-DirectChildren` tree walks around it) repeatedly hit raw, uncaught COM exceptions (`GetFirstChild`/`GetNextSibling` "Could not open the process token"/"Unrecognized error.") at different, unrelated call sites across many local runs, and a separate run was independently derailed by another desktop application (Chrome) stealing the foreground window during a modal-dialog wait. None of this reproduced from this branch's own changes — a minimal, standalone re-run that skips straight to the Update command assertions using the same shell process, native menu, and gate helpers passed cleanly and repeatably. This matches flakiness independently reported by sibling parity sessions and is a pre-existing, shared test-infrastructure limitation, not a product regression; it blocked getting one single uninterrupted top-to-bottom `uia-live-gate.ps1` run this session and is flagged here for follow-up (likely hardening `Get-DirectChildren`/`Retain-FocusWithRetry` against concurrent-desktop contention).
 
-**Validation-infrastructure work items from a 2026-10-01 clean-clone setup:** these are evidence-pipeline facts, not product parity changes, and no row status depends on them.
-- The local `uia-live-gate.ps1` run timed out twice after the Worktrees lane click on an otherwise passing `windows-shell` validation ([#560](https://github.com/scgopi/GraphCode/issues/560)). This is a different call site from the instability noted above. It is unresolved, so a local gate failure there is not attributed to the product.
+**Validation-infrastructure reconciliation from the 2026-10-01 clean-clone
+setup:** these are source/tooling/evidence-pipeline facts, not product parity
+changes, and no row status depends on them.
+- The checkout-owned contributor entry point and its quick-start documentation
+  are accepted through [#585](https://github.com/scgopi/GraphCode/pull/585) and
+  [#594](https://github.com/scgopi/GraphCode/pull/594), merged atomically as
+  `7d5cf3be8a86b7562b527f90d854845a52f2ac82`. Their real pinned cycle built
+  all four artifacts, started production daemon before shell in owned roots,
+  stopped only captured checkout-owned processes, and preserved the default
+  profile. That closes [#557](https://github.com/scgopi/GraphCode/issues/557)
+  and [#552](https://github.com/scgopi/GraphCode/issues/552), but it is not
+  installation, native UI, backend, persistence, or parity evidence.
+- Bootstrap retry/resume/stall/mirror/cache/checksum behavior is
+  source/tooling-fixed by [#586](https://github.com/scgopi/GraphCode/pull/586),
+  which closed [#559](https://github.com/scgopi/GraphCode/issues/559). Its
+  deterministic HTTP fixtures and 12/12 contracts improve contributor setup;
+  no ledger row depends on real ziglang.org transport or a package flight.
+- The local `uia-live-gate.ps1` Worktrees timeout is product-attributed
+  UI-thread starvation, not merely unclassified shared-desktop flakiness
+  ([#560](https://github.com/scgopi/GraphCode/issues/560)). Open
+  [#587](https://github.com/scgopi/GraphCode/pull/587) bounds and cleans up the
+  harness workers but still fails required integration. Before shared
+  `App.zig` / `WorktreeStatus.zig` changes, capture an authorized full
+  `graphcode-windows.exe` process dump at the first timeout plus the complete
+  child-process inventory and command lines; confirm the synchronous
+  `applyOverviewLaneAction → inspectWorktreesImpl → WorktreeStatus.inspect`
+  stack or capture provider locks.
 - The deep-checkout fixture failure is source/tooling-fixed by [#575](https://github.com/scgopi/GraphCode/pull/575), which closed [#561](https://github.com/scgopi/GraphCode/issues/561) after a deep-root positive run and 21 immutable regression logs. That improves evidence reliability; it is not product-runtime proof.
 - Validation profile leakage is source/tooling-fixed by [#576](https://github.com/scgopi/GraphCode/pull/576), which closed [#562](https://github.com/scgopi/GraphCode/issues/562) after 4/4 isolation tests and 380 validation-runner contracts. This qualifies the harness boundary, not an installed user's profile behavior.
-- Redirecting `USERPROFILE` makes `graphcoded` exit silently with `0xC000001D` ([#558](https://github.com/scgopi/GraphCode/issues/558)). Isolated runs must therefore use `GRAPHCODE_SUPPORT_DIR`, not a redirected profile.
+- Redirected `USERPROFILE` startup is source-fixed by [#593](https://github.com/scgopi/GraphCode/pull/593),
+  which closed [#558](https://github.com/scgopi/GraphCode/issues/558) at current
+  main `ca535d0c4042a60ab748f7ff01d6460e9c9ec0d1`. The direct-process regression
+  now exits cleanly, the Windows Swift production suite passed, and mandatory
+  exact-head macOS shared CI passed. Qualification still uses explicit owned
+  support/temp roots for isolation; this source fix is not an installed-client
+  or parity observation.
+
 ## Audit conclusion
 
 The Windows branch has substantial protocol, lifecycle, persistence, terminal, graph
