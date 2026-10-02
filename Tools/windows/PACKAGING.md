@@ -39,6 +39,45 @@ No supported publication route accepts this metadata. `release.ps1` requires
 `release-candidate` / `release-tag` provenance and refuses a local package before
 any GitHub upload.
 
+## Candidate source custody
+
+A Git bundle contains Git objects but not Git LFS media. Do not use a bare
+`GraphCode-source.bundle` as an offline handoff: cloning it can make Git LFS
+treat the bundle file as a standalone-file remote, and disabling smudging does
+not produce the required materialized clean checkout.
+
+Create and verify the source custody ZIP separately from the product package:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\source-custody.ps1 -Command Create `
+  -Repository . -Candidate <candidate-sha> -Tag <approved-tag> `
+  -Artifact .\GraphCode-source-custody.zip
+pwsh -NoProfile -File Tools\windows\source-custody.ps1 -Command Verify `
+  -Artifact .\GraphCode-source-custody.zip
+```
+
+The deterministic ZIP contains the Git bundle, the exact LFS objects referenced
+by the candidate tree, an integrity manifest, and
+`Restore-GraphCodeSource.ps1`. Restore first checks out LFS pointers with
+smudging disabled, copies the verified media into local LFS storage, and runs
+`git lfs checkout`, which does not download. It then requires the detached
+`HEAD`, peeled annotated tag, materialized LFS set, and empty
+`git status --short` to match the manifest.
+
+After the handoff hash is verified, restore without network access:
+
+```powershell
+Expand-Archive -LiteralPath .\GraphCode-source-custody.zip `
+  -DestinationPath .\GraphCode-source-custody
+powershell.exe -NoProfile `
+  -File .\GraphCode-source-custody\Restore-GraphCodeSource.ps1 `
+  -Command Restore -ArtifactRoot .\GraphCode-source-custody `
+  -Destination C:\GraphCode-Evidence\source
+```
+
+This artifact is source/evidence custody only. Regenerating it does not rebuild
+or alter the candidate product ZIP, commit, or tag.
+
 The ZIP contains one top-level `GraphCode` directory. Installation verifies the
 complete manifest and provider provenance before copying anything, then stages
 and swaps atomically. The scheduled task is created and run; the exact installed

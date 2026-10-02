@@ -82,8 +82,9 @@ pass cannot settle that uncertainty.
 
 ### 2026-10-02 local qualification execution record
 
-The local plan was executed through creation and independent reverification of
-the replacement Dev Box handoff:
+The local plan was executed through creation and independent hash reverification
+of the replacement Dev Box handoff. Dev Box source restoration later failed, so
+the handoff is not accepted as restorable custody:
 
 - **Phase L0 repository audit — Passed.** The replacement source is the exact
   #604 merge `a406a28cb9aec856c934e7253d1a79c2cc6706ed`, with parents
@@ -167,7 +168,8 @@ the replacement Dev Box handoff:
   packaged binary's `--worktrees-preview-state` output is exactly `deferred`.
   Source SHA, peeled tag SHA and package version agree; signing is
   `UNSIGNED (not code signed)`; publication is false.
-- **Phase L3 handoff — Passed.** The self-contained
+- **Phase L3 handoff — Failed operational custody qualification.** The
+  self-contained
   `GraphCode-DevBox-Handoff-0.1.78-beta2` contains the candidate, Approval A,
   Dev Box plan and a verified source bundle containing the annotated beta2 tag.
   The source-bundle SHA-256 is
@@ -180,16 +182,25 @@ the replacement Dev Box handoff:
   `78eed36dd0450d979caf223511a37f0cf30546e30b343e47f7fed3ca1b55da2a`;
   and the handoff `hashes.sha256` SHA-256 is
   `87cf8ab5720d114621d4aa113694e66b3ee5ca3c2192826223cc0168ef29f862`.
-  All **8** payload hashes verified. The coordinator independently reverified
-  the versioned beta2 handoff.
+  All **8** payload hashes verified, and the coordinator independently
+  reverified those hashes. That evidence proves byte integrity only, not an
+  offline clean restore. On the Dev Box, cloning `GraphCode-source.bundle`
+  caused Git LFS to invoke the standalone-file transfer adapter against the
+  bundle file path and fail. Retrying with LFS smudging disabled resolved HEAD
+  and `0.1.78-beta2^{commit}` to the approved SHA but left **43** tracked PNG
+  files modified. The clean-checkout gate therefore failed and execution
+  stopped; neither attempt is passing evidence. The beta2 commit, local tag,
+  product ZIP, and original handoff remain immutable.
 - **Phases L4-L6 — NotExecuted.** No Dev Box installation, native UI/backend
   turn, destructive fixture, lifecycle flight, returned evidence bundle,
   tester packet, Approval B, pushed tag or release asset exists. Dev Box
   provisioning/profile identities, install/native/UIA/backend/destructive/
   lifecycle flight, other layouts/IMEs, screen-reader claims, upgrade/rollback,
   dump, transfer, Approval B and publication are explicitly **NotExecuted**.
-  The exact-artifact gate is complete for beta2; the other six alpha gates
-  remain open.
+  Product-package identity remains verified, but source custody and the other
+  six alpha gates remain open. Because the product commit, tag, and ZIP do not
+  change, policy requires a newly generated and rehashed handoff/source-custody
+  ZIP, not a fresh candidate build.
 
 ## Delivery lanes
 
@@ -463,7 +474,7 @@ input, clipboard, display and destructive tests need an owned Windows desktop
 lease or equivalent authorized hosted evidence. No desktop available means a
 proof gap, not PASS; hosted server evidence must not be relabelled client proof.
 
-- [x] **Exact artifact:** candidate source
+- [ ] **Exact artifact:** candidate source
   `a406a28cb9aec856c934e7253d1a79c2cc6706ed`, version/tag
   `0.1.78-beta2`, peeled tag SHA, package SHA-256, payload manifest and
   provider provenance are recorded in
@@ -472,7 +483,10 @@ proof gap, not PASS; hosted server evidence must not be relabelled client proof.
   explicitly declares `UNSIGNED (not code signed)`, records
   `previewFeatures.worktreesDeferred=true`, reports preview state `deferred`,
   and contains production daemon/CLI/runtime inputs. The coordinator
-  independently reverified the handoff and all eight payload hashes.
+  independently reverified the handoff and all eight payload hashes. Those
+  product/package identity checks passed, but the gate remains open because the
+  source custody artifact could not restore its 43 LFS-tracked files into a
+  clean checkout.
 - [ ] **Clean installation and recovery:** install the extracted candidate on
   the declared client profile without Git/Swift/Zig/SDK developer dependencies.
   Observe the installed scheduled daemon endpoint and normal app launch.
@@ -518,9 +532,10 @@ proof gap, not PASS; hosted server evidence must not be relabelled client proof.
   steps, recovery locations and a bug-report route. Never ask testers to bypass
   security policy. Invite only after the core gates have actual evidence.
 
-The **exact-artifact gate passed**. The other **six** gates remain open and
-require evidence that source, hosted CI, and hidden-window tests cannot
-manufacture:
+All **seven** gates remain open. The candidate product/package identity
+subchecks passed, but exact-artifact custody requires a corrected, rehashed
+handoff that restores cleanly. The other gates require evidence that source,
+hosted CI, and hidden-window tests cannot manufacture:
 
 | Required external capability | Exact permission/evidence needed |
 |---|---|
@@ -645,8 +660,8 @@ permission-bound; it should not start with another parity-row sweep:
    evidence exists. Approval A authorizes no full dump and keeps #560 open. A
    future dump-backed diagnosis requires separate authorization and a new
    candidate if product code changes.
-3. **Keep the release gates honest:** the exact-artifact gate passed; the other
-   **six** gates remain open. The
+3. **Keep the release gates honest:** all **seven** gates remain open. Candidate
+   product/package identity passed, but exact-artifact custody did not. The
    installed production-core result, native input and destructive fixture
    permission, named authenticated backend authorization, exact artifact
    provenance, and publication permission are independent. A green
