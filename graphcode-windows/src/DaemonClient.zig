@@ -339,6 +339,13 @@ pub const DaemonClient = struct {
         return endpointName(allocator);
     }
 
+    /// Returns a stable probe for supervisor startup when the daemon has not
+    /// created the rendezvous secret yet.
+    pub fn currentDaemonStartupEndpoint(self: *DaemonClient, allocator: std.mem.Allocator) ![]u8 {
+        _ = self;
+        return startupEndpointName(allocator);
+    }
+
     pub fn currentDaemonLockName(self: *DaemonClient, allocator: std.mem.Allocator) ![]u8 {
         _ = self;
         return daemonLockName(allocator);
@@ -1537,6 +1544,53 @@ test "settings validation rejects missing directories, invalid secrets, and pipe
     );
 }
 
+test "daemon startup endpoint is available before the rendezvous secret exists" {
+    const allocator = std.testing.allocator;
+    const old_pipe = std.process.getEnvVarOwned(allocator, "GRAPHCODE_DAEMON_PIPE") catch null;
+    const old_support = std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR") catch null;
+    defer {
+        setTestEnvironment("GRAPHCODE_DAEMON_PIPE", old_pipe);
+        setTestEnvironment("GRAPHCODE_SUPPORT_DIR", old_support);
+        if (old_pipe) |value| allocator.free(value);
+        if (old_support) |value| allocator.free(value);
+    }
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const support = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(support);
+    setTestEnvironment("GRAPHCODE_DAEMON_PIPE", null);
+    setTestEnvironment("GRAPHCODE_SUPPORT_DIR", support);
+
+    var client = try DaemonClient.init(allocator);
+    defer client.deinit();
+
+    try std.testing.expectError(error.EndpointSecretMissing, client.currentEndpointName(allocator));
+
+    const lock_name = try client.currentDaemonLockName(allocator);
+    defer allocator.free(lock_name);
+    try std.testing.expect(lock_name.len != 0);
+
+    const startup_endpoint = try client.currentDaemonStartupEndpoint(allocator);
+    defer allocator.free(startup_endpoint);
+    try std.testing.expect(std.mem.startsWith(u8, startup_endpoint, "\\\\.\\pipe\\graphcode-startup-"));
+    const startup_endpoint_again = try client.currentDaemonStartupEndpoint(allocator);
+    defer allocator.free(startup_endpoint_again);
+    try std.testing.expectEqualStrings(startup_endpoint, startup_endpoint_again);
+
+    try temporary.dir.writeFile(.{
+        .sub_path = ".graphcode-rendezvous.secret",
+        .data = "0123456789abcdef0123456789abcdef",
+    });
+    const real_endpoint = try client.currentEndpointName(allocator);
+    defer allocator.free(real_endpoint);
+    try std.testing.expect(!std.mem.eql(u8, real_endpoint, startup_endpoint));
+
+    setTestEnvironment("GRAPHCODE_DAEMON_PIPE", "\\\\.\\pipe\\graphcode-test-override");
+    const overridden = try client.currentDaemonStartupEndpoint(allocator);
+    defer allocator.free(overridden);
+    try std.testing.expectEqualStrings("\\\\.\\pipe\\graphcode-test-override", overridden);
+}
+
 test "clearing support override ignores the old environment override" {
     const allocator = std.testing.allocator;
     const old_override = std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR") catch null;
@@ -1616,6 +1670,36 @@ fn endpointNameFor(
         allocator,
         "\\\\.\\pipe\\graphcode-{s}-{s}-{s}",
         .{ sid, support_hash[0..24], rendezvous_hash[0..24] },
+    );
+}
+
+fn startupEndpointName(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "GRAPHCODE_DAEMON_PIPE")) |override| {
+        return override;
+    } else |_| {}
+
+    const support = try supportDirectory(allocator);
+    defer allocator.free(support);
+    return endpointNameFor(allocator, "", support) catch |err| switch (err) {
+        error.EndpointSecretMissing => startupEndpointNameFor(allocator, support),
+        else => err,
+    };
+}
+
+/// Stable missing endpoint used only while reserving daemon startup.
+fn startupEndpointNameFor(allocator: std.mem.Allocator, support: []const u8) ![]u8 {
+    const sid = try currentSID(allocator);
+    defer allocator.free(sid);
+    const support_identity = normalizedSupportPath(allocator, support) catch
+        return error.EndpointHashFailed;
+    defer allocator.free(support_identity);
+    const support_hash = sha256Hex(allocator, support_identity) catch
+        return error.EndpointHashFailed;
+    defer allocator.free(support_hash);
+    return std.fmt.allocPrint(
+        allocator,
+        "\\\\.\\pipe\\graphcode-startup-{s}-{s}",
+        .{ sid, support_hash[0..24] },
     );
 }
 
