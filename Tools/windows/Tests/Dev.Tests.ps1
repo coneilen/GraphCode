@@ -78,6 +78,19 @@ $executed = 0
 
 try {
   New-Item -ItemType Directory -Force -Path $sourceRoot | Out-Null
+  $nativeHostLog = Join-Path $fixtureRoot "native-host.log"
+  $nativeResult = @(
+    Invoke-DevNative "Synthetic native output" {
+      Write-Output "synthetic-native-visible"
+    } 6> $nativeHostLog
+  )
+  Assert-True ($nativeResult.Count -eq 0) `
+    "Nested native/script output contaminated the development helper success pipeline"
+  $nativeHostOutput = Get-Content -LiteralPath $nativeHostLog -Raw
+  Assert-True ($nativeHostOutput -match "synthetic-native-visible") `
+    "Nested native/script output was not preserved as visible host output"
+  $executed++
+
   $swiftRoot = Join-Path $sourceRoot "swift"
   $shellRoot = Join-Path $sourceRoot "shell"
   $providerRoot = Join-Path $sourceRoot "provider"

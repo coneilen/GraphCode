@@ -37,7 +37,7 @@ function Test-PathInside([string] $Path, [string] $Root) {
 function Invoke-DevNative([string] $Description, [scriptblock] $Command) {
   Write-Host "==> $Description"
   $global:LASTEXITCODE = 0
-  & $Command
+  & $Command 2>&1 | ForEach-Object { Write-Host $_ }
   if ($LASTEXITCODE -ne 0) {
     throw "$Description failed with exit code $LASTEXITCODE"
   }
