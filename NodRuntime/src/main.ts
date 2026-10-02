@@ -11,6 +11,7 @@ import { anthropicAPIKey, githubToken } from "./credentials";
 import type { Engine } from "./engine";
 import { readBrief } from "./brief";
 import { EventLog } from "./eventLog";
+import { loadProjectMcpServers } from "./mcpServers";
 import { PresenceReporter } from "./presence";
 import type { NodEngineKind } from "./protocol";
 import { NodRuntime, type LoopType } from "./runtime";
@@ -111,6 +112,9 @@ async function main(argv: string[]): Promise<number> {
     resume: values.resume,
     inherit: values.inherit && !values.resume ? readBrief(values.inherit) : undefined,
     unattended: values.unattended || undefined,
+    projectPath: process.env.NOD_PROJECT_PATH || undefined,
+    messagesOtherLoops: () => loadSettings().messagesOtherLoops,
+    mcpServers: loadProjectMcpServers(cwd, settings.disabledMCPServers),
   });
   const control = new ControlSocket(join(stateDir, "control.sock"), (command) => runtime.handle(command));
   await control.listen();

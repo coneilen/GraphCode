@@ -18,6 +18,8 @@ export interface NodSettings {
   messagesOtherLoops: "draftForMe" | "send" | "never";
   shellAllowlist: string[];
   spendCapUSD: number;
+  /** `.mcp.json` servers switched off for Nod; the built-in graphcode server never is. */
+  disabledMCPServers: string[];
 }
 
 export const defaultSettings: NodSettings = {
@@ -30,6 +32,7 @@ export const defaultSettings: NodSettings = {
   messagesOtherLoops: "draftForMe",
   shellAllowlist: [],
   spendCapUSD: 2,
+  disabledMCPServers: [],
 };
 
 /** `~/.graphcode`, or `GRAPHCODE_SUPPORT_DIR` resolved against home, as `SupportDirectory` does. */
@@ -65,5 +68,6 @@ export function loadSettings(path = join(supportDirectory(), "settings.json")): 
     messagesOtherLoops: pick("messagesOtherLoops", oneOf("draftForMe", "send", "never")),
     shellAllowlist: pick("shellAllowlist", (v) => Array.isArray(v) && v.every(isString)),
     spendCapUSD: pick("spendCapUSD", (v) => typeof v === "number" && Number.isFinite(v) && v >= 0),
+    disabledMCPServers: pick("disabledMCPServers", (v) => Array.isArray(v) && v.every(isString)),
   };
 }

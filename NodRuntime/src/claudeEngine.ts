@@ -12,6 +12,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { claudeEnvironment } from "./credentials";
 import type { Engine, EngineFailure, EngineSession, EngineStart, ToolRequest, TurnCallbacks, TurnResult } from "./engine";
+import { claudeMcpServers } from "./mcpServers";
 import type { NodAttachment } from "./protocol";
 import { summarizeResult } from "./tools";
 
@@ -68,6 +69,8 @@ export interface ClaudeEngineOptions {
   configDir: string;
   /** Claude Code to run; the SDK's bundled build when absent. */
   executable?: string;
+  /** The SDK's `query`; tests pass a fake to see the options a session opens with. */
+  query?: typeof query;
 }
 
 const NO_KEY = "Nod needs an Anthropic API key. Add one in Settings › Agents › Nod.";
@@ -124,6 +127,9 @@ export class ClaudeEngine implements Engine {
       // "user" would read Nod's own config directory, not the human's ~/.claude.
       settingSources: ["project", "local"],
       systemPrompt: { type: "preset", preset: "claude_code", append: start.systemAppend },
+      // Only what Nod mounts: the project's .mcp.json minus disabledMCPServers, read by the runtime.
+      mcpServers: start.mcp ? claudeMcpServers(start.mcp) : {},
+      strictMcpConfig: true,
       canUseTool: (tool, input, { signal }) => this.canUseTool(tool, input, signal),
       hooks: {
         PreToolUse: [{ hooks: [this.preToolUse] }],
@@ -133,7 +139,7 @@ export class ClaudeEngine implements Engine {
       ...(this.options.executable ? { pathToClaudeCodeExecutable: this.options.executable } : {}),
       stderr: () => {},
     };
-    this.q = query({ prompt: this.inbox, options });
+    this.q = (this.options.query ?? query)({ prompt: this.inbox, options });
     this.consumer = this.consume(this.q);
   }
 

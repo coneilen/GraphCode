@@ -1,4 +1,5 @@
 import type { NodAttachment, NodEngineKind, NodFailureKind, NodToolStatus } from "./protocol";
+import type { McpMount } from "./mcpServers";
 import type { ToolIntent } from "./permissions";
 
 export interface EngineStart {
@@ -10,6 +11,8 @@ export interface EngineStart {
   forkFrom?: string;
   /** Appended to the engine's own system prompt: the briefing and Nod's identity. */
   systemAppend?: string;
+  /** The graphcode server and the project's `.mcp.json` servers; nothing else is mounted. */
+  mcp?: McpMount;
 }
 
 export interface EngineSession {

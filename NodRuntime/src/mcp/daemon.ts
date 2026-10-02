@@ -100,7 +100,7 @@ export class DaemonConnection {
       while (this.queue.length > 0) {
         const event = this.queue.shift()!;
         const key = keys.find((k) => k in event);
-        if (key) return [key, event[key]];
+        if (key) return [key, event[key]!];
       }
       if (this.closed) throw this.closed;
       const remaining = deadline - Date.now();
