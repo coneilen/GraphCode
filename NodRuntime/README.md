@@ -38,7 +38,8 @@ app does not parse that text. It renders the chat pane from the event log.
 | PTY stdin (`zmx send`) | daemon → runtime | A plain line is `send {delivery: queue}`, so `.message` edges and `graphcode node send` work unchanged |
 | zmx labels | runtime → daemon | The same presence/activity/session-id labels Claude Code's hooks write (`PresenceHooks`), so the existing readers serve Nod |
 
-`$NOD_STATE` is `~/.graphcode/nod/<node-uuid>/`. It also holds `conversation.json`
+`$NOD_STATE` is `<support-dir>/nod/<node-uuid>/` (`~/.graphcode/nod/<node-uuid>/` in the
+default workspace), and graphcode always sets it. It also holds `conversation.json`
 (engine, model, conversation id) for resume.
 
 The wire types are `GraphcodeKit/Sources/Domain/NodProtocol.swift`. PROTOCOL.md is the

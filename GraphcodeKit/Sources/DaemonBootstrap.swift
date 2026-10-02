@@ -78,7 +78,39 @@ import Foundation
         else { return nil }
         return "\(name):\(size):\(Int(modified.timeIntervalSince1970))"
       }
-      .joined(separator: "\n")
+      .joined(separator: "\n") + nodStamp(besideHelpersIn: directory)
+    }
+
+    /// Nod's runtime, which a bundle carries as a directory beside the helpers rather than
+    /// among them, or `nil` for a bundle built before it shipped — optional, so that bundle
+    /// still installs.
+    static func bundledNodDirectory(besideHelpersIn bundled: URL) -> URL? {
+      let directory = bundled.deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent(NodRuntimeLocator.bundledDirectory, isDirectory: true)
+      let binary = directory.appendingPathComponent("graphcode-nod")
+      return FileManager.default.isExecutableFile(atPath: binary.path) ? directory : nil
+    }
+
+    private static func nodStamp(besideHelpersIn directory: URL) -> String {
+      guard let nod = bundledNodDirectory(besideHelpersIn: directory),
+        let attributes = try? FileManager.default.attributesOfItem(
+          atPath: nod.appendingPathComponent("graphcode-nod").path),
+        let size = attributes[.size] as? Int,
+        let modified = attributes[.modificationDate] as? Date
+      else { return "" }
+      return "\nnod:\(size):\(Int(modified.timeIntervalSince1970))"
+    }
+
+    /// Whether the runtime a bundle carries is installed where `graphcoded` looks for it.
+    /// A bundle with none has nothing to install.
+    static func nodRuntimeInstalled(
+      from bundled: URL, in directory: URL = SupportDirectory.binDirectory
+    ) -> Bool {
+      guard bundledNodDirectory(besideHelpersIn: bundled) != nil else { return true }
+      let binary = directory.appendingPathComponent(NodRuntimeLocator.installedDirectory)
+        .appendingPathComponent("graphcode-nod")
+      return FileManager.default.isExecutableFile(atPath: binary.path)
     }
 
     /// Whether every helper is actually present and runnable where it was installed.
@@ -127,7 +159,9 @@ import Foundation
 
       let expected = stamp(forHelpersIn: bundled)
       let current = try? String(contentsOf: stampURL, encoding: .utf8)
-      if current == expected, helpersInstalled(), launchAgentIsCurrent() {
+      if current == expected, helpersInstalled(), nodRuntimeInstalled(from: bundled),
+        launchAgentIsCurrent()
+      {
         // Everything a file can record is right. The one thing no file records is whether
         // launchd still has the agent, and it routinely does not: an agent loaded the
         // legacy way is not re-bootstrapped into the next login session, so a reboot or a
@@ -182,7 +216,11 @@ import Foundation
         let binDirectory = workspace.url.appendingPathComponent("bin", isDirectory: true)
         let stampFile = workspace.url.appendingPathComponent("installed-helpers.txt")
         let installed = try? String(contentsOf: stampFile, encoding: .utf8)
-        if installed == expected, helpersInstalled(in: binDirectory) { continue }
+        if installed == expected, helpersInstalled(in: binDirectory),
+          nodRuntimeInstalled(from: bundled, in: binDirectory)
+        {
+          continue
+        }
         // Direction matters: any packaged copy that gets launched runs this — an old DMG
         // still sitting in ~/Downloads included — and "different" alone would let it
         // rewrite every closed workspace *backward* and bounce their daemons, ping-ponging
@@ -303,6 +341,28 @@ import Foundation
         try? fileManager.removeItem(at: target)
         try fileManager.moveItem(at: staged, to: target)
       }
+      if let nod = bundledNodDirectory(besideHelpersIn: bundled) {
+        try installNodRuntime(
+          from: nod,
+          to: destination.appendingPathComponent(NodRuntimeLocator.installedDirectory))
+      }
+    }
+
+    /// The whole directory, copied rather than linked: a link into the bundle breaks the
+    /// moment the app is moved or translocated, and `graphcoded` would lose every Nod loop
+    /// with it. Staged and swapped like a helper, for the same reasons.
+    static func installNodRuntime(from bundled: URL, to target: URL) throws {
+      let fileManager = FileManager.default
+      let staged = target.deletingLastPathComponent()
+        .appendingPathComponent("\(target.lastPathComponent).new.\(getpid())")
+      try? fileManager.removeItem(at: staged)
+      defer { try? fileManager.removeItem(at: staged) }
+      try fileManager.copyItem(at: bundled, to: staged)
+      clearQuarantine(staged)
+      let contents = fileManager.enumerator(at: staged, includingPropertiesForKeys: nil)
+      while let item = contents?.nextObject() as? URL { clearQuarantine(item) }
+      try? fileManager.removeItem(at: target)
+      try fileManager.moveItem(at: staged, to: target)
     }
 
     /// Drops `com.apple.quarantine` from an installed helper. Failure is ignored: a file

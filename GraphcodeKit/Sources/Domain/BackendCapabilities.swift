@@ -280,8 +280,9 @@ extension CLISessionBackendKind {
   /// than refusing, so this now gates every loop type.
   /// Every CLI, now that each has an adapter and a row read off its real binary. Nod is
   /// the next backend the concept was kept for: its row is designed, but nothing can
-  /// launch it until NodRuntime ships, so it hosts nothing yet.
-  public var isSpiked: Bool { self != .nod }
+  /// launch it until NodRuntime ships, so it hosts nothing yet — except where a developer
+  /// points `NodRuntimeLocation.overrideVariable` at a runtime (or a fake of one).
+  public var isSpiked: Bool { self != .nod || NodRuntimeLocation.developmentOverride != nil }
 
   /// Whether this backend can host that loop type at all. The refusal
   /// docs/04-cli-backends.md asks `OrchestratorClient` to make, kept next to the
