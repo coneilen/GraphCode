@@ -16,7 +16,10 @@ struct RunsAsAgentMenu: View {
 
   var body: some View {
     Menu {
-      ForEach(AgentMenuSection.sections(for: loopType), id: \.surface) { section in
+      ForEach(
+        AgentMenuSection.sections(for: loopType, nodEnabled: FeatureRamps.isEnabled(.nod)),
+        id: \.surface
+      ) { section in
         Section(section.title) {
           ForEach(section.entries, id: \.backend) { entry in
             if entry.backend == .nod {
@@ -86,12 +89,16 @@ struct AgentMenuSection: Equatable {
     }
   }
 
-  static func sections(for loopType: LoopType) -> [AgentMenuSection] {
-    AgentSurface.allCases.map { surface in
-      AgentMenuSection(
+  /// The Chat group exists only while Nod's beta ramp is on; an empty group is dropped.
+  static func sections(for loopType: LoopType, nodEnabled: Bool = true) -> [AgentMenuSection] {
+    AgentSurface.allCases.compactMap { surface in
+      let backends = CLISessionBackendKind.agentsOffered(nodEnabled: nodEnabled)
+        .filter { $0.surface == surface }
+      guard !backends.isEmpty else { return nil }
+      return AgentMenuSection(
         surface: surface,
-        entries: CLISessionBackendKind.settingsOrder
-          .filter { $0.surface == surface }
+        entries:
+          backends
           .map { backend in
             Entry(
               backend: backend, isEnabled: backend.canHost(loopType),

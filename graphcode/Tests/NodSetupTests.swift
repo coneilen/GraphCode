@@ -312,6 +312,17 @@ import Testing
       sections[1].entries.map(\.backend) == [.claudeCode, .codex, .copilotCLI, .openCode, .pi])
   }
 
+  @Test func withNodsRampOffOnlyTerminalIsOffered() {
+    let sections = AgentMenuSection.sections(for: .sketch, nodEnabled: false)
+    #expect(sections.map(\.title) == ["Terminal"])
+    #expect(!CLISessionBackendKind.agentsOffered(nodEnabled: false).contains(.nod))
+    #expect(CLISessionBackendKind.agentsOffered(nodEnabled: true).first == .nod)
+  }
+
+  @Test func nodIsHeldToTheBetaRamp() {
+    #expect(FeatureRamps.Feature.nod.defaultPercents == ["beta": 100, "stable": 0])
+  }
+
   @Test func greyingFollowsCanHost() {
     for loopType in LoopType.allCases {
       for entry in AgentMenuSection.sections(for: loopType).flatMap(\.entries) {

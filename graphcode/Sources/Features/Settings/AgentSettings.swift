@@ -12,6 +12,13 @@ extension CLISessionBackendKind {
   static let settingsOrder: [CLISessionBackendKind] = [
     .nod, .claudeCode, .codex, .copilotCLI, .openCode, .pi,
   ]
+
+  /// `settingsOrder` without Nod while its beta ramp is off for this install.
+  static func agentsOffered(nodEnabled: Bool = FeatureRamps.isEnabled(.nod))
+    -> [CLISessionBackendKind]
+  {
+    settingsOrder.filter { $0 != .nod || nodEnabled }
+  }
 }
 
 /// Settings › Agents › one CLI: what it may do without asking, and for Copilot the version

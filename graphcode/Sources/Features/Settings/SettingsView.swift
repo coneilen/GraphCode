@@ -22,7 +22,7 @@ struct SettingsView: View {
       List(selection: $pane) {
         Label("General", systemImage: "gearshape").tag(SettingsPane.general)
         Section("Agents") {
-          ForEach(CLISessionBackendKind.settingsOrder, id: \.self) { backend in
+          ForEach(CLISessionBackendKind.agentsOffered(), id: \.self) { backend in
             Text(backend.displayName).tag(SettingsPane.agent(backend))
           }
         }

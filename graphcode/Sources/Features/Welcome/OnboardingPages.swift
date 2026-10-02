@@ -261,7 +261,10 @@ struct OnboardingBackendPage: View {
         .frame(maxWidth: 470)
 
       VStack(spacing: 8) {
-        ForEach(CLISessionBackendKind.allCases, id: \.self) { backend in
+        ForEach(
+          CLISessionBackendKind.allCases.filter { $0 != .nod || FeatureRamps.isEnabled(.nod) },
+          id: \.self
+        ) { backend in
           row(backend)
         }
       }
