@@ -414,6 +414,25 @@ Do not enable or advertise in-app install/relaunch until its own real
 running-EXE/session-continuity flight passes. This plan neither creates a tag
 or release nor dispatches CI, uploads assets, installs an app or changes pins.
 
+### Qualification execution plans
+
+The remaining evidence work is split at the machine boundary so a new agent can
+execute either side without relying on hidden session state:
+
+- [Local candidate and release plan](windows-preview-local-qualification-plan.md)
+  selects/audits the source, creates the local unpushed tag, builds and verifies
+  the exact ZIP, produces the self-contained Dev Box handoff, reviews returned
+  evidence and performs publication only after a separate final approval.
+- [Microsoft Dev Box qualification plan](windows-preview-devbox-qualification-plan.md)
+  is standalone. It verifies the handoff, installs the unchanged candidate,
+  runs the production/native/backend/lifecycle evidence on a new corporate
+  Dev Box, cleans up and returns a hashed evidence bundle. It never publishes.
+
+Both plans bind the same source SHA, version/tag, ZIP hash, provider/toolchain
+identities and Approval A manifest. Any identity change invalidates downstream
+evidence and restarts qualification from the local plan. These documents are
+procedures, not evidence; they do not change any gate or parity status.
+
 ## Assigned work inventory after the clean-clone queue
 
 The 2026-10-01 assignment audit resolved the canonical programme assignee as
