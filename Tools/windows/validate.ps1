@@ -267,6 +267,173 @@ function Invoke-Native([string] $description, [scriptblock] $command) {
   }
 }
 
+function Get-WindowsShellProfileSnapshot([string] $path) {
+  $fullPath = [IO.Path]::GetFullPath($path)
+  if (-not (Test-Path -LiteralPath $fullPath)) {
+    return ([ordered]@{
+        path = $fullPath
+        exists = $false
+        entries = @()
+      } | ConvertTo-Json -Compress -Depth 5)
+  }
+
+  $root = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+  $entries = [Collections.Generic.List[object]]::new()
+  if (-not $root.PSIsContainer) {
+    $entries.Add([ordered]@{
+        relativePath = "."
+        type = "file"
+        length = [int64] $root.Length
+        sha256 = (Get-FileHash -LiteralPath $root.FullName -Algorithm SHA256).Hash
+      })
+  } else {
+    foreach ($item in @(Get-ChildItem -LiteralPath $fullPath -Force -Recurse |
+        Sort-Object FullName)) {
+      $relativePath = [IO.Path]::GetRelativePath($fullPath, $item.FullName).
+        Replace('\', '/')
+      if ($item.PSIsContainer) {
+        $entries.Add([ordered]@{
+            relativePath = $relativePath
+            type = "directory"
+          })
+      } else {
+        $entries.Add([ordered]@{
+            relativePath = $relativePath
+            type = "file"
+            length = [int64] $item.Length
+            sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+          })
+      }
+    }
+  }
+
+  return ([ordered]@{
+      path = $fullPath
+      exists = $true
+      entries = $entries.ToArray()
+    } | ConvertTo-Json -Compress -Depth 5)
+}
+
+function Assert-WindowsShellProfileUnchanged(
+  [string] $path,
+  [string] $before
+) {
+  $after = Get-WindowsShellProfileSnapshot $path
+  if (-not [string]::Equals($before, $after, [StringComparison]::Ordinal)) {
+    throw "Windows shell default profile artifact changed: $([IO.Path]::GetFullPath($path))"
+  }
+}
+
+function Invoke-WindowsShellValidationIsolation(
+  [Parameter(Mandatory)]
+  [scriptblock] $Action,
+  [string] $WorkspaceRoot = $repoRoot,
+  [string] $UserProfileRoot = $env:USERPROFILE,
+  [string] $LocalAppDataRoot = $env:LOCALAPPDATA
+) {
+  $defaultSupport = Join-Path $UserProfileRoot ".graphcode"
+  $defaultLocalAppData = Join-Path $LocalAppDataRoot "GraphCode"
+  $supportBefore = Get-WindowsShellProfileSnapshot $defaultSupport
+  $localAppDataBefore = Get-WindowsShellProfileSnapshot $defaultLocalAppData
+  $validationRoot = Join-Path $WorkspaceRoot (
+    ".build\windows-shell-validation\" + [guid]::NewGuid().ToString("N")
+  )
+  $ownedEnvironment = [ordered]@{
+    GRAPHCODE_VALIDATION_ROOT = $validationRoot
+    GRAPHCODE_SUPPORT_DIR = Join-Path $validationRoot "support"
+    LOCALAPPDATA = Join-Path $validationRoot "local-app-data"
+    TEMP = Join-Path $validationRoot "temp"
+    TMP = Join-Path $validationRoot "temp"
+  }
+  $savedEnvironment = @{}
+  foreach ($name in $ownedEnvironment.Keys) {
+    $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable(
+      $name,
+      [EnvironmentVariableTarget]::Process
+    )
+  }
+
+  $primaryError = $null
+  $cleanupErrors = [Collections.Generic.List[Exception]]::new()
+  try {
+    New-Item -ItemType Directory -Force -Path @(
+      $ownedEnvironment.GRAPHCODE_SUPPORT_DIR,
+      $ownedEnvironment.LOCALAPPDATA,
+      $ownedEnvironment.TEMP
+    ) | Out-Null
+    foreach ($entry in $ownedEnvironment.GetEnumerator()) {
+      [Environment]::SetEnvironmentVariable(
+        $entry.Key,
+        $entry.Value,
+        [EnvironmentVariableTarget]::Process
+      )
+    }
+    Write-Host "WINDOWS_SHELL_VALIDATION_ISOLATION_ROOT=$validationRoot"
+    & $Action
+  } catch {
+    $primaryError = $_
+  } finally {
+    foreach ($entry in $savedEnvironment.GetEnumerator()) {
+      try {
+        [Environment]::SetEnvironmentVariable(
+          $entry.Key,
+          $entry.Value,
+          [EnvironmentVariableTarget]::Process
+        )
+      } catch {
+        $cleanupErrors.Add($_.Exception)
+      }
+    }
+    try {
+      Remove-Item -LiteralPath $validationRoot -Recurse -Force -ErrorAction Stop
+    } catch {
+      if (-not (
+          $_.Exception -is [Management.Automation.ItemNotFoundException] -or
+          $_.Exception -is [IO.DirectoryNotFoundException]
+        )) {
+        $cleanupErrors.Add($_.Exception)
+      }
+    }
+    try {
+      Assert-WindowsShellProfileUnchanged $defaultSupport $supportBefore
+    } catch {
+      $cleanupErrors.Add($_.Exception)
+    }
+    try {
+      Assert-WindowsShellProfileUnchanged $defaultLocalAppData $localAppDataBefore
+    } catch {
+      $cleanupErrors.Add($_.Exception)
+    }
+    if ($cleanupErrors.Count -eq 0) {
+      Write-Host "WINDOWS_SHELL_DEFAULT_PROFILE_UNCHANGED=verified"
+    }
+  }
+
+  if ($null -ne $primaryError) {
+    if ($cleanupErrors.Count -eq 0) {
+      throw $primaryError
+    }
+    $failures = [Collections.Generic.List[Exception]]::new()
+    $failures.Add($primaryError.Exception)
+    foreach ($cleanupError in $cleanupErrors) {
+      $failures.Add($cleanupError)
+    }
+    throw [AggregateException]::new(
+      "Windows shell validation failed and isolation cleanup detected additional errors.",
+      $failures.ToArray()
+    )
+  }
+  if ($cleanupErrors.Count -eq 1) {
+    throw $cleanupErrors[0]
+  }
+  if ($cleanupErrors.Count -gt 1) {
+    throw [AggregateException]::new(
+      "Windows shell validation isolation cleanup detected multiple errors.",
+      $cleanupErrors.ToArray()
+    )
+  }
+}
+
 # Builds the release graphcoded/graphcode products and stages the pinned Swift
 # runtime DLLs beside them. Both the shell integration smoke and real packaging
 # consume this, so a packaging-only run no longer depends on a prior shell run.
@@ -897,6 +1064,16 @@ function Invoke-Task([string] $name) {
       }
     }
     "windows-shell" {
+      Write-Host "==> Windows shell validation isolation contract"
+      $isolationResults = Invoke-Pester `
+        -Script (Join-Path $repoRoot "Tools\windows\Tests\ValidationIsolation.Tests.ps1") `
+        -PassThru
+      if ($isolationResults.TotalCount -le 0 -or
+          $isolationResults.PassedCount -ne $isolationResults.TotalCount -or
+          $isolationResults.FailedCount -ne 0) {
+        throw "Windows shell validation isolation contract did not pass a nonzero test count"
+      }
+      Write-Host "WINDOWS_SHELL_ISOLATION_CONTRACT_CASES=$($isolationResults.TotalCount)"
       $uiaProductProcessBaseline = [Collections.Generic.HashSet[string]]::new(
         [StringComparer]::OrdinalIgnoreCase
       )
@@ -1094,7 +1271,13 @@ if ($selected.Count -eq 0) {
 }
 try {
   foreach ($name in $selected) {
-    Invoke-Task $name
+    if ($name -eq "windows-shell" -and -not $DryRun) {
+      Invoke-WindowsShellValidationIsolation -Action {
+        Invoke-Task "windows-shell"
+      }
+    } else {
+      Invoke-Task $name
+    }
   }
 } finally {
   $junctions = @()
