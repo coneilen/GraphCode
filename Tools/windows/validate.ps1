@@ -793,6 +793,17 @@ function Invoke-Task([string] $name) {
       New-Item -ItemType Directory -Force $smokeSupport | Out-Null
       $installedBin = Join-Path $smokeSupport "bin"
       Install-AtomicRuntimePackage $releaseBin $installedBin
+      $redirectedProfileScratch = Join-Path $env:TEMP "graphcode-g558-$([guid]::NewGuid())"
+      try {
+        Invoke-Native "Redirected USERPROFILE daemon regression" {
+          & (Join-Path $repoRoot "Tools\windows\Tests\RedirectedUserProfileDaemon.Tests.ps1") `
+            -DaemonExecutable (Join-Path $installedBin "graphcoded.exe") `
+            -ScratchRoot $redirectedProfileScratch
+        }
+      } finally {
+        Remove-Item -LiteralPath $redirectedProfileScratch -Recurse -Force `
+          -ErrorAction SilentlyContinue
+      }
       $daemonProcess = $null
       $secondDaemonProcess = $null
       $cliProcess = $null
