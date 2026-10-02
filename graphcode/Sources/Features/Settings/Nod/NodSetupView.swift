@@ -21,7 +21,7 @@ struct NodSetupView: View {
         .fixedSize(horizontal: false, vertical: true)
       }
 
-      HStack(spacing: 10) {
+      HStack(alignment: .top, spacing: 10) {
         ForEach(NodEngine.allCases, id: \.self) { engine in
           NodEngineCard(
             engine: engine,
@@ -30,6 +30,7 @@ struct NodSetupView: View {
           ) { model.selectEngine(engine) }
         }
       }
+      .fixedSize(horizontal: false, vertical: true)
 
       VStack(alignment: .leading, spacing: 10) {
         Text("SIGN IN")
@@ -76,6 +77,12 @@ struct NodEngineCard: View {
           Text(engine.displayName)
             .font(.system(size: 13, weight: .semibold))
           Spacer(minLength: 4)
+          if isSignedIn {
+            Image(systemName: "checkmark")
+              .font(.system(size: 10.5, weight: .semibold))
+              .foregroundStyle(NodSetupInk.ok)
+              .help("Signed in")
+          }
           Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
             .foregroundStyle(isSelected ? Theme.paneFocusTint : .white.opacity(0.25))
         }
@@ -83,21 +90,13 @@ struct NodEngineCard: View {
           .font(.system(size: 11.5))
           .foregroundStyle(.white.opacity(0.6))
           .fixedSize(horizontal: false, vertical: true)
-        Spacer(minLength: 0)
-        HStack {
-          Text(NodModelCatalog.familySummary(for: engine))
-            .font(.system(size: 11, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.55))
-          Spacer(minLength: 4)
-          if isSignedIn {
-            Label("signed in", systemImage: "checkmark")
-              .font(.system(size: 10.5, weight: .medium))
-              .foregroundStyle(NodSetupInk.ok)
-          }
-        }
+        Text(NodModelCatalog.familySummary(for: engine))
+          .font(.system(size: 11, design: .monospaced))
+          .foregroundStyle(.white.opacity(0.55))
+          .padding(.top, 4)
       }
       .padding(13)
-      .frame(maxWidth: .infinity, minHeight: 112, alignment: .topLeading)
+      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
       .background(
         isSelected ? Theme.paneFocusTint.opacity(0.1) : Color.white.opacity(0.03),
         in: RoundedRectangle(cornerRadius: 11)

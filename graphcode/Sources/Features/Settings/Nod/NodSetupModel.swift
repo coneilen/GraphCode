@@ -157,3 +157,7 @@ final class NodSetupModel {
     }
   }
 }
+
+extension NodSetupModel: Identifiable {
+  nonisolated var id: ObjectIdentifier { ObjectIdentifier(self) }
+}

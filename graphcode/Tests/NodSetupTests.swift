@@ -299,3 +299,224 @@ import Testing
         == "7 models available · premium requests 212 / 300 this month")
   }
 }
+
+@Suite struct AgentMenuSectionTests {
+  @Test func groupsChatThenTerminal() {
+    let sections = AgentMenuSection.sections(for: .sketch)
+    #expect(sections.map(\.title) == ["Chat", "Terminal"])
+    #expect(sections[0].entries.map(\.backend) == [.nod])
+    #expect(
+      sections[1].entries.map(\.backend) == [.claudeCode, .codex, .copilotCLI, .openCode, .pi])
+  }
+
+  @Test func greyingFollowsCanHost() {
+    for loopType in LoopType.allCases {
+      for entry in AgentMenuSection.sections(for: loopType).flatMap(\.entries) {
+        #expect(entry.isEnabled == entry.backend.canHost(loopType))
+        #expect((entry.note == nil) == entry.isEnabled)
+      }
+    }
+  }
+
+  @Test func piIsGreyedForACompositeWithTheReason() {
+    let pi = AgentMenuSection.sections(for: .composite)[1].entries.first { $0.backend == .pi }
+    #expect(pi?.isEnabled == CLISessionBackendKind.pi.canHost(.composite))
+    if pi?.isEnabled == false { #expect(pi?.note == "no sub-agents") }
+  }
+
+  @Test func nodWaitsForItsRuntime() {
+    let nod = AgentMenuSection.sections(for: .sketch)[0].entries[0]
+    #expect(nod.isEnabled == CLISessionBackendKind.nod.isSpiked)
+    if !nod.isEnabled { #expect(nod.note == "not available yet") }
+  }
+
+  @Test func labelNamesNodsModel() {
+    let nod = NodSettings()
+    #expect(
+      AgentMenuSection.label(backend: .nod, tier: nil, loopType: .goalBased, nod: nod)
+        == "Nod · Opus")
+    #expect(
+      AgentMenuSection.label(backend: .nod, tier: .fast, loopType: .goalBased, nod: nod)
+        == "Nod · Haiku")
+    #expect(
+      AgentMenuSection.label(backend: .codex, tier: .fast, loopType: .goalBased, nod: nod)
+        == "Codex")
+  }
+}
+
+@Suite struct NodCardPresentationTests {
+  static func nodNode(state: LoopState = .running, activity: String? = nil) -> LoopNode {
+    LoopNode(
+      title: "Monetization", loopType: .goalBased,
+      goal: GoalSpec(summary: "every paid route enforces the cap"), backend: .nod,
+      activity: activity, state: state)
+  }
+
+  @Test func goalClausesBecomeAProgressBar() {
+    let card = LoopCardPresentation(
+      node: Self.nodNode(activity: "Running swift test · turn 4"),
+      nod: NodCardDetail(goalMet: 1, goalTotal: 2))
+    #expect(card.liveLine == "Running swift test · turn 4")
+    #expect(card.detail == .progress(.init(fraction: 0.5, readings: "goal 1 / 2", change: "")))
+    #expect(card.showsNodGlyph)
+    #expect(card.meta.contains("Nod"))
+  }
+
+  @Test func allClausesMetFillsTheBar() {
+    let card = LoopCardPresentation(
+      node: Self.nodNode(), nod: NodCardDetail(goalMet: 3, goalTotal: 3))
+    #expect(card.detail == .progress(.init(fraction: 1, readings: "goal 3 / 3", change: "all met")))
+  }
+
+  @Test func aPendingAskOutranksProgressAndTheGenericReply() {
+    let ask = NodCardDetail.Ask(
+      askID: "a1", kind: .shell, subject: "swift test", answerableFromCard: true)
+    let card = LoopCardPresentation(
+      node: Self.nodNode(state: .awaitingInput, activity: "asks to run swift test"),
+      nod: NodCardDetail(goalMet: 1, goalTotal: 2, ask: ask))
+    #expect(card.detail == .nodAsk(ask))
+    #expect(card.liveLine == "asks to run swift test")
+  }
+
+  @Test func withoutNodStateANodCardDrawsLikeAnyOther() {
+    let card = LoopCardPresentation(node: Self.nodNode())
+    #expect(card.detail == .none)
+    #expect(card.showsNodGlyph)
+  }
+
+  @Test func cliCardsIgnoreNodDetailAndKeepTheBadgeRule() {
+    let codex = LoopNode(title: "Billing UI", loopType: .turnBased, backend: .codex)
+    let card = LoopCardPresentation(node: codex, nod: NodCardDetail(goalMet: 1, goalTotal: 2))
+    #expect(card.detail == .none)
+    #expect(!card.showsNodGlyph)
+    #expect(card.meta.contains("Codex"))
+    let claude = LoopCardPresentation(node: LoopNode(title: "x", loopType: .sketch))
+    #expect(!claude.meta.contains("Claude Code"))
+  }
+
+  @Test func zeroClausesDrawNoBar() {
+    let card = LoopCardPresentation(node: Self.nodNode(), nod: NodCardDetail(goalMet: 0, goalTotal: 0))
+    #expect(card.detail == .none)
+  }
+}
+
+@Suite struct NodMCPServerTests {
+  @Test func parsesLocalAndRemoteServers() {
+    let json = #"""
+      {"mcpServers":{
+        "github":{"type":"http","url":"https://api.githubcopilot.com/mcp","headers":{"Authorization":"Bearer x"}},
+        "sentry":{"type":"http","url":"https://mcp.sentry.dev/mcp"},
+        "legacy":{"url":"https://example.com/sse"},
+        "files":{"command":"npx","args":["fs"]},
+        "graphcode":{"command":"graphcode"}
+      }}
+      """#
+    let servers = NodMCPServer.parse(Data(json.utf8), projectName: "graphcode")
+    #expect(servers.map(\.name) == ["files", "github", "legacy", "sentry"])
+    #expect(servers.filter(\.needsSignIn).map(\.name) == ["legacy", "sentry"])
+    #expect(servers.allSatisfy { $0.source == .project("graphcode") })
+  }
+
+  @Test func brokenJSONYieldsNothing() {
+    #expect(NodMCPServer.parse(Data("{".utf8), projectName: "p").isEmpty)
+    #expect(NodMCPServer.parse(Data("[]".utf8), projectName: "p").isEmpty)
+  }
+
+  @Test func loadsBuiltInFirstAndFirstProjectWinsOnAClash() throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: "nod-mcp-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    for (name, body) in [
+      ("a", #"{"mcpServers":{"github":{"command":"gh"}}}"#),
+      ("b", #"{"mcpServers":{"github":{"url":"https://x"},"sentry":{"url":"https://s"}}}"#),
+    ] {
+      let dir = root.appending(path: name)
+      try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      try Data(body.utf8).write(to: dir.appending(path: ".mcp.json"))
+    }
+    let servers = NodMCPServer.load(projects: [
+      ProjectRef(path: root.appending(path: "a").path, name: "a"),
+      ProjectRef(path: root.appending(path: "b").path, name: "b"),
+      ProjectRef(path: "ssh://host/repo", name: "remote"),
+    ])
+    #expect(servers.map(\.name) == ["graphcode", "github", "sentry"])
+    #expect(servers[1].source == .project("a"))
+    #expect(!servers[1].needsSignIn)
+  }
+}
+
+@MainActor
+@Suite struct NodSetupModelTests {
+  final class Box: @unchecked Sendable {
+    var settings = NodSettings()
+    var opened: [URL] = []
+  }
+
+  static func model(
+    _ box: Box, credentials: NodCredentialStore = .inMemory(),
+    flow: CopilotDeviceFlow = CopilotDeviceFlow(clientID: nil, transport: { _ in (Data(), 500) })
+  ) -> NodSetupModel {
+    NodSetupModel(
+      credentials: credentials, deviceFlow: flow,
+      readSettings: { box.settings }, writeSettings: { box.settings = $0 },
+      openURL: { box.opened.append($0) }, claudeCodeSignInFound: { true })
+  }
+
+  @Test func savingAValidKeySignsClaudeIn() throws {
+    let box = Box()
+    let store = NodCredentialStore.inMemory()
+    let model = Self.model(box, credentials: store)
+    #expect(!model.isSignedIn(.claudeAgentSDK))
+    model.apiKeyDraft = "gho_wrongfield_abcdefghijk"
+    model.saveAPIKey()
+    #expect(model.apiKeyError != nil)
+    #expect(!model.isSignedIn(.claudeAgentSDK))
+    model.apiKeyDraft = " sk-ant-api03-abcdefghijklmnop "
+    model.saveAPIKey()
+    #expect(model.apiKeyError == nil)
+    #expect(model.apiKeyDraft.isEmpty)
+    #expect(model.isSignedIn(.claudeAgentSDK))
+    #expect(try store.read(.anthropicAPIKey) == "sk-ant-api03-abcdefghijklmnop")
+  }
+
+  @Test func claudeCodeSignInIsNotOfferedWhileGated() {
+    #expect(!Self.model(Box()).claudeCodeSignInFound)
+  }
+
+  @Test func selectingAnEngineWritesSettings() {
+    let box = Box()
+    let model = Self.model(box)
+    model.selectEngine(.copilotSDK)
+    #expect(box.settings.engine == .copilotSDK)
+    #expect(model.settings.engine == .copilotSDK)
+  }
+
+  @Test func copilotDeviceFlowEndsSignedInWithTheTokenInTheKeychain() async throws {
+    let box = Box()
+    let store = NodCredentialStore.inMemory()
+    let script = CopilotDeviceFlowTests.Script([
+      (
+        "/login/device/code", 200,
+        #"{"device_code":"dev","user_code":"8F2K-QW7D","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}"#
+      ),
+      ("/login/oauth/access_token", 200, #"{"access_token":"gho_abc"}"#),
+      ("api.github.com/user", 200, #"{"login":"scgopi"}"#),
+    ])
+    let model = Self.model(box, credentials: store, flow: script.flow(now: Date()))
+    model.startCopilotSignIn()
+    await model.waitForCopilotSignIn()
+    #expect(model.copilotPhase == .signedIn(.init(login: "scgopi")))
+    #expect(try store.read(.githubCopilot) == "gho_abc")
+    #expect(model.isSignedIn(.copilotSDK))
+    #expect(box.opened == [URL(string: "https://github.com/login/device")!])
+    model.signOut(.copilotSDK)
+    #expect(model.copilotPhase == .idle)
+    #expect(!model.isSignedIn(.copilotSDK))
+  }
+
+  @Test func anUnconfiguredBuildSaysSo() async {
+    let model = Self.model(Box())
+    model.startCopilotSignIn()
+    await model.waitForCopilotSignIn()
+    #expect(model.copilotPhase == .failed("This build has no GitHub sign-in configured."))
+  }
+}

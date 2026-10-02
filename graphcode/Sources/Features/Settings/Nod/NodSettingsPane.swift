@@ -136,7 +136,7 @@ struct NodSettingsPane: View {
         }
       }
       HStack {
-        TextField("swift test *", text: $newPattern)
+        TextField("Add a pattern, e.g. npm test *", text: $newPattern)
           .font(.system(.body, design: .monospaced))
           .onSubmit(addPattern)
         Button("Add", action: addPattern)
