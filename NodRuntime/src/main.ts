@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { mkdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { parseArgs } from "node:util";
 import { claudeExecutable, copilotRuntime } from "./agentRuntimes";
@@ -25,13 +25,19 @@ graphcode-nod -p <prompt> [--engine claude|copilot] [--model <id>]`;
 
 const loopTypes = new Set(["main", "goal", "timed", "turn", "composite"]);
 
+/** Claude Code's config directory: Nod's own, beside the per-node state directories. */
+function claudeConfigDirectory(): string {
+  const state = process.env.NOD_STATE;
+  return state ? join(dirname(state), "claude") : join(supportDirectory(), "nod", "claude");
+}
+
 export function makeEngine(kind: NodEngineKind): Engine {
   if (kind === "copilot") {
     return new CopilotEngine({ githubToken: githubToken(), cliPath: copilotRuntime() });
   }
   return new ClaudeEngine({
     apiKey: anthropicAPIKey(),
-    configDir: join(supportDirectory(), "nod", "claude"),
+    configDir: claudeConfigDirectory(),
     executable: claudeExecutable(),
   });
 }
@@ -76,11 +82,13 @@ async function main(argv: string[]): Promise<number> {
     }
   }
 
-  if (!values.node || !values.cwd) throw new Error(`--node and --cwd are required\n${USAGE}`);
+  const nodeID = values.node ?? process.env.NOD_NODE_ID;
+  if (!nodeID || !values.cwd) throw new Error(`--node (or NOD_NODE_ID) and --cwd are required\n${USAGE}`);
   const loopType = (values["loop-type"] ?? "main") as LoopType;
   if (!loopTypes.has(loopType)) throw new Error(`unknown loop type ${loopType}`);
   const cwd = resolve(values.cwd);
-  const stateDir = join(supportDirectory(), "nod", values.node);
+  // The launcher always sets NOD_STATE; a launch may not carry GRAPHCODE_SUPPORT_DIR.
+  const stateDir = process.env.NOD_STATE || join(supportDirectory(), "nod", nodeID);
   mkdirSync(stateDir, { recursive: true });
 
   const log = new EventLog(join(stateDir, "events.jsonl"));
@@ -89,7 +97,7 @@ async function main(argv: string[]): Promise<number> {
   const presence = new PresenceReporter(process.env.ZMX_SESSION);
   const engine = makeEngine(engineKind);
   const runtime = new NodRuntime({
-    nodeID: values.node,
+    nodeID,
     cwd,
     stateDir,
     loopType,

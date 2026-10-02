@@ -142,9 +142,11 @@ of sitting in Claude Code's retry backoff.
 
 With `SIGN_IDENTITY` set it signs `graphcode-nod` and the Copilot runtime with the hardened
 runtime and `packaging/entitlements.plist` (a compiled Bun binary needs the JIT
-entitlements). The daemon launches `<support-dir>/bin/graphcode-nod`, a symlink into the
-bundle placed by the launch side; the runtime resolves its real path before looking beside
-itself.
+entitlements). The app's panes run `<App>/Contents/Helpers/nod/graphcode-nod`; the app
+copies the whole folder to `<support-dir>/bin/nod/` for graphcoded (PROTOCOL.md, Launch).
+The runtime resolves its own real path before looking beside itself, so a symlinked copy
+works too. It keeps its state in `$NOD_STATE` (set on every launch), falling back to
+`<support-dir>/nod/<node>/`, and takes `$NOD_NODE_ID` when `--node` is absent.
 
 A compiled binary cannot load the SDKs' platform packages (they resolve to the build
 machine's `node_modules`), so `agentRuntimes.ts` looks for each agent runtime explicitly:
