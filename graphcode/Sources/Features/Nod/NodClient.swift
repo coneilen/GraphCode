@@ -174,17 +174,20 @@ extension DependencyValues {
 }
 
 /// Where "Always in <project>" outlives the run: `GraphcodeSettings.nod.shellAllowlist`,
-/// the list Settings › Agents › Nod edits.
+/// the list Settings › Agents › Nod edits. Trims, and skips blanks and duplicates, the way
+/// that editor's own `NodSettings.addAllowlistPattern` does.
 struct NodAllowlistClient: Sendable {
   var allowShellCommand: @Sendable (String) async -> Void
 }
 
 extension NodAllowlistClient: DependencyKey {
   static let liveValue = NodAllowlistClient { command in
+    let pattern = command.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !pattern.isEmpty else { return }
     await MainActor.run {
       let model = SettingsModel.shared
-      guard !model.settings.nod.shellAllowlist.contains(command) else { return }
-      model.settings.nod.shellAllowlist.append(command)
+      guard !model.settings.nod.shellAllowlist.contains(pattern) else { return }
+      model.settings.nod.shellAllowlist.append(pattern)
     }
   }
 
