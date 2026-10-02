@@ -275,13 +275,16 @@ extension [NodTranscript.Item] {
 
 @Suite
 struct NodEventTailTests {
-  /// The runtime's launcher names the directory with `uuidString` as is; a lowercased copy
+  /// The pane reads the directory the launcher names: `uuidString` as is. A lowercased copy
   /// would split the pane from the runtime on a case-sensitive volume.
   @Test
   func theStateDirectoryIsTheUppercaseNodeID() throws {
     let id = try #require(UUID(uuidString: "9b3408f9-9b16-447f-a439-fc2aa8c02d06"))
-    let url = NodStateDirectory.url(forNode: id, supportDirectory: URL(fileURLWithPath: "/s"))
-    #expect(url.path == "/s/nod/9B3408F9-9B16-447F-A439-FC2AA8C02D06")
+    let url = NodRuntimeLocator.stateDirectory(forNodeID: id)
+    #expect(url.lastPathComponent == "9B3408F9-9B16-447F-A439-FC2AA8C02D06")
+    #expect(
+      url.deletingLastPathComponent().path
+        == SupportDirectory.url.appendingPathComponent("nod").path)
   }
 
   @Test

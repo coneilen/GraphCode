@@ -31,6 +31,8 @@ func fail(_ message: String, code: Int32 = ExitCode.usage) -> Never {
   exit(code)
 }
 
+NodRuntimeLocator.installAvailability()
+
 let command: GraphcodeCommand
 do {
   command = try GraphcodeCommand.parse(Array(CommandLine.arguments.dropFirst()))
