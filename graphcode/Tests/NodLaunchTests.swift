@@ -1,0 +1,397 @@
+import Foundation
+import Testing
+
+@testable import GraphcodeKit
+
+#if canImport(Darwin)
+  import Darwin
+#endif
+
+private let start = Date(timeIntervalSince1970: 1_790_000_000)
+
+private func records(_ events: [NodEvent]) -> [NodEventRecord] {
+  events.enumerated().map {
+    NodEventRecord(seq: $0.offset + 1, at: start.addingTimeInterval(Double($0.offset)), event: $0.element)
+  }
+}
+
+private let started = NodEvent.sessionStarted(
+  .init(engine: .claudeAgentSDK, model: "sonnet", conversationID: "conv-1", resumed: false))
+
+private func ask(_ id: String, fromCard: Bool = false) -> NodEvent {
+  .permissionAsked(
+    .init(
+      askID: id, kind: .network, subject: "swift package resolve", reason: "network",
+      answerableFromCard: fromCard))
+}
+
+@Suite
+struct NodSessionFoldTests {
+  @Test
+  func turnBoundariesSayBusyThenIdle() {
+    var fold = NodSessionFold(records: records([started]))
+    #expect(fold.presence == .idle)
+    fold = NodSessionFold(records: records([started, .turnStarted(.init(turn: 1, origin: .user))]))
+    #expect(fold.presence == .busy)
+    fold = NodSessionFold(
+      records: records([
+        started, .turnStarted(.init(turn: 1, origin: .user)),
+        .turnEnded(.init(turn: 1, filesChanged: 0, added: 0, removed: 0, summary: nil)),
+      ]))
+    #expect(fold.presence == .idle)
+    #expect(NodSessionFold().presence == nil)
+  }
+
+  @Test
+  func anOpenAskIsNeedsYouUntilItIsAnswered() {
+    let asked = records([started, .turnStarted(.init(turn: 1, origin: .user)), ask("a1")])
+    let fold = NodSessionFold(records: asked)
+    #expect(fold.presence == .awaitingInput)
+    #expect(fold.activityLine == "asks to run swift package resolve")
+    #expect(fold.cardState.pendingAsk?.askID == "a1")
+    #expect(fold.cardState.pendingAsk?.answerableFromCard == false)
+
+    let answered = NodSessionFold(
+      records: records([
+        started, .turnStarted(.init(turn: 1, origin: .user)), ask("a1"),
+        .permissionResolved(.init(askID: "a1", decision: .allowOnce)),
+      ]))
+    #expect(answered.presence == .busy)
+    #expect(answered.cardState.pendingAsk == nil)
+  }
+
+  /// A new run is a new process: an ask the last one left open asks nothing of anybody.
+  @Test
+  func aNewRunForgetsTheLastRunsAsksAndSpend() {
+    let fold = NodSessionFold(
+      records: records([
+        started, ask("a1"),
+        .usage(.init(inputTokens: 10, outputTokens: 2, contextUsed: 0.1)),
+        started,
+      ]))
+    #expect(fold.presence == .idle)
+    #expect(fold.openAsks.isEmpty)
+    #expect(fold.usageSample == nil)
+  }
+
+  @Test
+  func failuresAreNeedsYouExceptAFullContext() {
+    func presence(after kind: NodFailureKind) -> Presence? {
+      NodSessionFold(
+        records: records([
+          started, .turnStarted(.init(turn: 1, origin: .user)),
+          .failure(.init(kind: kind, message: "stopped")),
+        ])
+      ).presence
+    }
+    #expect(presence(after: .signInExpired) == .awaitingInput)
+    #expect(presence(after: .spendCap) == .awaitingInput)
+    #expect(presence(after: .permissionUnavailable) == .awaitingInput)
+    #expect(presence(after: .engineError) == .awaitingInput)
+    #expect(presence(after: .contextFull) == .busy)
+
+    let resumed = NodSessionFold(
+      records: records([
+        started, .failure(.init(kind: .signInExpired, message: "expired")),
+        .turnStarted(.init(turn: 2, origin: .user)),
+      ]))
+    #expect(resumed.presence == .busy)
+  }
+
+  @Test
+  func theLiveLineFollowsToolsUntilTheyFinish() {
+    let call = NodEvent.toolCall(.init(turn: 1, callID: "c1", tool: "Grep", title: "Search \"UsageGate\""))
+    var events: [NodEvent] = [started, .turnStarted(.init(turn: 1, origin: .user)), call]
+    #expect(NodSessionFold(records: records(events)).activityLine == "Search \"UsageGate\"")
+    events.append(.toolResult(.init(callID: "c1", status: .ok, summary: "6 hits")))
+    #expect(NodSessionFold(records: records(events)).activityLine == nil)
+    events.append(.activity(.init(line: "Running swift test · turn 1")))
+    events.append(.toolResult(.init(callID: "c9", status: .ok, summary: "")))
+    #expect(NodSessionFold(records: records(events)).activityLine == "Running swift test · turn 1")
+    events.append(.turnEnded(.init(turn: 1, filesChanged: 1, added: 3, removed: 1, summary: nil)))
+    #expect(NodSessionFold(records: records(events)).activityLine == nil)
+  }
+
+  @Test
+  func usageIsTheNewestRunningTotal() {
+    let fold = NodSessionFold(
+      records: records([
+        started,
+        .usage(.init(inputTokens: 10, outputTokens: 2, costUSD: 0.01, contextUsed: 0.1)),
+        .usage(.init(inputTokens: 30, outputTokens: 5, costUSD: 0.04, contextUsed: 0.2)),
+      ]))
+    #expect(
+      fold.usageSample
+        == UsageSample(
+          inputTokens: 30, outputTokens: 5, costUSD: 0.04, reportedAt: start.addingTimeInterval(2)))
+  }
+
+  @Test
+  func theNewestGoalCheckIsTheVerdictAndTheProgress() {
+    func check(_ met: [Bool]) -> NodEvent {
+      .goalCheck(
+        .init(
+          turn: 1, evaluatorModel: "haiku",
+          clauses: met.enumerated().map { NodGoalClause(text: "c\($0.offset)", met: $0.element) },
+          met: met.allSatisfy { $0 }))
+    }
+    let notYet = NodSessionFold(records: records([started, check([true, false])]))
+    #expect(notYet.goalVerdict?.met == false)
+    #expect(notYet.cardState.goalProgress == NodGoalProgress(met: 1, total: 2))
+
+    let met = NodSessionFold(records: records([started, check([true, false]), check([true, true])]))
+    #expect(met.goalVerdict?.met == true)
+    #expect(met.goalVerdict?.detail == "2 of 2 clauses met")
+    #expect(met.goalVerdict?.recordedAt == start.addingTimeInterval(2))
+    #expect(NodSessionFold(records: records([started])).goalVerdict == nil)
+  }
+
+  @Test
+  func unknownEventsChangeNothing() {
+    let known = NodSessionFold(records: records([started, .turnStarted(.init(turn: 1, origin: .user))]))
+    var withUnknown = known
+    withUnknown.apply(NodEventRecord(seq: 3, at: start, event: .unknown("fromTheFuture")))
+    #expect(withUnknown.presence == known.presence)
+    #expect(withUnknown.activityLine == known.activityLine)
+  }
+}
+
+@Suite
+struct NodSessionLogTests {
+  @Test
+  func readsTheLogSkippingATornLastLine() throws {
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent("nod-\(UUID().uuidString).jsonl")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let encoder = NodProtocol.makeEncoder()
+    var data = Data()
+    for record in records([started, .turnStarted(.init(turn: 1, origin: .user))]) {
+      data.append(try encoder.encode(record))
+      data.append(UInt8(ascii: "\n"))
+    }
+    data.append(Data(#"{"v":1,"seq":3,"at":"2026-"#.utf8))
+    try data.write(to: url)
+    let read = NodSessionLog.records(inLogAt: url)
+    #expect(read.map(\.seq) == [1, 2])
+    #expect(NodSessionFold(records: read).presence == .busy)
+  }
+
+  @Test
+  func summaryBeatsComeFromTurnsNarrationAndTools() {
+    let reading = NodSessionLog.reading(
+      of: records([
+        started,
+        .turnStarted(.init(turn: 1, origin: .user)),
+        .assistantText(.init(turn: 1, messageID: "m1", delta: "Found it. ExportRoute ", final: false)),
+        .assistantText(
+          .init(turn: 1, messageID: "m1", delta: "is registered before UsageGate runs.", final: true)),
+        .toolCall(.init(turn: 1, callID: "c1", tool: "Read", title: "Read UsageGate.swift")),
+        .turnEnded(.init(turn: 1, filesChanged: 0, added: 0, removed: 0, summary: nil)),
+      ]), metricSamples: [])
+    #expect(!reading.isEmpty)
+    #expect(reading.turns == [start.addingTimeInterval(1)])
+    #expect(reading.closing?.contains("ExportRoute is registered before UsageGate runs.") == true)
+  }
+}
+
+@Suite(.serialized)
+struct NodLaunchArgumentTests {
+  private let nodeID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+
+  @Test
+  func theRuntimeTakesItsPromptAndBriefingByFlag() {
+    let nod = CLISessionBackendKind.nod
+    #expect(
+      nod.launchArguments(prompt: "fix the cap", tier: .standard, briefingPath: "/b/AGENTS.md")
+        == ["--briefing", "/b/AGENTS.md", "--prompt", "fix the cap"])
+    #expect(nod.launchArguments(prompt: nil, tier: .standard) == [])
+    #expect(nod.resumeArguments(sessionID: "conv-1") == ["--resume", "conv-1"])
+    #expect(nod.supportsResume)
+    #expect(nod.promptFlag == "--prompt")
+    #expect(nod.recordsGoalVerdict)
+  }
+
+  @Test
+  func nodArgumentsNameTheNodeEngineLoopTypeAndModel() {
+    var settings = GraphcodeSettings()
+    settings.nod.engine = .copilotSDK
+    settings.nod.modelsByLoopType = [LoopType.goalBased.rawValue: "opus"]
+    #expect(
+      CLISessionBackendKind.nod.nodArguments(
+        nodeID: nodeID, loopType: .goalBased, settings: settings, workingDirectory: "/w",
+        goalFile: "/s/goal.md")
+        == [
+          "--node", nodeID.uuidString, "--cwd", "/w", "--engine", "copilot", "--loop-type", "goal",
+          "--model", "opus", "--goal-file", "/s/goal.md",
+        ])
+    #expect(
+      CLISessionBackendKind.nod.nodArguments(
+        nodeID: nodeID, loopType: .sketch, settings: GraphcodeSettings())
+        == ["--node", nodeID.uuidString, "--engine", "claude", "--loop-type", "main"])
+    for kind in CLISessionBackendKind.allCases where kind != .nod {
+      #expect(kind.nodArguments(nodeID: nodeID, loopType: .goalBased, settings: settings).isEmpty)
+    }
+    #expect(LoopType.timeBased.nodArgument == "timed")
+    #expect(LoopType.turnBased.nodArgument == "turn")
+    #expect(LoopType.composite.nodArgument == "composite")
+  }
+
+  @Test
+  func theDaemonLaunchesTheBundledRuntimeWithItsStateDirectory() throws {
+    NodRuntimeLocator.binaryOverride = URL(fileURLWithPath: "/Apps/GraphCode.app/bin/graphcode-nod")
+    defer { NodRuntimeLocator.binaryOverride = nil }
+    let node = LoopNode(
+      id: nodeID, title: "Cap", loopType: .turnBased, checkDescription: "tests pass",
+      backend: .nod)
+    let arguments = try #require(
+      ZmxSessionLauncher.arguments(forNode: node, settings: GraphcodeSettings()))
+    #expect(Array(arguments.prefix(3)) == ["run", "graphcode-\(nodeID.uuidString)", "-d"])
+    let script = arguments[7]
+    let state = NodRuntimeLocator.stateDirectory(forNodeID: nodeID).path
+    #expect(script.hasPrefix("exec env NOD_STATE=\"\(state)\" /Apps/GraphCode.app/bin/graphcode-nod "))
+    let argv = Array(arguments.dropFirst(9))
+    #expect(Array(argv.prefix(6)) == ["--node", nodeID.uuidString, "--engine", "claude", "--loop-type", "turn"])
+    #expect(argv.suffix(2).first == "--prompt")
+
+    let resume = try #require(
+      ZmxSessionLauncher.resumeArguments(
+        forNode: node, sessionID: "conv-1", settings: GraphcodeSettings()))
+    #expect(resume[7] == script)
+    #expect(Array(resume.suffix(2)) == ["--resume", "conv-1"])
+    #expect(!resume.contains("--prompt"))
+  }
+
+  @Test
+  func aMainLoopWithNothingToSayStillLaunches() throws {
+    NodRuntimeLocator.binaryOverride = URL(fileURLWithPath: "/r/graphcode-nod")
+    defer { NodRuntimeLocator.binaryOverride = nil }
+    let node = LoopNode(id: nodeID, title: "Chat", loopType: .sketch, backend: .nod)
+    let arguments = try #require(
+      ZmxSessionLauncher.arguments(forNode: node, settings: GraphcodeSettings()))
+    #expect(
+      Array(arguments.dropFirst(9))
+        == ["--node", nodeID.uuidString, "--engine", "claude", "--loop-type", "main"])
+    // A CLI with nothing to say still gets no argv — that path is unchanged.
+    #expect(ZmxSessionLauncher.arguments(forNode: LoopNode(title: "Chat", loopType: .sketch)) == nil)
+  }
+
+  @Test
+  func noRuntimeMeansNoLaunchAndARemoteProjectHasNone() {
+    NodRuntimeLocator.binaryOverride = nil
+    let node = LoopNode(id: nodeID, title: "Chat", loopType: .sketch, backend: .nod)
+    if NodRuntimeLocator.binaryURL() == nil {
+      #expect(ZmxSessionLauncher.arguments(forNode: node, settings: GraphcodeSettings()) == nil)
+    }
+    NodRuntimeLocator.binaryOverride = URL(fileURLWithPath: "/r/graphcode-nod")
+    defer { NodRuntimeLocator.binaryOverride = nil }
+    #expect(ZmxSessionLauncher.executable(forNode: node, projectPath: "ssh://host/repo") == nil)
+  }
+
+  @Test
+  func aGoalLoopsConditionIsWrittenWhereGoalFilePoints() throws {
+    let node = LoopNode(
+      id: UUID(), title: "Cap", loopType: .goalBased,
+      goal: GoalSpec(summary: "Every paid route goes through UsageGate"), backend: .nod)
+    let file = try #require(NodRuntimeLocator.writeGoal(of: node))
+    defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+    #expect(file.lastPathComponent == "goal.md")
+    #expect(try String(contentsOf: file, encoding: .utf8) == "Every paid route goes through UsageGate")
+    #expect(NodRuntimeLocator.writeGoal(of: LoopNode(title: "t", backend: .nod)) == nil)
+  }
+}
+
+private func failure(of result: Result<Void, NodControlClient.Failure>)
+  -> NodControlClient.Failure?
+{
+  if case .failure(let failure) = result { return failure }
+  return nil
+}
+
+@Suite
+struct NodControlClientTests {
+  @Test
+  func repliesAreOkOrARefusalWithItsReason() {
+    #expect(failure(of: NodControlClient.parseReply(Data(#"{"ok":true}"#.utf8))) == nil)
+    #expect(
+      failure(of: NodControlClient.parseReply(Data(#"{"ok":false,"error":"busy"}"#.utf8)))
+        == .refused("busy"))
+    #expect(failure(of: NodControlClient.parseReply(Data("nope".utf8))) == .malformedReply)
+  }
+
+  @Test
+  func aMissingSocketIsUnreachableSoTheCallerTypesInstead() async {
+    let result = await NodControlClient.send(
+      .send(.init(text: "hi")), socketPath: "/tmp/nod-\(UUID().uuidString).sock")
+    #expect(failure(of: result) == .unreachable)
+  }
+
+  #if canImport(Darwin)
+    /// A real socket: the line the runtime reads is one queued `send`, and its answer is
+    /// what the caller gets back.
+    @Test
+    func sendsOneQueuedLineAndReadsTheAnswer() async throws {
+      let path = "/tmp/nod-\(UUID().uuidString.prefix(8)).sock"
+      let server = try OneShotUnixServer(path: path, reply: #"{"ok":true}"# + "\n")
+      defer { server.close() }
+      let result = await NodControlClient.send(.send(.init(text: "ship it")), socketPath: path)
+      #expect(failure(of: result) == nil)
+      let line = try #require(server.received())
+      let command = try NodProtocol.makeDecoder().decode(NodCommand.self, from: Data(line.utf8))
+      #expect(command == .send(.init(text: "ship it", delivery: .queue)))
+    }
+  #endif
+}
+
+#if canImport(Darwin)
+  /// Accepts one connection, records one line, answers with `reply`.
+  private final class OneShotUnixServer: @unchecked Sendable {
+    private let descriptor: Int32
+    private let path: String
+    private let done = DispatchSemaphore(value: 0)
+    private var line: String?
+
+    init(path: String, reply: String) throws {
+      self.path = path
+      unlink(path)
+      descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+      var address = sockaddr_un()
+      address.sun_family = sa_family_t(AF_UNIX)
+      withUnsafeMutablePointer(to: &address.sun_path) { field in
+        field.withMemoryRebound(to: CChar.self, capacity: 104) { pointer in
+          _ = path.withCString { strncpy(pointer, $0, 103) }
+        }
+      }
+      let bound = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+          bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+      }
+      guard bound == 0, listen(descriptor, 1) == 0 else { throw POSIXError(.EADDRINUSE) }
+      let listener = descriptor
+      Thread.detachNewThread { [self] in
+        let client = accept(listener, nil, nil)
+        var bytes = [UInt8]()
+        var buffer = [UInt8](repeating: 0, count: 256)
+        while !bytes.contains(UInt8(ascii: "\n")) {
+          let count = read(client, &buffer, buffer.count)
+          guard count > 0 else { break }
+          bytes += buffer[0..<count]
+        }
+        line = String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .newlines)
+        _ = reply.withCString { write(client, $0, strlen($0)) }
+        Darwin.close(client)
+        done.signal()
+      }
+    }
+
+    func received() -> String? {
+      _ = done.wait(timeout: .now() + 5)
+      return line
+    }
+
+    func close() {
+      Darwin.close(descriptor)
+      unlink(path)
+    }
+  }
+#endif

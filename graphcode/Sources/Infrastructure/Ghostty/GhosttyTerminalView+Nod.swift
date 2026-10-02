@@ -17,7 +17,7 @@ extension GhosttyTerminalView {
       workingDirectory: effectiveWorkingDirectory,
       goalFile: loopType == .goalBased && FileManager.default.fileExists(atPath: goalFile)
         ? goalFile : nil)
-    let environment = NodRuntimeLocator.environment(forNodeID: nodeID)
+    let environment = NodRuntimeLocator.environment(forNodeID: nodeID, projectPath: projectPath)
       .sorted { $0.key < $1.key }
       .map { "\($0.key)=\(PresenceHooks.singleQuoted($0.value))" }
     return ["exec", "env"] + environment + [PresenceHooks.singleQuoted(executable)]

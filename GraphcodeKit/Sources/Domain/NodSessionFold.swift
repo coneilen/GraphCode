@@ -1,7 +1,7 @@
 import Foundation
 
 /// How far a goal loop's evaluator says it has got — the card's progress bar.
-public struct NodGoalProgress: Equatable, Sendable {
+public struct NodGoalProgress: Codable, Equatable, Sendable {
   public var met: Int
   public var total: Int
 
@@ -13,7 +13,7 @@ public struct NodGoalProgress: Equatable, Sendable {
 
 /// What a Nod loop's canvas card shows beyond what every backend reports. Folded from the
 /// event log by the daemon, so the card never reads `events.jsonl` itself.
-public struct NodCardState: Equatable, Sendable {
+public struct NodCardState: Codable, Equatable, Sendable {
   public var goalProgress: NodGoalProgress?
   /// The newest permission ask nobody has answered; `answerableFromCard` says whether the
   /// card may offer Allow once or must open the chat.

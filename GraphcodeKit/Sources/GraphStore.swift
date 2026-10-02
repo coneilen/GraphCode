@@ -1616,8 +1616,10 @@ public actor GraphStore {
     guard let onReadActivity else { return false }
     var changed = false
     for node in graph.nodes {
+      // A Nod loop waiting on a human says what it is waiting for, exactly.
       let working =
         node.presence?.presence == .busy
+        || (node.backend == .nod && node.presence?.presence == .awaitingInput)
       let reported = working ? await onReadActivity(node, graph.project.path) : nil
       guard graph.nodes[id: node.id]?.activity != reported else { continue }
       graph.nodes[id: node.id]?.activity = reported
@@ -4146,9 +4148,11 @@ public actor GraphStore {
     let hasPredicate =
       goal.effectivePredicate != nil && (onEvaluatePredicate != nil || onCheckPredicate != nil)
     let hasBudget = goal.tokenBudget != nil && onReadUsage != nil
+    // Nod's goal is a field rather than a typed directive, but its evaluator records a
+    // verdict all the same.
     let hasVerdict =
       goal.effectivePredicate == nil && onReadGoalVerdict != nil
-      && node.backend.capabilities.goalDirective != nil
+      && (node.backend.capabilities.goalDirective != nil || node.backend == .nod)
     guard hasPredicate || hasVerdict || goal.stallAfterSeconds != nil || hasBudget else { return }
     goalPollers[node.id]?.cancel()
     let nodeID = node.id

@@ -14,12 +14,18 @@ graphcode starts `graphcode-nod` inside the node's zmx session:
 
 ```
 graphcode-nod --node <uuid> [--cwd <dir>] --engine claude|copilot --loop-type main|goal|timed|turn|composite
-              [--model <id>] [--goal-file <path>] [--briefing <path>] [--prompt <text>] [--resume <conversation-id>]
+              [--model <id>] [--goal-file <path>] [--inherit <path>] [--briefing <path>]
+              [--prompt <text>] [--resume <conversation-id>]
 ```
 
 - `NOD_STATE` (`NodProtocol.stateDirectoryVariable`) is always set, to
   `<support-dir>/nod/<node-uuid>`. Use it rather than computing `~/.graphcode/...`: a
   workspace can move its support directory. Create it if missing.
+- `NOD_PROJECT_PATH` and `NOD_GRAPH_FILE` are set for a node in a project: the project
+  path, and the graph file the daemon saves (read it, never write it — the daemon
+  rewrites it on every change).
+- `--inherit <path>` hands a fresh composite child or fork the brief it starts from. It is
+  never passed on `--resume`.
 - `--goal-file` is `$NOD_STATE/goal.md`, the goal's condition as plain text, rewritten on
   every launch.
 - `--resume` is the `conversationID` of an earlier `sessionStarted`. graphcode banks it

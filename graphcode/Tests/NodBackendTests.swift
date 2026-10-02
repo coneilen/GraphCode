@@ -33,7 +33,7 @@ struct NodBackendTests {
   @Test
   func nodHostsNothingUntilTheRuntimeShips() {
     #expect(!CLISessionBackendKind.nod.isSpiked)
-    #expect(CLISessionBackendKind.nod.executableName == nil)
+    #expect(CLISessionBackendKind.nod.executableName == "graphcode-nod")
     for loopType in LoopType.allCases {
       #expect(!CLISessionBackendKind.nod.canHost(loopType))
     }

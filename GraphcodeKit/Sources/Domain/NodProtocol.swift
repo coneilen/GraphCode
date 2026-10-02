@@ -15,6 +15,10 @@ public enum NodProtocol {
   /// to `~/.graphcode/nod/<node-uuid>` without it, which is wrong for any workspace whose
   /// support directory was moved (`GRAPHCODE_SUPPORT_DIR`).
   public static let stateDirectoryVariable = "NOD_STATE"
+  /// The node's project, and the file its graph is saved in — read-only, for the graphcode
+  /// MCP server's siblings and edges. Unset for a node outside any project.
+  public static let projectPathVariable = "NOD_PROJECT_PATH"
+  public static let graphFileVariable = "NOD_GRAPH_FILE"
   public static let eventsFileName = "events.jsonl"
   public static let controlSocketName = "control.sock"
   public static let conversationFileName = "conversation.json"

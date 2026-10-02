@@ -1316,7 +1316,7 @@ public enum ZmxSessionLauncher {
         of: executable, arguments: arguments,
         environment: Self.environment(
           forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile,
-          remoteHooksPath: remoteEnvironmentPath, nodeID: node.id),
+          remoteHooksPath: remoteEnvironmentPath, nodeID: node.id, projectPath: projectPath),
         scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
 
     // `zmx` types this command into the session's shell, and a tty in canonical mode
@@ -1349,7 +1349,7 @@ public enum ZmxSessionLauncher {
             of: executable, arguments: arguments,
             environment: Self.environment(
               forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile,
-              remoteHooksPath: remoteEnvironmentPath, nodeID: node.id),
+              remoteHooksPath: remoteEnvironmentPath, nodeID: node.id, projectPath: projectPath),
             scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
       }
       let unbriefedCommand = shed(prompt: promptWithMemory, briefingPath: nil, extraPath: nil)
@@ -1490,7 +1490,7 @@ public enum ZmxSessionLauncher {
           briefingPath: Self.resumeBriefingPath(
             forBackend: node.backend, projectPath: projectPath, isRemote: remote != nil,
             settings: settings),
-          hooksFile: hooksFile, remoteHooksPath: remoteEnvironmentPath, nodeID: node.id),
+          hooksFile: hooksFile, remoteHooksPath: remoteEnvironmentPath, nodeID: node.id, projectPath: projectPath),
         scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
   }
 
@@ -1527,7 +1527,8 @@ public enum ZmxSessionLauncher {
       + loginShellInvocation(
         of: executable,
         arguments: nodArguments(forNode: node, projectPath: projectPath, settings: settings),
-        environment: environment(forBackend: .nod, briefingPath: nil, nodeID: node.id))
+        environment: environment(
+          forBackend: .nod, briefingPath: nil, nodeID: node.id, projectPath: projectPath))
   }
 
   /// Stands in for a remote session ID that this machine cannot know: the ID was written
@@ -1574,9 +1575,11 @@ public enum ZmxSessionLauncher {
   /// (`briefingEnvironment`) and OpenCode's presence plugin (`presenceEnvironment`).
   static func environment(
     forBackend backend: CLISessionBackendKind, briefingPath: String?, hooksFile: URL? = nil,
-    remoteHooksPath: String? = nil, nodeID: UUID? = nil
+    remoteHooksPath: String? = nil, nodeID: UUID? = nil, projectPath: String? = nil
   ) -> [String: String] {
-    if backend == .nod, let nodeID { return NodRuntimeLocator.environment(forNodeID: nodeID) }
+    if backend == .nod, let nodeID {
+      return NodRuntimeLocator.environment(forNodeID: nodeID, projectPath: projectPath)
+    }
     let briefing = backend.briefingEnvironment(briefingPath: briefingPath)
     if backend == .openCode, let remoteHooksPath {
       return briefing.merging(["OPENCODE_CONFIG": remoteHooksPath]) { $1 }

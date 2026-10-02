@@ -6,10 +6,15 @@ import Foundation
 /// that matches the app's protocol version — a `graphcode-nod` someone put on their PATH
 /// could be any version at all.
 public enum NodRuntimeLocator {
+  /// Wins over everything below. A `var` only so tests can launch against a fixture
+  /// without touching the process environment the rest of the suite reads.
+  static var binaryOverride: URL?
+
   /// Tried in order: the development override, the running app's bundle, then the
   /// support directory's `bin`, which is where `graphcoded` (installed out of the bundle)
   /// finds its helpers.
   public static func binaryURL(bundle: Bundle = .main) -> URL? {
+    if let binaryOverride { return binaryOverride }
     if let path = NodRuntimeLocation.developmentOverride {
       return URL(fileURLWithPath: path)
     }
@@ -37,8 +42,20 @@ public enum NodRuntimeLocator {
     stateDirectory(forNodeID: nodeID).appendingPathComponent(NodProtocol.controlSocketName)
   }
 
-  public static func environment(forNodeID nodeID: UUID) -> [String: String] {
-    [NodProtocol.stateDirectoryVariable: stateDirectory(forNodeID: nodeID).path]
+  /// The session's environment: its state directory, and — for a node in a project — the
+  /// project and the graph file the runtime's graphcode MCP server reads siblings and
+  /// edges from.
+  public static func environment(forNodeID nodeID: UUID, projectPath: String? = nil)
+    -> [String: String]
+  {
+    var environment = [NodProtocol.stateDirectoryVariable: stateDirectory(forNodeID: nodeID).path]
+    if let projectPath {
+      environment[NodProtocol.projectPathVariable] = projectPath
+      environment[NodProtocol.graphFileVariable] =
+        ProjectPersistence(baseDirectory: SupportDirectory.url)
+        .graphFileURL(forProjectPath: projectPath).path
+    }
+    return environment
   }
 
   /// Writes a goal loop's condition where `--goal-file` points, or `nil` for a node with

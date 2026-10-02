@@ -169,6 +169,12 @@ public struct ProjectPersistence: Sendable {
   /// must be deterministic across launches, but Windows also rejects `:`, `\`, and several
   /// other characters that occur in perfectly valid project paths. Hashing keeps names
   /// short, safe, and collision-resistant without leaking a path into a directory listing.
+  /// Where a project's graph is saved — read-only for anything outside the daemon, which
+  /// rewrites it on every change.
+  public func graphFileURL(forProjectPath path: String) -> URL {
+    fileURL(forProjectPath: path)
+  }
+
   private func fileURL(forProjectPath path: String) -> URL {
     let key = platformPaths.persistenceKey(forProjectPath: path)
     return projectsDirectory.appendingPathComponent("\(key).json")
