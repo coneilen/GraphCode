@@ -26,6 +26,7 @@ param(
   [string] $ReleaseTagMatchesSource,
   [ValidateSet("true", "false")]
   [string] $TagMismatchAllowed,
+  [switch] $Local,
   [switch] $KeepUserData,
   [switch] $RemoveUserData,
   [switch] $NoScheduledTask,
@@ -39,7 +40,29 @@ $shellRoot = Join-Path $repoRoot "graphcode-windows"
 $ProviderPinsPath = Join-Path $shellRoot "provider-pins.json"
 $required = @("graphcoded.exe", "graphcode.exe", "zmx.exe")
 $packageManifest = Get-Content (Join-Path $shellRoot "build.zig.zon") -Raw
-if (-not $Version) {
+$localSourceCommit = $null
+$localSourceTreeDirty = $false
+if ($Local) {
+  if ($Command -ne "Build") {
+    throw "GraphCode packaging: -Local is only valid with -Command Build"
+  }
+  if ($versionWasProvided) {
+    throw "GraphCode packaging: -Local generates its version from HEAD; do not pass -Version"
+  }
+  $resolvedCommit = & git -C $repoRoot rev-parse --verify HEAD 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "GraphCode packaging: could not resolve the local source commit"
+  }
+  $localSourceCommit = ([string] (@($resolvedCommit) | Select-Object -Last 1)).Trim().ToLowerInvariant()
+  if ($localSourceCommit -notmatch "^[0-9a-f]{40}$") {
+    throw "GraphCode packaging: HEAD resolved to invalid commit '$localSourceCommit'"
+  }
+  $localSourceTreeDirty = @(& git -C $repoRoot status --porcelain).Count -gt 0
+  if ($LASTEXITCODE -ne 0) {
+    throw "GraphCode packaging: could not inspect the local source tree"
+  }
+  $Version = "0.0.0-local+$($localSourceCommit.Substring(0, 12))"
+} elseif (-not $Version) {
   if ($packageManifest -notmatch '(?m)\.version\s*=\s*"([^"]+)"') {
     throw "GraphCode packaging: package version is missing"
   }
@@ -71,23 +94,41 @@ function Get-Manifest([string] $root) {
 }
 function Write-Metadata([string] $root, [string] $version) {
   $pins = Get-Content -LiteralPath (Join-Path $shellRoot "provider-pins.json") -Raw | ConvertFrom-Json
-  $metadata = [ordered]@{
-    schemaVersion = 1
-    product = "GraphCode Windows"
-    version = $version
-    platform = "windows-x86_64"
-    executables = [ordered]@{ shell = "bin/graphcode-windows.exe"; daemon = "bin/graphcoded.exe"; cli = "bin/graphcode.exe"; zmx = "bin/zmx.exe" }
-    hostAssets = @(Get-ChildItem -LiteralPath (Join-Path $root "bin") -File -ErrorAction SilentlyContinue |
-      Where-Object { $_.Name -match "winghostty|host" } | ForEach-Object { "bin/$($_.Name)" })
-    providerPins = $pins
-    signing = if ($SignCertificate) { "signed" } else { "UNSIGNED (not code signed)" }
-    sourceProvenance = [ordered]@{
+  $signing = if ($Local) {
+    "UNSIGNED LOCAL DEVELOPMENT PACKAGE (not code signed)"
+  } elseif ($SignCertificate) {
+    "signed"
+  } else {
+    "UNSIGNED (not code signed)"
+  }
+  $sourceProvenance = if ($Local) {
+    [ordered]@{
+      kind = "local"
+      sourceCommit = $localSourceCommit
+      sourceTreeDirty = $localSourceTreeDirty
+    }
+  } else {
+    [ordered]@{
+      kind = "release-tag"
       tag = $ReleaseTag
       tagCommit = $ReleaseTagCommit.ToLowerInvariant()
       sourceCommit = $SourceCommit.ToLowerInvariant()
       tagMatchesSource = ($ReleaseTagMatchesSource -eq "true")
       tagMismatchAllowed = ($TagMismatchAllowed -eq "true")
     }
+  }
+  $metadata = [ordered]@{
+    schemaVersion = 1
+    product = "GraphCode Windows"
+    version = $version
+    packageKind = if ($Local) { "local-development" } else { "release-candidate" }
+    platform = "windows-x86_64"
+    executables = [ordered]@{ shell = "bin/graphcode-windows.exe"; daemon = "bin/graphcoded.exe"; cli = "bin/graphcode.exe"; zmx = "bin/zmx.exe" }
+    hostAssets = @(Get-ChildItem -LiteralPath (Join-Path $root "bin") -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match "winghostty|host" } | ForEach-Object { "bin/$($_.Name)" })
+    providerPins = $pins
+    signing = $signing
+    sourceProvenance = $sourceProvenance
     userData = "%USERPROFILE%/.graphcode (preserved by uninstall)"
     providerProvenance = "provider-provenance.json"
     setup = "GraphCode-Setup.ps1"
@@ -98,7 +139,11 @@ GraphCode Windows distribution
 Version: $version
 Signing: $($metadata.signing)
 
-This artifact is not code signed unless an explicit signing certificate was supplied.
+$(if ($Local) {
+  "This is a local development artifact from source commit $localSourceCommit. It cannot be published."
+} else {
+  "This artifact is not code signed unless an explicit signing certificate was supplied."
+})
 "@ | Set-Content -LiteralPath (Join-Path $root "SIGNING.txt") -Encoding utf8
 }
 function Sign-PackageFile([string] $tool, [string] $path) {
@@ -117,12 +162,21 @@ function Write-PackageSetup([string] $root) {
   [IO.File]::WriteAllText((Join-Path $root "GraphCode-Setup.ps1"), $source, [Text.UTF8Encoding]::new($true))
 }
 function Build-Package {
-  Require ($Version -and $Version -notin @("dev", "0.0.0-dev")) "release packaging requires a non-dev package version"
-  Require ([bool] $ReleaseTag) "release packaging requires -ReleaseTag provenance"
-  Require ([bool] $ReleaseTagCommit) "release packaging requires -ReleaseTagCommit provenance"
-  Require ([bool] $SourceCommit) "release packaging requires -SourceCommit provenance"
-  Require ([bool] $ReleaseTagMatchesSource) "release packaging requires -ReleaseTagMatchesSource provenance"
-  Require ([bool] $TagMismatchAllowed) "release packaging requires -TagMismatchAllowed provenance"
+  if ($Local) {
+    Require (-not ($ReleaseTag -or $ReleaseTagCommit -or $SourceCommit -or
+        $ReleaseTagMatchesSource -or $TagMismatchAllowed)) `
+      "local packaging does not accept release-tag provenance"
+    Require (-not $SignCertificate) "local packaging is always unsigned and does not accept -SignCertificate"
+    Require (-not $TrustedSignerThumbprint) `
+      "local packaging is always unsigned and does not accept -TrustedSignerThumbprint"
+  } else {
+    Require ($Version -and $Version -notin @("dev", "0.0.0-dev")) "release packaging requires a non-dev package version"
+    Require ([bool] $ReleaseTag) "release packaging requires -ReleaseTag provenance"
+    Require ([bool] $ReleaseTagCommit) "release packaging requires -ReleaseTagCommit provenance"
+    Require ([bool] $SourceCommit) "release packaging requires -SourceCommit provenance"
+    Require ([bool] $ReleaseTagMatchesSource) "release packaging requires -ReleaseTagMatchesSource provenance"
+    Require ([bool] $TagMismatchAllowed) "release packaging requires -TagMismatchAllowed provenance"
+  }
   if ($SignCertificate) {
     Require ($SignCertificate -match "^[0-9a-fA-F]{40}$") "signing certificate thumbprint is invalid"
     Require (-not $TrustedSignerThumbprint -or $TrustedSignerThumbprint -eq $SignCertificate) `
@@ -142,7 +196,9 @@ function Build-Package {
   } else {
     $locations = @(
       (Join-Path $shellRoot "zig-out\bin"),
-      (Join-Path $repoRoot ".build\windows\release")
+      (Join-Path $repoRoot ".build\windows\release"),
+      (Join-Path $repoRoot ".build\windows\release-artifact"),
+      (Join-Path $repoRoot ".build\x86_64-unknown-windows-msvc\release")
     )
     foreach ($location in $locations) { if (Test-Path $location) { Get-ChildItem $location -File | Copy-Item -Destination (Join-Path $root "bin") -Force } }
   }
@@ -163,17 +219,24 @@ function Build-Package {
       Remove-Item -LiteralPath $providerArtifact -Force -ErrorAction SilentlyContinue
       Push-Location $spec.root
       try {
+        $zmxCache = $null
         $buildArgs = if ($spec.name -eq "winghostty") {
           @("build", "-Demit-win32-host=true")
         } else {
           # uucode runs its generator from the dependency directory. Zig 0.16
-          # otherwise resolves the relative .zig-cache executable path from
-          # that cwd and fails to launch the generated tool.
-          $zmxCache = Join-Path $staging "zmx-zig-cache"
+          # otherwise resolves a long cache executable path from that cwd and
+          # fails to launch the generated tool.
+          $zmxCache = Join-Path $repoRoot ".build\zmx-package-cache-$([guid]::NewGuid())"
           @("build", "-Dtarget=x86_64-windows-gnu", "--cache-dir", $zmxCache)
         }
-        & $zig @buildArgs
-        Require ($LASTEXITCODE -eq 0) "$($spec.name) pinned rebuild failed"
+        try {
+          & $zig @buildArgs
+          Require ($LASTEXITCODE -eq 0) "$($spec.name) pinned rebuild failed"
+        } finally {
+          if ($spec.name -eq "zmx" -and $zmxCache) {
+            Remove-Item -LiteralPath $zmxCache -Recurse -Force -ErrorAction SilentlyContinue
+          }
+        }
       } finally { Pop-Location }
       Require (Test-Path $providerArtifact -PathType Leaf) "$($spec.name) provider artifact is missing"
       $destination = Join-Path $root ($spec.destination -replace "/", "\")
@@ -191,7 +254,7 @@ function Build-Package {
     Fail "trusted pinned Winghostty and zmx roots are required; fixture provenance is not accepted"
   }
   if (-not $source) {
-    Require ($WinghosttyRoot -and $Zig0152) "release build requires pinned Winghostty root and Zig 0.15.2"
+    Require ($WinghosttyRoot -and $Zig0152) "package build requires pinned Winghostty root and Zig 0.15.2"
     Push-Location $shellRoot
     try {
       & $Zig0152 build `
@@ -277,7 +340,26 @@ $zmxLicense
 
 switch ($Command) {
   "Build" { Build-Package }
-  "Verify" { try { $root = Open-Package $Package; Verify-PackageContents $root | Out-Null; Write-Output "Package verification: PASS" } finally { Close-Package } }
+  "Verify" {
+    try {
+      $root = Open-Package $Package
+      Verify-PackageContents $root | Out-Null
+      $metadata = Get-Content -LiteralPath (Join-Path $root "metadata.json") -Raw | ConvertFrom-Json
+      if ([string] $metadata.packageKind -eq "local-development") {
+        $provenance = $metadata.sourceProvenance
+        $commit = [string] $provenance.sourceCommit
+        Require ([string] $metadata.signing -match "^UNSIGNED LOCAL DEVELOPMENT PACKAGE") `
+          "local package metadata must declare the unsigned local signing state"
+        Require ([string] $provenance.kind -eq "local" -and $commit -match "^[0-9a-f]{40}$") `
+          "local package metadata must contain an exact source commit"
+        Require ([string] $metadata.version -eq "0.0.0-local+$($commit.Substring(0, 12))") `
+          "local package version does not match its source commit"
+        Write-Output "Package verification: PASS (LOCAL UNSIGNED source $commit)"
+      } else {
+        Write-Output "Package verification: PASS"
+      }
+    } finally { Close-Package }
+  }
   "Install" { Install-Package $false }
   "Upgrade" { Install-Package $true }
   "Uninstall" { Uninstall-Package }

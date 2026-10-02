@@ -100,6 +100,11 @@ $label = if ($env:GRAPHCODE_STUB_SIGNING_LABEL) {
 } else {
   "UNSIGNED (not code signed)"
 }
+$packageKind = if ($env:GRAPHCODE_STUB_PACKAGE_KIND) {
+  $env:GRAPHCODE_STUB_PACKAGE_KIND
+} else {
+  "release-candidate"
+}
 $root = Join-Path $OutputDirectory "GraphCode-$Version-windows-x86_64"
 if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 New-Item -ItemType Directory -Path (Join-Path $root "bin") -Force | Out-Null
@@ -109,12 +114,14 @@ Set-Content -LiteralPath (Join-Path $root "bin\graphcode-windows.exe") "stub pay
   version = $Version
   platform = "windows-x86_64"
   signing = $label
+  packageKind = $packageKind
   sourceProvenance = [ordered]@{
-    tag = $ReleaseTag
-    tagCommit = $ReleaseTagCommit
+    kind = if ($packageKind -eq "local-development") { "local" } else { "release-tag" }
+    tag = if ($packageKind -eq "local-development") { $null } else { $ReleaseTag }
+    tagCommit = if ($packageKind -eq "local-development") { $null } else { $ReleaseTagCommit }
     sourceCommit = $SourceCommit
-    tagMatchesSource = ($ReleaseTagMatchesSource -eq "true")
-    tagMismatchAllowed = ($TagMismatchAllowed -eq "true")
+    tagMatchesSource = if ($packageKind -eq "local-development") { $null } else { ($ReleaseTagMatchesSource -eq "true") }
+    tagMismatchAllowed = if ($packageKind -eq "local-development") { $null } else { ($TagMismatchAllowed -eq "true") }
   }
 } |
   ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $root "metadata.json") -Encoding utf8
@@ -295,7 +302,20 @@ exit 2
   $env:GRAPHCODE_STUB_SIGNING_LABEL = $null
   Write-Output "Unsigned release-state honesty gate: PASS"
 
-  # 6. Build and upload failures propagate and never look like successful
+  # 6. Local-development package provenance is refused by the release
+  #    orchestrator and can never reach an upload command.
+  $env:GRAPHCODE_STUB_PACKAGE_KIND = "local-development"
+  foreach ($publish in @($false, $true)) {
+    Invoke-Release @{ Tag = "v0.1.74"; OutputDirectory = $out; Publish = $publish } `
+      -ExpectFailure -Message "local development package" | Out-Null
+    if (@(Get-Invocations | Where-Object tool -eq "gh").Count -ne 0) {
+      throw "a local development package reached an upload command"
+    }
+  }
+  $env:GRAPHCODE_STUB_PACKAGE_KIND = $null
+  Write-Output "Local package publication refusal: PASS"
+
+  # 7. Build and upload failures propagate and never look like successful
   #    publication.
   $env:GRAPHCODE_STUB_BUILD_FAILS = "1"
   Invoke-Release @{ Tag = "v0.1.74"; OutputDirectory = $out; Publish = $true } `
@@ -310,7 +330,7 @@ exit 2
   $env:GRAPHCODE_STUB_GH_FAILS = $null
   Write-Output "Build and upload failure propagation: PASS"
 
-  # 7. The workflow stays manual, action-pinned, and free of certificate or
+  # 8. The workflow stays manual, action-pinned, and free of certificate or
   #    unsigned-override configuration.
   $workflow = Get-Content -LiteralPath (Join-Path $repoRoot ".github\workflows\windows-release.yml") -Raw
   foreach ($required in @("workflow_dispatch:", "Tools/windows/release.ps1", "actions/checkout@")) {
@@ -348,7 +368,7 @@ exit 2
   }
   Write-Output "Release workflow contract: PASS"
 
-  # 8. The workflow's own invocation actually binds release.ps1's parameters.
+  # 9. The workflow's own invocation actually binds release.ps1's parameters.
   $workflowLines = $workflow -split "\r?\n"
   $packageBlock = $null
   for ($i = 0; $i -lt $workflowLines.Count; $i++) {
@@ -418,7 +438,7 @@ param(
   Write-Output "Release workflow invocation binding: PASS"
 } finally {
   foreach ($name in @("GRAPHCODE_STUB_LOG", "GRAPHCODE_STUB_SIGNING_LABEL",
-      "GRAPHCODE_STUB_BUILD_FAILS", "GRAPHCODE_STUB_GH_FAILS",
+      "GRAPHCODE_STUB_PACKAGE_KIND", "GRAPHCODE_STUB_BUILD_FAILS", "GRAPHCODE_STUB_GH_FAILS",
       "GRAPHCODE_STUB_HEAD_COMMIT", "GRAPHCODE_STUB_TAG_COMMIT",
       "GRAPHCODE_STUB_TAG_MISSING", "GRAPHCODE_PROBE_LOG", "RELEASE_TAG",
       "RELEASE_PUBLISH")) {

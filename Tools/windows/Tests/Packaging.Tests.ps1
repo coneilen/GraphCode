@@ -16,7 +16,13 @@ $oldUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 
 function Invoke-Package([string] $command, [hashtable] $extra = @{}) {
   $args = @("-NoProfile", "-File", $script, "-Command", $command)
-  foreach ($key in $extra.Keys) { $args += @("-$key", [string] $extra[$key]) }
+  foreach ($key in $extra.Keys) {
+    if ($extra[$key] -is [bool] -or $extra[$key] -is [switch]) {
+      if ($extra[$key]) { $args += "-$key" }
+    } else {
+      $args += @("-$key", [string] $extra[$key])
+    }
+  }
   & pwsh @args
   if ($LASTEXITCODE -ne 0) { throw "packaging $command failed" }
 }
@@ -153,7 +159,9 @@ try {
       $metadata.sourceProvenance.tagCommit -ne $releaseCommit -or
       $metadata.sourceProvenance.sourceCommit -ne $releaseCommit -or
       $metadata.sourceProvenance.tagMatchesSource -ne $true -or
-      $metadata.sourceProvenance.tagMismatchAllowed -ne $false) {
+      $metadata.sourceProvenance.tagMismatchAllowed -ne $false -or
+      $metadata.packageKind -ne "release-candidate" -or
+      $metadata.sourceProvenance.kind -ne "release-tag") {
     throw "package metadata did not preserve explicit source provenance: $($metadata | ConvertTo-Json -Compress)"
   }
   $manifest = Get-Content -LiteralPath (Join-Path $artifact "manifest.json") -Raw |
@@ -164,6 +172,41 @@ try {
         (Get-FileHash -LiteralPath (Join-Path $artifact "metadata.json") -Algorithm SHA256).Hash.ToLowerInvariant()) {
     throw "package manifest does not cover source provenance metadata"
   }
+  $localCommit = (& git -C $repoRoot rev-parse HEAD).Trim().ToLowerInvariant()
+  if ($LASTEXITCODE -ne 0 -or $localCommit -notmatch "^[0-9a-f]{40}$") {
+    throw "could not resolve local package source commit"
+  }
+  $localVersion = "0.0.0-local+$($localCommit.Substring(0, 12))"
+  $localDirty = @(& git -C $repoRoot status --porcelain).Count -gt 0
+  Invoke-Package "Build" @{
+    OutputDirectory = $out
+    WinghosttyRoot = $wingRoot
+    ZmxRoot = $testZmxRoot
+    Zig0152 = $zig0152
+    Zig0160 = $zig0160
+    Local = $true
+  }
+  $localArtifact = Join-Path $out "GraphCode-$localVersion-windows-x86_64"
+  $localZip = "$localArtifact.zip"
+  $localMetadata = Get-Content -LiteralPath (Join-Path $localArtifact "metadata.json") -Raw |
+    ConvertFrom-Json
+  if ($localMetadata.version -ne $localVersion -or
+      $localMetadata.packageKind -ne "local-development" -or
+      $localMetadata.signing -notmatch "^UNSIGNED LOCAL DEVELOPMENT PACKAGE" -or
+      $localMetadata.sourceProvenance.kind -ne "local" -or
+      $localMetadata.sourceProvenance.sourceCommit -ne $localCommit -or
+      $localMetadata.sourceProvenance.sourceTreeDirty -ne $localDirty) {
+    throw "local package metadata is not explicit and exact: $($localMetadata | ConvertTo-Json -Compress)"
+  }
+  $localVerification = & pwsh -NoProfile -File $script -Command Verify -Package $localZip 2>&1 |
+    Out-String
+  if ($LASTEXITCODE -ne 0 -or
+      $localVerification -notmatch "Package verification: PASS" -or
+      $localVerification -notmatch "LOCAL UNSIGNED" -or
+      $localVerification -notmatch [regex]::Escape($localCommit)) {
+    throw "local package verification did not report exact local provenance: $localVerification"
+  }
+  Write-Output "Local unsigned package provenance and verification: PASS"
   $zip = "$artifact.zip"
   Invoke-Package "Verify" @{ Package = $zip }
   Invoke-Package "Install" @{ Package = $zip; InstallRoot = $install; NoScheduledTask = $true }
