@@ -1169,3 +1169,5 @@ extern "C" HRESULT gc_uia_set_canvas_bounds(IRawElementProviderSimple *provider,
   static_cast<Node *>(provider)->setCanvasBounds(left, top, right, bottom);
   return S_OK;
 }
+
+#include "OnboardingAccessibilityProvider.cpp"

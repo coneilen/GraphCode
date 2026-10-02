@@ -4,6 +4,22 @@ const Win32 = @import("Win32.zig");
 const c = Win32.c;
 const ModalTeardown = @import("ModalTeardown.zig");
 
+const NativeProvider = opaque {};
+extern fn gc_onboarding_uia_create(hwnd: c.HWND) ?*NativeProvider;
+extern fn gc_onboarding_uia_release(provider: *NativeProvider) void;
+extern fn gc_onboarding_uia_get_object(
+    hwnd: c.HWND,
+    wparam: c.WPARAM,
+    lparam: c.LPARAM,
+    provider: *NativeProvider,
+) c.LRESULT;
+extern fn gc_onboarding_uia_update(
+    provider: *NativeProvider,
+    page: c_int,
+    focused: c_int,
+    backend: c_int,
+) c.HRESULT;
+
 pub const page_count: u8 = 4;
 
 pub const Backend = enum {
@@ -78,13 +94,25 @@ const State = struct {
     allocator: std.mem.Allocator,
     page: u8 = 0,
     backend: Backend,
+    focused_action: Action = .primary,
+    provider: ?*NativeProvider = null,
     closed: bool = false,
+};
+
+const Action = enum(c_int) {
+    skip = 2,
+    back = 3,
+    primary = 4,
+    claude_code = 5,
+    copilot_cli = 6,
+    codex = 7,
 };
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeWindowsOnboarding");
 const title = std.unicode.utf8ToUtf16LeStringLiteral("Welcome to GraphCode");
 const client_width: i32 = 560;
 const client_height: i32 = 620;
+const wm_uia_focus_action: c.UINT = c.WM_APP + 60;
 var active = false;
 var active_state: State = undefined;
 
@@ -137,6 +165,12 @@ pub fn show(parent: c.HWND, allocator: std.mem.Allocator, initial_backend: []con
         active = false;
         return error.OnboardingCreationFailed;
     };
+    active_state.provider = gc_onboarding_uia_create(hwnd) orelse {
+        _ = c.DestroyWindow(hwnd);
+        active = false;
+        return error.OnboardingAccessibilityProviderCreationFailed;
+    };
+    syncProvider();
     const region = c.CreateRoundRectRgn(0, 0, width, height, 18, 18);
     if (region != null and c.SetWindowRgn(hwnd, region, 1) == 0) {
         _ = c.DeleteObject(region);
@@ -157,6 +191,8 @@ pub fn show(parent: c.HWND, allocator: std.mem.Allocator, initial_backend: []con
         _ = c.DispatchMessageW(&message);
     }
     const backend = active_state.backend;
+    gc_onboarding_uia_release(active_state.provider.?);
+    active_state.provider = null;
     ModalTeardown.dismiss(hwnd, parent);
     active = false;
     return backend;
@@ -180,8 +216,34 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
         c.WM_PAINT => {
             var paint_state: c.PAINTSTRUCT = undefined;
             const hdc = c.BeginPaint(hwnd, &paint_state);
-            paint(hdc, active_state.allocator, active_state.page, active_state.backend);
+            paint(
+                hdc,
+                active_state.allocator,
+                active_state.page,
+                active_state.backend,
+                active_state.focused_action,
+            );
             _ = c.EndPaint(hwnd, &paint_state);
+            return 0;
+        },
+        c.WM_GETOBJECT => if (active_state.provider) |provider|
+            return gc_onboarding_uia_get_object(hwnd, wparam, lparam, provider),
+        c.WM_COMMAND => {
+            const action = std.meta.intToEnum(Action, @as(c_int, @intCast(wparam & 0xffff))) catch
+                return c.DefWindowProcW(hwnd, message, wparam, lparam);
+            invokeAction(&active_state, action);
+            syncProvider();
+            _ = c.InvalidateRect(hwnd, null, 0);
+            return 0;
+        },
+        wm_uia_focus_action => {
+            const action = std.meta.intToEnum(Action, @as(c_int, @intCast(wparam & 0xffff))) catch
+                return c.DefWindowProcW(hwnd, message, wparam, lparam);
+            if (actionAvailable(active_state.page, action)) {
+                active_state.focused_action = action;
+                syncProvider();
+                _ = c.InvalidateRect(hwnd, null, 0);
+            }
             return 0;
         },
         c.WM_LBUTTONUP => {
@@ -190,19 +252,10 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             return 0;
         },
         c.WM_KEYDOWN => {
-            switch (wparam) {
-                c.VK_ESCAPE => active_state.closed = true,
-                c.VK_LEFT => {
-                    if (active_state.page > 0) active_state.page -= 1;
-                },
-                c.VK_RIGHT, c.VK_RETURN => {
-                    if (active_state.page + 1 < page_count)
-                        active_state.page += 1
-                    else
-                        active_state.closed = true;
-                },
-                else => return c.DefWindowProcW(hwnd, message, wparam, lparam),
-            }
+            const shift = (@as(i32, c.GetKeyState(c.VK_SHIFT)) & 0x8000) != 0;
+            if (!applyKeyboard(&active_state, wparam, shift))
+                return c.DefWindowProcW(hwnd, message, wparam, lparam);
+            syncProvider();
             _ = c.InvalidateRect(hwnd, null, 0);
             return 0;
         },
@@ -215,47 +268,128 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
     return c.DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
+fn syncProvider() void {
+    const provider = active_state.provider orelse return;
+    const result = gc_onboarding_uia_update(
+        provider,
+        active_state.page,
+        @intFromEnum(active_state.focused_action),
+        @intFromEnum(active_state.backend),
+    );
+    if (result < 0)
+        std.log.err("onboarding UIA update failed: 0x{x:0>8}", .{@as(u32, @bitCast(result))});
+}
+
+fn applyKeyboard(state: *State, key: usize, shift: bool) bool {
+    switch (key) {
+        c.VK_ESCAPE => state.closed = true,
+        c.VK_TAB => moveFocus(state, shift),
+        c.VK_LEFT => {
+            invokeAction(state, .back);
+        },
+        c.VK_RIGHT => invokeAction(state, .primary),
+        c.VK_RETURN, c.VK_SPACE => invokeAction(state, state.focused_action),
+        else => return false,
+    }
+    return true;
+}
+
+fn focusOrder(page: u8) []const Action {
+    return switch (page) {
+        0 => &.{ .skip, .primary },
+        1, 2 => &.{ .skip, .back, .primary },
+        else => &.{ .skip, .back, .claude_code, .copilot_cli, .codex, .primary },
+    };
+}
+
+fn moveFocus(state: *State, reverse: bool) void {
+    const order = focusOrder(state.page);
+    const current = for (order, 0..) |action, index| {
+        if (action == state.focused_action) break index;
+    } else order.len - 1;
+    state.focused_action = if (reverse)
+        order[if (current == 0) order.len - 1 else current - 1]
+    else
+        order[(current + 1) % order.len];
+}
+
+fn actionAvailable(page: u8, action: Action) bool {
+    return switch (action) {
+        .skip, .primary => true,
+        .back => page > 0,
+        .claude_code, .copilot_cli, .codex => page == 3,
+    };
+}
+
+fn invokeAction(state: *State, action: Action) void {
+    if (!actionAvailable(state.page, action)) return;
+    state.focused_action = action;
+    switch (action) {
+        .skip => state.closed = true,
+        .back => {
+            state.page -= 1;
+            state.focused_action = .primary;
+        },
+        .primary => {
+            if (state.page + 1 < page_count) {
+                state.page += 1;
+                state.focused_action = .primary;
+            } else {
+                state.closed = true;
+            }
+        },
+        .claude_code => state.backend = .claudeCode,
+        .copilot_cli => state.backend = .copilotCLI,
+        .codex => state.backend = .codex,
+    }
+}
+
 fn handleClick(hwnd: c.HWND, x: i32, y: i32) void {
     if (applyClick(&active_state, x, y)) {
+        syncProvider();
         _ = c.InvalidateRect(hwnd, null, 0);
     }
 }
 
 fn applyClick(state: *State, x: i32, y: i32) bool {
     if (inside(x, y, rect(474, 12, 540, 42))) {
-        state.closed = true;
+        invokeAction(state, .skip);
         return false;
     }
     if (state.page > 0 and inside(x, y, rect(20, 564, 102, 604))) {
-        state.page -= 1;
+        invokeAction(state, .back);
         return true;
     }
     if (inside(x, y, rect(418, 564, 540, 604))) {
-        if (state.page + 1 < page_count)
-            state.page += 1
-        else
-            state.closed = true;
+        invokeAction(state, .primary);
         return true;
     }
     if (state.page == 3) {
-        if (inside(x, y, rect(58, 182, 502, 248))) state.backend = .claudeCode;
-        if (inside(x, y, rect(58, 258, 502, 324))) state.backend = .copilotCLI;
-        if (inside(x, y, rect(58, 334, 502, 400))) state.backend = .codex;
+        if (inside(x, y, rect(58, 182, 502, 248))) invokeAction(state, .claude_code);
+        if (inside(x, y, rect(58, 258, 502, 324))) invokeAction(state, .copilot_cli);
+        if (inside(x, y, rect(58, 334, 502, 400))) invokeAction(state, .codex);
         return true;
     }
     return false;
 }
 
-fn paint(hdc: c.HDC, allocator: std.mem.Allocator, page: u8, backend: Backend) void {
+fn paint(
+    hdc: c.HDC,
+    allocator: std.mem.Allocator,
+    page: u8,
+    backend: Backend,
+    focused_action: Action,
+) void {
     fill(hdc, rect(0, 0, client_width, client_height), rgb(35, 35, 38));
     text(hdc, allocator, "Skip", rect(474, 16, 540, 40), 13, rgb(160, 160, 166), c.DT_CENTER | c.DT_SINGLELINE, false);
+    if (focused_action == .skip) focusOutline(hdc, rect(474, 12, 540, 42));
     switch (page) {
         0 => paintWelcome(hdc, allocator),
         1 => paintReading(hdc, allocator),
         2 => paintTypes(hdc, allocator),
-        else => paintBackends(hdc, allocator, backend),
+        else => paintBackends(hdc, allocator, backend, focused_action),
     }
-    paintFooter(hdc, allocator, page);
+    paintFooter(hdc, allocator, page, focused_action);
 }
 
 fn paintWelcome(hdc: c.HDC, allocator: std.mem.Allocator) void {
@@ -265,9 +399,7 @@ fn paintWelcome(hdc: c.HDC, allocator: std.mem.Allocator) void {
     card(hdc, allocator, rect(276, 144, 472, 204), rgb(123, 210, 130), "Fix the top crash", "RUNNING", "pass 3 - 1.42 -> 1.10", false);
     card(hdc, allocator, rect(78, 220, 274, 280), rgb(179, 138, 255), "Review the fix", "NEEDS YOU", "\"Ship this, or split it in two?\"", true);
     text(hdc, allocator, "Agents you can watch", rect(32, 330, 528, 370), 25, rgb(245, 245, 247), c.DT_CENTER | c.DT_SINGLELINE, true);
-    text(hdc, allocator,
-        "Every card is a real terminal session you can open and steer. They hand work to each other along the edges - and tell you when they need you.",
-        rect(48, 382, 512, 456), 14, rgb(168, 168, 174), c.DT_CENTER | c.DT_WORDBREAK, false);
+    text(hdc, allocator, "Every card is a real terminal session you can open and steer. They hand work to each other along the edges - and tell you when they need you.", rect(48, 382, 512, 456), 14, rgb(168, 168, 174), c.DT_CENTER | c.DT_WORDBREAK, false);
 }
 
 fn paintReading(hdc: c.HDC, allocator: std.mem.Allocator) void {
@@ -297,17 +429,26 @@ fn paintTypes(hdc: c.HDC, allocator: std.mem.Allocator) void {
     card(hdc, allocator, rect(76, 370, 244, 424), rgb(90, 174, 255), "Find bugs", "RUNNING", "/loop 1h", false);
     line(hdc, 250, 397, 306, 397, rgb(112, 112, 118), 2);
     card(hdc, allocator, rect(314, 370, 482, 424), rgb(123, 210, 130), "Fix them", "IDLE", "waiting on the hand-off", false);
-    text(hdc, allocator,
-        "Wire them together by dragging from a card's + handle. Click + without dragging to grow a new loop already connected to it.",
-        rect(58, 446, 502, 512), 13, rgb(158, 158, 165), c.DT_CENTER | c.DT_WORDBREAK, false);
+    text(hdc, allocator, "Wire them together by dragging from a card's + handle. Click + without dragging to grow a new loop already connected to it.", rect(58, 446, 502, 512), 13, rgb(158, 158, 165), c.DT_CENTER | c.DT_WORDBREAK, false);
 }
 
-fn paintBackends(hdc: c.HDC, allocator: std.mem.Allocator, selected: Backend) void {
+fn paintBackends(
+    hdc: c.HDC,
+    allocator: std.mem.Allocator,
+    selected: Backend,
+    focused_action: Action,
+) void {
     text(hdc, allocator, "Which agent runs them", rect(32, 64, 528, 102), 25, rgb(245, 245, 247), c.DT_CENTER | c.DT_SINGLELINE, true);
     text(hdc, allocator, "The default for new loops. Change it any time in Settings, or per loop.", rect(52, 108, 508, 150), 14, rgb(168, 168, 174), c.DT_CENTER | c.DT_WORDBREAK, false);
     backendRow(hdc, allocator, rect(58, 182, 502, 248), .claudeCode, selected, "Claude Code", "Anthropic's agent - the reference backend, fully wired.", true);
     backendRow(hdc, allocator, rect(58, 258, 502, 324), .copilotCLI, selected, "Copilot CLI", "GitHub's agent CLI.", false);
     backendRow(hdc, allocator, rect(58, 334, 502, 400), .codex, selected, "Codex", "OpenAI's agent CLI.", false);
+    switch (focused_action) {
+        .claude_code => focusOutline(hdc, rect(58, 182, 502, 248)),
+        .copilot_cli => focusOutline(hdc, rect(58, 258, 502, 324)),
+        .codex => focusOutline(hdc, rect(58, 334, 502, 400)),
+        else => {},
+    }
     text(hdc, allocator, "The CLI must be installed and on your PATH - GraphCode launches it, it doesn't bundle it.", rect(72, 434, 488, 480), 12, rgb(126, 126, 133), c.DT_CENTER | c.DT_WORDBREAK, false);
 }
 
@@ -333,14 +474,16 @@ fn backendRow(
     text(hdc, allocator, if (is_selected) "●" else "○", rect(bounds.right - 38, bounds.top + 21, bounds.right - 12, bounds.top + 47), 18, if (is_selected) rgb(10, 132, 255) else rgb(110, 110, 116), c.DT_CENTER | c.DT_SINGLELINE, false);
 }
 
-fn paintFooter(hdc: c.HDC, allocator: std.mem.Allocator, page: u8) void {
+fn paintFooter(hdc: c.HDC, allocator: std.mem.Allocator, page: u8, focused_action: Action) void {
     if (page > 0) {
         rounded(hdc, rect(20, 564, 102, 604), rgb(48, 48, 52), rgb(78, 78, 84), 9);
         text(hdc, allocator, "Back", rect(20, 576, 102, 598), 13, rgb(230, 230, 234), c.DT_CENTER | c.DT_SINGLELINE, false);
+        if (focused_action == .back) focusOutline(hdc, rect(20, 564, 102, 604));
     }
     const primary = page + 1 == page_count;
     rounded(hdc, rect(418, 564, 540, 604), if (primary) rgb(10, 132, 255) else rgb(48, 48, 52), if (primary) rgb(10, 132, 255) else rgb(78, 78, 84), 9);
     text(hdc, allocator, if (primary) "Get Started" else "Continue", rect(418, 576, 540, 598), 13, rgb(245, 245, 247), c.DT_CENTER | c.DT_SINGLELINE, true);
+    if (focused_action == .primary) focusOutline(hdc, rect(418, 564, 540, 604));
     var x: i32 = 254;
     for (0..page_count) |index| {
         const color = if (index == page) rgb(10, 132, 255) else rgb(92, 92, 98);
@@ -353,6 +496,12 @@ fn paintFooter(hdc: c.HDC, allocator: std.mem.Allocator, page: u8) void {
         }
         x += 16;
     }
+}
+
+fn focusOutline(hdc: c.HDC, bounds_value: c.RECT) void {
+    var bounds = bounds_value;
+    _ = c.InflateRect(&bounds, -3, -3);
+    _ = c.DrawFocusRect(hdc, &bounds);
 }
 
 fn typeTile(hdc: c.HDC, allocator: std.mem.Allocator, bounds: c.RECT, accent: u32, name: []const u8, detail: []const u8) void {
@@ -480,6 +629,54 @@ test "onboarding skip closes immediately" {
     var state = State{ .allocator = std.testing.allocator, .backend = .claudeCode };
     try std.testing.expect(!applyClick(&state, 500, 20));
     try std.testing.expect(state.closed);
+}
+
+test "onboarding keyboard focus traversal and invocation is deterministic" {
+    var state = State{ .allocator = std.testing.allocator, .backend = .claudeCode };
+
+    try std.testing.expect(applyKeyboard(&state, c.VK_TAB, false));
+    try std.testing.expectEqual(Action.skip, state.focused_action);
+    try std.testing.expect(applyKeyboard(&state, c.VK_TAB, true));
+    try std.testing.expectEqual(Action.primary, state.focused_action);
+    try std.testing.expect(applyKeyboard(&state, c.VK_RETURN, false));
+    try std.testing.expectEqual(@as(u8, 1), state.page);
+    try std.testing.expectEqual(Action.primary, state.focused_action);
+}
+
+test "onboarding keyboard backend selection remains in the deterministic focus order" {
+    var state = State{
+        .allocator = std.testing.allocator,
+        .page = 3,
+        .backend = .claudeCode,
+    };
+
+    try std.testing.expect(applyKeyboard(&state, c.VK_TAB, false));
+    try std.testing.expectEqual(Action.skip, state.focused_action);
+    try std.testing.expect(applyKeyboard(&state, c.VK_TAB, false));
+    try std.testing.expectEqual(Action.back, state.focused_action);
+    try std.testing.expect(applyKeyboard(&state, c.VK_TAB, false));
+    try std.testing.expectEqual(Action.claude_code, state.focused_action);
+    try std.testing.expect(applyKeyboard(&state, c.VK_TAB, false));
+    try std.testing.expectEqual(Action.copilot_cli, state.focused_action);
+    try std.testing.expect(applyKeyboard(&state, c.VK_SPACE, false));
+    try std.testing.expectEqual(Backend.copilotCLI, state.backend);
+    try std.testing.expectEqual(Action.copilot_cli, state.focused_action);
+}
+
+test "onboarding routes WM_GETOBJECT to named Invoke-capable actions" {
+    const source = @embedFile("WindowsOnboarding.zig");
+    const proc_start = std.mem.indexOf(u8, source, "fn windowProc") orelse
+        return error.OnboardingWindowProcedureMissing;
+    const proc_tail = source[proc_start..];
+    const proc_end = std.mem.indexOf(u8, proc_tail, "fn applyKeyboard") orelse
+        return error.OnboardingWindowProcedureMissing;
+    const window_proc = proc_tail[0..proc_end];
+    try std.testing.expect(std.mem.indexOf(u8, window_proc, "c.WM_GETOBJECT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, window_proc, "gc_onboarding_uia_get_object") != null);
+
+    const native_source = @embedFile("OnboardingAccessibilityProvider.cpp");
+    try std.testing.expect(std.mem.indexOf(u8, native_source, "UIA_InvokePatternId") != null);
+    try std.testing.expect(std.mem.indexOf(u8, native_source, "Get Started") != null);
 }
 
 test "onboarding marker persists first-run completion" {
