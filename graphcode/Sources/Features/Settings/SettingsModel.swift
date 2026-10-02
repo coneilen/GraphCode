@@ -50,6 +50,10 @@ final class SettingsModel {
     }
   }
 
+  /// A page someone outside the Settings window asked for — Nod's Sign in, say. The window
+  /// is opened by `OpensRequestedSettings` and turns to it; `SettingsView` clears it.
+  var requestedPane: SettingsPane?
+
   private init() {
     let loaded = GraphcodeSettingsStore.load()
     let mailroom = Self.resolvesMailroom(

@@ -35,6 +35,11 @@ struct SettingsView: View {
     }
     .frame(minWidth: 640, idealWidth: 760, maxWidth: .infinity, minHeight: 520)
     .background(SettingsWindowResizability())
+    .onChange(of: model.requestedPane, initial: true) { _, requested in
+      guard let requested else { return }
+      pane = requested
+      model.requestedPane = nil
+    }
     .onAppear {
       nodSetup.refreshSignIn()
       mcpServers = NodMCPServer.load(
