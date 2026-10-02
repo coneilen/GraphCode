@@ -114,7 +114,8 @@ extension NodSettings {
   /// change to the defaults reaches it.
   public mutating func setModel(_ model: NodModel, for loopType: LoopType) {
     let isDefault =
-      model == NodModelCatalog.model(for: NodModelCatalog.defaultTier(for: loopType), engine: engine)
+      model
+      == NodModelCatalog.model(for: NodModelCatalog.defaultTier(for: loopType), engine: engine)
     modelsByLoopType[loopType.rawValue] = isDefault ? nil : model.id
   }
 
@@ -123,7 +124,9 @@ extension NodSettings {
   public mutating func switchEngine(to newEngine: NodEngine) {
     guard newEngine != engine else { return }
     engine = newEngine
-    modelsByLoopType = modelsByLoopType.filter { NodModelCatalog.model(id: $0.value, engine: newEngine) != nil }
+    modelsByLoopType = modelsByLoopType.filter {
+      NodModelCatalog.model(id: $0.value, engine: newEngine) != nil
+    }
     if let child = compositeChildModel, NodModelCatalog.model(id: child, engine: newEngine) == nil {
       compositeChildModel = nil
     }

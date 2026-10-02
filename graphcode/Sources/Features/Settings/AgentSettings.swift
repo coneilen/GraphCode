@@ -46,7 +46,8 @@ struct CLIAgentSettingsPane: View {
   @ViewBuilder private var permissionPicker: some View {
     switch backend {
     case .claudeCode:
-      picker($settings.claudePermissionMode, explanation: settings.claudePermissionMode.explanation) {
+      picker($settings.claudePermissionMode, explanation: settings.claudePermissionMode.explanation)
+      {
         $0.displayName
       }
     case .copilotCLI:

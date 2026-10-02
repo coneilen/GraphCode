@@ -201,9 +201,11 @@ struct NodCopilotSignInCard: View {
 
   private func waiting(_ code: CopilotDeviceFlow.DeviceCode) -> some View {
     VStack(alignment: .leading, spacing: 10) {
-      Text("We've opened \(code.verificationURL.host() ?? "github.com")\(code.verificationURL.path()). Enter this code there:")
-        .font(.system(size: 12))
-        .foregroundStyle(.white.opacity(0.75))
+      Text(
+        "We've opened \(code.verificationURL.host() ?? "github.com")\(code.verificationURL.path()). Enter this code there:"
+      )
+      .font(.system(size: 12))
+      .foregroundStyle(.white.opacity(0.75))
       HStack(spacing: 12) {
         Text(code.userCode)
           .font(.system(size: 24, weight: .semibold, design: .monospaced))

@@ -68,7 +68,8 @@ import Testing
   @Test func setupSheets() throws {
     let claude = Self.setupModel(engine: .claudeAgentSDK)
     claude.showsAPIKeyField = true
-    try Self.render(NodSetupView(model: claude), "5a-setup-claude", size: .init(width: 520, height: 470))
+    try Self.render(
+      NodSetupView(model: claude), "5a-setup-claude", size: .init(width: 520, height: 470))
 
     let code = CopilotDeviceFlow.DeviceCode(
       deviceCode: "d", userCode: "8F2K-QW7D",
@@ -176,7 +177,8 @@ private struct SettingsSidebarMock: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
       row("General", .general)
-      Text("Agents").font(.caption).foregroundStyle(.secondary).padding(.top, 8).padding(.leading, 8)
+      Text("Agents").font(.caption).foregroundStyle(.secondary).padding(.top, 8).padding(
+        .leading, 8)
       ForEach(CLISessionBackendKind.settingsOrder, id: \.self) { row($0.displayName, .agent($0)) }
       row("Templates", .templates).padding(.top, 8)
       Spacer()
@@ -189,7 +191,9 @@ private struct SettingsSidebarMock: View {
       .padding(.vertical, 4)
       .padding(.horizontal, 8)
       .frame(maxWidth: .infinity, alignment: .leading)
-      .background(pane == selected ? Color.accentColor.opacity(0.35) : .clear, in: RoundedRectangle(cornerRadius: 5))
+      .background(
+        pane == selected ? Color.accentColor.opacity(0.35) : .clear,
+        in: RoundedRectangle(cornerRadius: 5))
   }
 }
 
@@ -199,9 +203,11 @@ private struct AgentMenuMock: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 3) {
-      Text("Agent: \(AgentMenuSection.label(backend: .nod, tier: nil, loopType: loopType, nod: NodSettings())) ▾")
-        .font(.system(size: 12, weight: .semibold))
-        .padding(.bottom, 6)
+      Text(
+        "Agent: \(AgentMenuSection.label(backend: .nod, tier: nil, loopType: loopType, nod: NodSettings())) ▾"
+      )
+      .font(.system(size: 12, weight: .semibold))
+      .padding(.bottom, 6)
       ForEach(AgentMenuSection.sections(for: loopType), id: \.surface) { section in
         Text(section.title).font(.system(size: 10.5, weight: .bold)).foregroundStyle(.secondary)
           .padding(.top, 4)

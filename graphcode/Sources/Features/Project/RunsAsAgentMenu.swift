@@ -34,7 +34,9 @@ struct RunsAsAgentMenu: View {
         }
       }
     } label: {
-      Text(AgentMenuSection.label(backend: backend, tier: modelTier, loopType: loopType, nod: nodSettings))
+      Text(
+        AgentMenuSection.label(
+          backend: backend, tier: modelTier, loopType: loopType, nod: nodSettings))
     }
   }
 

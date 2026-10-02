@@ -147,7 +147,9 @@ import Testing
       NodClaudeSignIn.validateAPIKey("  sk-ant-api03-abcdefghijklmnop\n")
         == .success("sk-ant-api03-abcdefghijklmnop"))
     #expect(NodClaudeSignIn.validateAPIKey("   ") == .failure(.empty))
-    #expect(NodClaudeSignIn.validateAPIKey("gho_abcdefghijklmnopqrstuvwxyz") == .failure(.notAnAnthropicKey))
+    #expect(
+      NodClaudeSignIn.validateAPIKey("gho_abcdefghijklmnopqrstuvwxyz")
+        == .failure(.notAnAnthropicKey))
     #expect(NodClaudeSignIn.validateAPIKey("sk-ant-short") == .failure(.notAnAnthropicKey))
   }
 
@@ -289,7 +291,8 @@ import Testing
 
   @Test func signInText() {
     let now = Date(timeIntervalSince1970: 0)
-    #expect(CopilotSignInText.countdown(until: Date(timeIntervalSince1970: 852), now: now) == "14:12")
+    #expect(
+      CopilotSignInText.countdown(until: Date(timeIntervalSince1970: 852), now: now) == "14:12")
     #expect(CopilotSignInText.countdown(until: Date(timeIntervalSince1970: -5), now: now) == "0:00")
     #expect(
       CopilotSignInText.accountDetail(
@@ -395,7 +398,8 @@ import Testing
   }
 
   @Test func zeroClausesDrawNoBar() {
-    let card = LoopCardPresentation(node: Self.nodNode(), nod: NodCardDetail(goalMet: 0, goalTotal: 0))
+    let card = LoopCardPresentation(
+      node: Self.nodNode(), nod: NodCardDetail(goalMet: 0, goalTotal: 0))
     #expect(card.detail == .none)
   }
 }
