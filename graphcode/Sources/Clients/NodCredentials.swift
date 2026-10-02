@@ -33,7 +33,7 @@ struct NodCredentialStore: Sendable {
   static let live = keychain(service: NodSettings.keychainService)
 
   static func keychain(service: String) -> NodCredentialStore {
-    func query(_ credential: NodCredential) -> [CFString: Any] {
+    let query = { @Sendable (credential: NodCredential) -> [CFString: Any] in
       [
         kSecClass: kSecClassGenericPassword,
         kSecAttrService: service,
@@ -131,7 +131,7 @@ private final class LockedBox<Value>: @unchecked Sendable {
 enum NodClaudeSignIn {
   static let subscriptionLoginAllowed = false
 
-  enum APIKeyProblem: Equatable {
+  enum APIKeyProblem: Error, Equatable {
     case empty
     case notAnAnthropicKey
   }

@@ -11,19 +11,48 @@ import SwiftUI
 struct SettingsView: View {
   @Bindable private var model = SettingsModel.shared
 
-  /// One pane, no tabs. There was an Appearance tab, and it held exactly one control — a
-  /// window-opacity slider applied as `NSWindow.alphaValue`, which faded the terminal's
-  /// text along with everything else. Ghostty's own `background-opacity` does the job
-  /// properly (background only, text left crisp) and a terminal's config is where people
-  /// look for it, so the setting went rather than being reimplemented here. A tab holding
-  /// nothing is worse than no tab.
+  @State private var pane: SettingsPane? = .general
+  @State private var nodSetup = NodSetupModel()
+  @State private var mcpServers: [NodMCPServer] = [.graphcode]
+
+  /// A sidebar of General, Agents and Templates. Agents lists Nod and each CLI, because
+  /// what an agent may do without asking is set per agent, and Nod has a page of its own.
   var body: some View {
-    sessions
-      // Resizable both ways: 560 is the width the window opens at, and the floor
-      // sits at 480 — the grouped form's captions wrap, so narrow just means taller.
-      .frame(minWidth: 480, idealWidth: 560, maxWidth: .infinity)
-      .padding(.vertical, 4)
-      .background(SettingsWindowResizability())
+    NavigationSplitView {
+      List(selection: $pane) {
+        Label("General", systemImage: "gearshape").tag(SettingsPane.general)
+        Section("Agents") {
+          ForEach(CLISessionBackendKind.settingsOrder, id: \.self) { backend in
+            Text(backend.displayName).tag(SettingsPane.agent(backend))
+          }
+        }
+        Label("Templates", systemImage: "doc.on.doc").tag(SettingsPane.templates)
+      }
+      .navigationSplitViewColumnWidth(min: 150, ideal: 170, max: 220)
+    } detail: {
+      detail
+        .padding(.vertical, 4)
+    }
+    .frame(minWidth: 640, idealWidth: 760, maxWidth: .infinity, minHeight: 520)
+    .background(SettingsWindowResizability())
+    .onAppear {
+      nodSetup.refreshSignIn()
+      mcpServers = NodMCPServer.load(
+        projects: ProjectPersistence(baseDirectory: SupportDirectory.url).loadRecentProjects())
+    }
+  }
+
+  @ViewBuilder private var detail: some View {
+    switch pane ?? .general {
+    case .general:
+      sessions
+    case .agent(.nod):
+      NodSettingsPane(settings: $model.settings.nod, setup: nodSetup, mcpServers: mcpServers)
+    case .agent(let backend):
+      CLIAgentSettingsPane(backend: backend, settings: $model.settings)
+    case .templates:
+      Form { TemplatesSettingsSection() }.formStyle(.grouped)
+    }
   }
 
   private var sessions: some View {
@@ -44,70 +73,6 @@ struct SettingsView: View {
           .font(.caption2)
           .foregroundStyle(.secondary)
       }
-
-      Section {
-        Picker("Claude Code", selection: $model.settings.claudePermissionMode) {
-          ForEach(GraphcodeSettings.ClaudePermissionMode.allCases, id: \.self) { mode in
-            Text(mode.displayName).tag(mode)
-          }
-        }
-        Text(model.settings.claudePermissionMode.explanation)
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
-
-        Picker("Copilot CLI", selection: $model.settings.copilotPermissions) {
-          ForEach(GraphcodeSettings.CopilotPermissions.allCases, id: \.self) { mode in
-            Text(mode.displayName).tag(mode)
-          }
-        }
-        Text(model.settings.copilotPermissions.explanation)
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
-
-        Picker("Codex", selection: $model.settings.codexApprovals) {
-          ForEach(GraphcodeSettings.CodexApprovals.allCases, id: \.self) { mode in
-            Text(mode.displayName).tag(mode)
-          }
-        }
-        Text(model.settings.codexApprovals.explanation)
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
-
-        Picker("OpenCode", selection: $model.settings.openCodePermissions) {
-          ForEach(GraphcodeSettings.OpenCodePermissions.allCases, id: \.self) { mode in
-            Text(mode.displayName).tag(mode)
-          }
-        }
-        Text(model.settings.openCodePermissions.explanation)
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
-
-        Picker("Pi", selection: $model.settings.piProjectTrust) {
-          ForEach(GraphcodeSettings.PiProjectTrust.allCases, id: \.self) { mode in
-            Text(mode.displayName).tag(mode)
-          }
-        }
-        Text(model.settings.piProjectTrust.explanation)
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
-      } header: {
-        Text("Permissions")
-      } footer: {
-        Text(
-          "A loop runs whether or not this window is open, so nobody is there to answer a "
-            + "permission prompt. A backend left on its own default waits at that prompt "
-            + "while the graph reports the loop as running."
-        )
-        .font(.caption2)
-        .foregroundStyle(.secondary)
-      }
-
-      PreferredVersionsSettingsSection(settings: $model.settings)
 
       Section {
         Picker("Default model", selection: $model.settings.defaultModelTier) {
@@ -269,7 +234,6 @@ struct SettingsView: View {
         .foregroundStyle(.secondary)
       }
 
-      TemplatesSettingsSection()
     }
     .formStyle(.grouped)
   }
