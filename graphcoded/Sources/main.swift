@@ -410,6 +410,7 @@ import GraphcodeKit
   // directory. Has to happen before anything reads or writes — including the socket bind
   // immediately below.
   SupportDirectory.prepare()
+  NodRuntimeLocator.installAvailability()
   let supportDirectory = SupportDirectory.url
 
   let socketURL = DaemonSocketPath.url

@@ -3,7 +3,7 @@
         dev-generate dev-build-app dev-build-daemon dev-install-daemon \
         dev-install-zmx dev-run-app dev-status \
         third-party build-zmx install-zmx build-ghostty vendor-sdk \
-        build-cli install-cli release-dmg notarize signing-doctor tap-bump
+        build-cli install-cli release-dmg notarize signing-doctor tap-bump build-nod
 
 SCHEME_APP := graphcode
 SCHEME_DAEMON := graphcoded
@@ -77,6 +77,14 @@ doctor:
 # terminal surface. Both go through the SDK shim; see Tools/zig-sdk-shim/xcrun.
 # ---------------------------------------------------------------------------
 third-party: build-zmx build-ghostty
+
+# GraphCode Nod's runtime: graphcode-nod plus both engines' agent runtimes, the folder the
+# app carries at Contents/Helpers/nod (NodRuntime/README.md). Needs bun.
+NOD_BUILD_DIR := $(BUILD_DIR)/nod
+build-nod:
+	@command -v bun >/dev/null || { echo "bun missing — brew install oven-sh/bun/bun"; exit 1; }
+	rm -rf "$(NOD_BUILD_DIR)"
+	cd NodRuntime && sh scripts/package.sh "$(NOD_BUILD_DIR)" bun-darwin-arm64
 
 build-zmx:
 	@test -d ThirdParty/zmx || { echo "ThirdParty/zmx missing — run: git submodule update --init --recursive"; exit 1; }
@@ -399,7 +407,7 @@ NOTARY_PROFILE ?= graphcode
 # quarantines it. Never publish the output of a NOTARIZE=0 run.
 NOTARIZE ?= 1
 
-release-dmg: generate build-zmx
+release-dmg: generate build-zmx build-nod
 	@set -e; \
 	for scheme in $(SCHEME_APP) $(SCHEME_DAEMON) $(SCHEME_CLI); do \
 		echo "building $$scheme (Release, arm64)"; \
@@ -418,6 +426,8 @@ release-dmg: generate build-zmx
 	cp "$$PRODUCTS/graphcoded" "$(DMG_STAGE)/graphcode.app/Contents/Resources/bin/graphcoded"; \
 	cp "$$PRODUCTS/graphcode" "$(DMG_STAGE)/graphcode.app/Contents/Resources/bin/graphcode"; \
 	cp "$(BUILD_DIR)/zmx/bin/zmx" "$(DMG_STAGE)/graphcode.app/Contents/Resources/bin/zmx"; \
+	mkdir -p "$(DMG_STAGE)/graphcode.app/Contents/Helpers"; \
+	ditto "$(NOD_BUILD_DIR)" "$(DMG_STAGE)/graphcode.app/Contents/Helpers/nod"; \
 	APP="$(DMG_STAGE)/graphcode.app"; \
 	echo "signing the bundle (embedding helpers invalidates the outer signature)"; \
 	if [ -z "$(SIGN_ID)" ]; then \
@@ -431,6 +441,12 @@ release-dmg: generate build-zmx
 			codesign --force --options runtime --timestamp \
 				--sign "$(SIGN_ID)" "$$APP/Contents/Resources/bin/$$helper" >/dev/null 2>&1 \
 				|| { echo "failed to sign helper $$helper"; exit 1; }; \
+		done; \
+		for helper in graphcode-nod copilot-runtime runtime.node; do \
+			codesign --force --options runtime --timestamp \
+				--entitlements NodRuntime/packaging/entitlements.plist \
+				--sign "$(SIGN_ID)" "$$APP/Contents/Helpers/nod/$$helper" >/dev/null 2>&1 \
+				|| { echo "failed to sign Nod's $$helper"; exit 1; }; \
 		done; \
 		if [ -d "$$APP/Contents/Frameworks" ]; then \
 			find "$$APP/Contents/Frameworks" -type f \( -name '*.dylib' -o -perm -u+x \) -print0 \

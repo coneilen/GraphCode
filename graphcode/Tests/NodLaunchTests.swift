@@ -280,11 +280,12 @@ struct NodLaunchArgumentTests {
 
   @Test
   func aTimedLoopIsUnattendedAndTheEnvironmentNamesItsProject() {
-    let timed = LoopNode(
+    var timed = LoopNode(
       id: nodeID, title: "Nightly", loopType: .timeBased, triggerPrompt: "/loop 1h deps",
       backend: .nod)
+    timed.lineage = LoopLineage(kind: .fork, sourceNodeID: UUID(), briefPath: "/b.md")
     let argv = ZmxSessionLauncher.nodArguments(
-      forNode: timed, projectPath: nil, settings: GraphcodeSettings(), inheritFile: "/b.md")
+      forNode: timed, projectPath: nil, settings: GraphcodeSettings())
     #expect(Array(argv.suffix(3)) == ["--inherit", "/b.md", "--unattended"])
     let goal = LoopNode(id: nodeID, title: "Cap", loopType: .turnBased, backend: .nod)
     #expect(
@@ -298,6 +299,24 @@ struct NodLaunchArgumentTests {
           "NOD_STATE": NodRuntimeLocator.stateDirectory(forNodeID: nodeID).path,
           "NOD_NODE_ID": nodeID.uuidString, "NOD_PROJECT_PATH": "/p",
         ])
+  }
+
+  /// A brief is what a fresh conversation starts from; a resumed one already has it, and
+  /// sending it again would replay the handoff as a new turn.
+  @Test
+  func theLineageBriefRidesAFreshLaunchOnly() {
+    var child = LoopNode(id: nodeID, title: "Server caps", loopType: .goalBased, backend: .nod)
+    child.lineage = LoopLineage(
+      kind: .compositeChild, sourceNodeID: UUID(), briefPath: "/briefs/child.json")
+
+    let fresh = ZmxSessionLauncher.nodArguments(
+      forNode: child, projectPath: nil, settings: GraphcodeSettings())
+    let resumed = ZmxSessionLauncher.nodArguments(
+      forNode: child, projectPath: nil, settings: GraphcodeSettings(), fresh: false)
+
+    #expect(Array(fresh.suffix(3)) == ["--inherit", "/briefs/child.json", "--unattended"])
+    #expect(!resumed.contains("--inherit"))
+    #expect(resumed.last == "--unattended")
     #expect(NodRuntimeLocator.environment(forNodeID: nodeID)["NOD_PROJECT_PATH"] == nil)
   }
 

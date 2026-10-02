@@ -25,6 +25,13 @@ struct GraphcodeApp: App {
     unsetenv("ZMX_SESSION")
     AgentEnvironment.scrubInheritedAgentIdentity()
     SupportDirectory.prepare()
+    // From the cached ramp, so a fresh install need not wait on the network fetch. Not as a
+    // test host: the suite shares ~/.graphcode with whatever Nod this Mac has installed, and
+    // its hosting assertions must not depend on that.
+    if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+      FeatureRamps.publishNodFlag(enabled: FeatureRamps.isEnabled(.nod))
+      NodRuntimeLocator.installAvailability()
+    }
     // Records this instance as the one holding this workspace, so opening the same
     // workspace again raises this window instead of starting a second app over one set
     // of graphs and `zmx` session names. Released on the way out; a crash leaves a pid

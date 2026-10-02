@@ -49,6 +49,12 @@ public enum NodRuntimeLocator {
     return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
   }
 
+  /// Makes `CLISessionBackendKind.nod.isSpiked` mean "this process could launch it": the
+  /// ramp is on and a runtime is present. Called once by the app, the daemon and the CLI.
+  public static func installAvailability() {
+    NodRuntimeLocation.isAvailable = { binaryURL() != nil }
+  }
+
   /// `$NOD_STATE` for a node — under the support directory, so a moved workspace keeps
   /// its Nod state with everything else it owns.
   public static func stateDirectory(forNodeID nodeID: UUID) -> URL {
