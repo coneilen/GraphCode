@@ -181,13 +181,14 @@ extension CLISessionBackendKind {
   ) -> [String] {
     guard self == .nod else { return [] }
     let nod = settings.nod
-    return ["--node", nodeID.uuidString]
-      + (workingDirectory.map { ["--cwd", $0] } ?? [])
-      + ["--engine", nod.engine.rawValue, "--loop-type", loopType.nodArgument]
-      + (nod.model(for: loopType).map { ["--model", $0] } ?? [])
-      + (goalFile.map { ["--goal-file", $0] } ?? [])
-      + (inheritFile.map { ["--inherit", $0] } ?? [])
-      + (unattended ? ["--unattended"] : [])
+    var arguments = ["--node", nodeID.uuidString]
+    if let workingDirectory { arguments += ["--cwd", workingDirectory] }
+    arguments += ["--engine", nod.engine.rawValue, "--loop-type", loopType.nodArgument]
+    if let model = nod.model(for: loopType) { arguments += ["--model", model] }
+    if let goalFile { arguments += ["--goal-file", goalFile] }
+    if let inheritFile { arguments += ["--inherit", inheritFile] }
+    if unattended { arguments.append("--unattended") }
+    return arguments
   }
 
   /// pi reads a positional argument that starts with `-` as an option and one that starts
