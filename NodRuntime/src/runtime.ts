@@ -323,8 +323,14 @@ export class NodRuntime {
         this.fail({ kind: "permissionUnavailable", message: verdict.message });
         return { allow: false, message: verdict.message, interrupt: true };
       case "stage": {
-        if (!request.edit) return { allow: true };
         const auto = this.options.settings.editsInWorktree === "auto";
+        if (!request.edit) {
+          // Nothing to diff (a notebook, or an edit whose old text isn't in the file): in
+          // review mode it must not land unreviewed.
+          return auto
+            ? { allow: true }
+            : { allow: false, message: "This edit can't be staged for review. Re-read the file and make it as an exact text edit." };
+        }
         if (!auto) void this.options.presence.presence("awaitingInput", "waiting for review");
         try {
           const outcome = await this.stager.stageEdit(request.edit.path, request.edit.after, turn, auto);

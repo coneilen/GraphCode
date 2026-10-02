@@ -40,7 +40,7 @@ function myers(a: string[], b: string[]): Op[] {
   if (m === 0) return a.map((text) => ({ kind: "-", text }));
   const max = n + m;
   const offset = max;
-  let v = new Int32Array(2 * max + 2);
+  let v: Int32Array = new Int32Array(2 * max + 2);
   const trace: Int32Array[] = [];
   outer: for (let d = 0; d <= max; d++) {
     trace.push(v.slice());
