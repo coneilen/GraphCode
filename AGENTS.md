@@ -261,6 +261,20 @@ It exports the variables the build and test scripts expect:
 Pass `-SkipSwift` when you only need Zig and the providers; `-ToolRoot` and
 `-ProviderRoot` relocate the tool and provider directories if the defaults
 (`.graphcode-tools` and `.graphcode-tools\providers`) do not suit your session.
+Zig downloads allow three retries by default, stop an attempt after 30 seconds
+without response data, and share a 15-minute overall budget per archive. Tune
+those bounded values with `-ZigRetryCount`, `-ZigStallTimeoutSeconds`, and
+`-ZigOverallTimeoutSeconds`. Set `GRAPHCODE_ZIG_MIRROR` or pass `-ZigBaseUrl`
+to replace the `https://ziglang.org` base URL; the pinned SHA-256 remains
+mandatory for every source.
+
+The bootstrap retains a checksum-verified `zig-<version>.zip` for reuse. A
+corrupt cached or completed archive is deleted and never extracted. Interrupted
+transfers remain as `zig-<version>.zip.partial` and resume with HTTP Range on
+the next attempt or run; an exhausted retry budget reports that path instead of
+discarding useful bytes. Hosted CI prints attempt boundaries and throttles byte,
+speed, and ETA updates to avoid noisy logs.
+
 Bootstrap enables `core.longpaths=true` only in each provider repository and
 can resume a provider checkout that its own prior run left incomplete. If it
 warns that the checkout exceeds the legacy path budget, use a short repository
