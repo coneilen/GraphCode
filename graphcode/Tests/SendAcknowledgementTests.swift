@@ -112,6 +112,48 @@ struct SendAcknowledgementTests {
     #expect(typed.value == ["[graphcode] now", "[graphcode] later"])
   }
 
+  @Test(.timeLimit(.minutes(1)))
+  func aTypingThatHangsIsStagedAtTheDeadlineAndFreesTheLoop() async {
+    let never = Gate()
+    let typed = LockIsolated<[String]>([])
+    let remembered = LockIsolated<[String]>([])
+    let graph = Self.graph()
+    let store = GraphStore(
+      graph: graph,
+      deliveryDeadline: .milliseconds(300),
+      onDeliverMessage: { _, text, _ in
+        if text.hasSuffix("now") { await never.wait() }
+        typed.withValue { $0.append(text) }
+        return true
+      },
+      onReadPresence: { _, _ in PresenceReading(presence: .idle, confidence: .reported) },
+      onAppendMemory: { _, entry in remembered.withValue { $0.append(entry) } })
+    let nodeID = graph.nodes[0].id
+
+    await store.handle(.messageNode(nodeID, text: "now", from: nil, followUp: nil))
+    await store.handle(.messageNode(nodeID, text: "later", from: nil, followUp: true))
+    await store.finishSessionTyping()
+
+    #expect(remembered.value.contains("while you were away: [graphcode] now"))
+    #expect(typed.value == ["[graphcode] later"])
+  }
+
+  @Test
+  func aSendIsBroadcastOnceWhenItsDrainChangesNothing() async {
+    let broadcasts = LockIsolated(0)
+    let graph = Self.graph()
+    let store = GraphStore(
+      graph: graph,
+      onGraphChanged: { _ in broadcasts.withValue { $0 += 1 } },
+      onDeliverMessage: { _, _, _ in true },
+      onAppendMemory: { _, _ in })
+
+    await store.handle(.messageNode(graph.nodes[0].id, text: "hi", from: nil, followUp: nil))
+    await store.finishSessionTyping()
+
+    #expect(broadcasts.value == 1)
+  }
+
   @Test
   func aSendThatCannotBeTypedIsStagedWithoutAnErrorForOtherClients() async {
     let remembered = LockIsolated<[String]>([])

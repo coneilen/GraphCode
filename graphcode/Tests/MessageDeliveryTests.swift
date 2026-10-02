@@ -101,6 +101,30 @@ struct MessageDeliveryTests {
     return String(("[graphcode] \(tag): " + filler).prefix(bytes))
   }
 
+  /// Issue #215 against a real husk: `zmx run … -d true` leaves the wrapper shell at its
+  /// prompt with the task ended, which is exactly the session a stale listing would call
+  /// alive. Nothing may be typed into it.
+  @Test
+  func aSessionWhoseTaskEndedIsNeverTypedInto() async throws {
+    let node = node()
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    defer { Task { await kill(name) } }
+    await run("\(Self.quoted(Self.zmx)) run \(Self.quoted(name)) -d true >/dev/null 2>&1")
+    var husk = false
+    for _ in 0..<200 {
+      let listing = await run("\(Self.quoted(Self.zmx)) ls")
+      let row = listing.output.split(separator: "\n").first { $0.contains("name=\(name)") }
+      if row?.contains("ended=") == true {
+        husk = true
+        break
+      }
+      try? await Task.sleep(for: .milliseconds(100))
+    }
+    try #require(husk)
+
+    #expect(!(await ZmxSessionLauncher.send("[graphcode] are you there?", to: node)))
+  }
+
   @Test
   func anOversizedMessageArrivesByteForByte() async throws {
     let node = node()

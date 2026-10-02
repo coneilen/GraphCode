@@ -1344,11 +1344,16 @@ public actor GraphStore {
     // follow-up an idle target can take now, and the CLI's ten-second wait for its
     // verdict is not the place to spend that.
     var errors: [String] = []
+    var acknowledged: LoopGraph?
     if case .messageNode = command {
       errors = await drainPendingErrors(broadcastErrors: broadcastErrors)
-      if errors.isEmpty { await broadcast() }
+      if errors.isEmpty {
+        await broadcast()
+        acknowledged = graph
+      }
     }
-    errors += await drainAndBroadcast(broadcastErrors: broadcastErrors)
+    errors += await drainAndBroadcast(
+      broadcastErrors: broadcastErrors, unlessStillAt: acknowledged)
     if let error = errors.first {
       return .rejected(message: error, graph: graph)
     }
@@ -3742,18 +3747,14 @@ public actor GraphStore {
     // A follow-up question to a finished loop whose session is still up reaches it. The
     // graph calls a resolved loop "not live" so edges and wakes leave it alone, but a
     // human asking what it did is the point of keeping the session; the answer changes
-    // nothing about how it resolved (#346).
-    // A follow-up question to a finished loop whose session is still up reaches it. The
-    // graph calls a resolved loop "not live" so edges and wakes leave it alone, but a
-    // human asking what it did is the point of keeping the session; the answer changes
     // nothing about how it resolved (#346). Liveness is asked before the acknowledgement
-    // so a sender reporting to a finished parent still hears "staged" — one shared
-    // listing (`SessionListing`), not a typing of the message.
+    // so a sender reporting to a finished parent still hears "staged" — one `zmx ls`,
+    // not a typing of the message.
     if target.state == .succeeded || target.state == .failed,
       target.backend.capabilities.supportsMidSessionInput,
       await onSessionAlive?(target, graph.project.path) == true
     {
-      typeAfterAcknowledging(message, to: target, resolved: true)
+      await typeAfterAcknowledging(message, to: target, resolved: true)
       return
     }
     if MessageBus.deliverability(to: target) != nil {
@@ -3763,7 +3764,7 @@ public actor GraphStore {
           + "it will read it when it next wakes")
       return
     }
-    typeAfterAcknowledging(message, to: target, resolved: false)
+    await typeAfterAcknowledging(message, to: target, resolved: false)
   }
 
   /// Types a `node send` message into its target's session after the command that carried
@@ -3778,13 +3779,29 @@ public actor GraphStore {
   ///
   /// A failure found after the acknowledgement is logged and staged, not announced:
   /// `.errorOccurred` reaches every connection, and with the sender gone the first CLI to
-  /// be waiting on a verdict of its own would take it for one.
-  private func typeAfterAcknowledging(_ message: String, to target: LoopNode, resolved: Bool) {
+  /// be waiting on a verdict of its own would take it for one. Every outcome is logged
+  /// against the request that was acknowledged (`send-typed`, `send-staged`).
+  ///
+  /// Bounded by `deliveryDeadline`, as the follow-up drain is: a typing that hangs would
+  /// otherwise hold this target's chain, and every follow-up and wake behind it, forever.
+  ///
+  /// A composite's child is typed inline instead. Its store is built for one command and
+  /// discarded (`runInSubGraph`), so a chain there would be a new chain per send — no
+  /// order between them, and nothing the parent could wait on. Its parent does not
+  /// acknowledge early either, so inline costs nothing that was ever saved.
+  private func typeAfterAcknowledging(
+    _ message: String, to target: LoopNode, resolved: Bool
+  ) async {
+    let context = DaemonRequestContext.fields
+    guard subGraphDepth == 0 else {
+      await typeLogged(message, to: target.id, resolved: resolved, context: context)
+      return
+    }
     let previous = sessionTyping[target.id]?.task
     let token = UUID()
     let task = Task { [self] in
       await previous?.value
-      await typeAdHocMessage(message, to: target.id, resolved: resolved)
+      await typeLogged(message, to: target.id, resolved: resolved, context: context)
       if sessionTyping[target.id]?.token == token {
         sessionTyping.removeValue(forKey: target.id)
       }
@@ -3795,6 +3812,41 @@ public actor GraphStore {
     sessionTyping[target.id] = (token, task)
   }
 
+  private func typeLogged(
+    _ message: String, to nodeID: UUID, resolved: Bool, context: [(String, String)]
+  ) async {
+    let started = Date()
+    let outcome = await withDeadline(deliveryDeadline) {
+      await self.typeAdHocMessage(message, to: nodeID, resolved: resolved)
+    }
+    let fields =
+      context + [
+        ("node", nodeID.uuidString),
+        ("typed_ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
+      ]
+    switch outcome {
+    case .typed:
+      DaemonLog.shared.record("send-typed", fields)
+    case .staged(let reason):
+      DaemonLog.shared.record("send-staged", fields + [("reason", reason)])
+    case .targetGone:
+      DaemonLog.shared.record("send-dropped", fields + [("reason", "target-deleted")])
+    case nil:
+      // The abandoned typing may still land; a copy in memory is the cheaper mistake
+      // than a message neither typed nor kept.
+      if let target = graph.nodes[id: nodeID] {
+        stageUntyped(message, to: target)
+      }
+      DaemonLog.shared.record("send-staged", fields + [("reason", "deadline")])
+    }
+  }
+
+  private enum TypingOutcome: Sendable {
+    case typed
+    case staged(reason: String)
+    case targetGone
+  }
+
   /// Waits until every acknowledged `node send` has been typed or staged.
   public func finishSessionTyping() async {
     while let typing = sessionTyping.values.first {
@@ -3802,14 +3854,16 @@ public actor GraphStore {
     }
   }
 
-  private func typeAdHocMessage(_ message: String, to nodeID: UUID, resolved: Bool) async {
-    guard let target = graph.nodes[id: nodeID] else { return }
+  private func typeAdHocMessage(
+    _ message: String, to nodeID: UUID, resolved: Bool
+  ) async -> TypingOutcome {
+    guard let target = graph.nodes[id: nodeID] else { return .targetGone }
     if resolved {
-      if await deliverToSession(target, message) { return }
-      stageUntyped(message, to: target, reason: "session-gone")
-      return
+      if await deliverToSession(target, message) { return .typed }
+      stageUntyped(message, to: target)
+      return .staged(reason: "session-gone")
     }
-    if await deliverToSession(target, message) { return }
+    if await deliverToSession(target, message) { return .typed }
     // The transport can also fail because the session died after the graph last
     // looked — a goal loop whose agent exited on its very first turn had no session
     // left to type into, and (before sessions that answer while dead stopped passing
@@ -3824,15 +3878,14 @@ public actor GraphStore {
     if target.runsUnattended, !target.isResolved {
       ensureSession(target)
       try? await Task.sleep(for: Self.respawnedSessionSettle)
-      if await deliverToSession(target, message) { return }
+      if await deliverToSession(target, message) { return .typed }
     }
-    stageUntyped(message, to: target, reason: "delivery-failed")
+    stageUntyped(message, to: target)
+    return .staged(reason: "delivery-failed")
   }
 
-  private func stageUntyped(_ message: String, to target: LoopNode, reason: String) {
+  private func stageUntyped(_ message: String, to target: LoopNode) {
     recordMemory(target.id, "while you were away: \(message)")
-    DaemonLog.shared.record(
-      "send-staged", [("node", target.id.uuidString), ("reason", reason)])
     onAnnounceError?(
       "delivery to \(target.title)'s session failed — message staged to its memory; "
         + "it will read it when it next wakes")
@@ -4579,7 +4632,11 @@ public actor GraphStore {
   /// The same settle-then-tell sequence `handle` ends with, for the paths that mutate
   /// outside a command — goal polling resolves nodes and fires edges too, and an edge
   /// fired from a poll must not wait for the next unrelated command to be delivered.
-  private func drainAndBroadcast(broadcastErrors: Bool = true) async -> [String] {
+  /// `unlessStillAt` skips the closing broadcast when the graph is exactly the one
+  /// already broadcast — a `node send` acknowledged before its drain.
+  private func drainAndBroadcast(
+    broadcastErrors: Bool = true, unlessStillAt broadcasted: LoopGraph? = nil
+  ) async -> [String] {
     releaseHeldCompletions()
     let errors = await drainPendingErrors(broadcastErrors: broadcastErrors)
     await drainPendingMessages()
@@ -4587,7 +4644,7 @@ public actor GraphStore {
     await drainPendingHandoffDeliveries()
     await drainPendingNudges()
     await drainPendingFollowUps()
-    if errors.isEmpty {
+    if errors.isEmpty, broadcasted == nil || graph != broadcasted {
       await broadcast()
     }
     return errors

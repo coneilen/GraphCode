@@ -739,12 +739,17 @@ public enum ZmxSessionLauncher {
   /// swallows anything typed at it (issue #215's `node send` that reported "delivered"
   /// into a session whose `claude` had exited). Only a running task is a session a
   /// keystroke can reach.
-  static func sessionExists(_ node: LoopNode, projectPath: String? = nil) async -> Bool {
+  ///
+  /// `fresh` for a lifecycle decision — a start, a kill, a launch that may have died —
+  /// where the shared listing could predate the very change being checked.
+  static func sessionExists(
+    _ node: LoopNode, projectPath: String? = nil, fresh: Bool = false
+  ) async -> Bool {
     if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
       return await runRemoteRetrying(
         remoteStatusInvocation(forNode: node, label: "presence", at: remote))
     }
-    return await sessionTaskState(node) == .alive
+    return await sessionTaskState(node, fresh: fresh) == .alive
   }
 
   /// What is actually inside the node's zmx session: a running task (`alive`), a
@@ -753,9 +758,9 @@ public enum ZmxSessionLauncher {
   /// its own: every `ls` probes every session on the machine, so one per node made a
   /// presence pass O(N²) probes, and on a CPU-starved machine a send's gate alone took
   /// longer than the CLI waits for its acknowledgement.
-  static func sessionTaskState(_ node: LoopNode) async -> SessionTaskState {
+  static func sessionTaskState(_ node: LoopNode, fresh: Bool = false) async -> SessionTaskState {
     guard ZmxLocator.isInstalled else { return .absent }
-    let result = await SessionListing.shared.listing()
+    let result = await SessionListing.shared.listing(fresh: fresh)
     return sessionTaskState(
       lsStatus: result?.status, lsOutput: result?.output ?? "",
       sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName)
@@ -884,7 +889,7 @@ public enum ZmxSessionLauncher {
     guard ZmxLocator.isInstalled else {
       return .failure(.unavailable("zmx is not installed"))
     }
-    if await sessionExists(node, projectPath: projectPath) {
+    if await sessionExists(node, projectPath: projectPath, fresh: true) {
       return .success(.attached)
     }
     var spawnedProcess: Process?
@@ -918,7 +923,7 @@ public enum ZmxSessionLauncher {
     }
     for delay in [100, 200, 400, 800, 1200] {
       try? await Task.sleep(for: .milliseconds(delay))
-      if await sessionExists(node, projectPath: projectPath) {
+      if await sessionExists(node, projectPath: projectPath, fresh: true) {
         spawnedProcess = nil
         return .success(.started)
       }
@@ -929,12 +934,12 @@ public enum ZmxSessionLauncher {
     }
     await kill(node, projectPath: projectPath)
     for delay in [100, 200, 400] {
-      if await sessionExists(node, projectPath: projectPath) {
+      if await sessionExists(node, projectPath: projectPath, fresh: true) {
         await kill(node, projectPath: projectPath)
       }
       try? await Task.sleep(for: .milliseconds(delay))
     }
-    if await sessionExists(node, projectPath: projectPath) {
+    if await sessionExists(node, projectPath: projectPath, fresh: true) {
       return .failure(.failed("zmx session appeared after startup timeout"))
     }
     return .failure(
@@ -946,12 +951,12 @@ public enum ZmxSessionLauncher {
   public static func terminateResult(
     _ node: LoopNode, projectPath: String? = nil
   ) async -> Result<Void, CLISessionError> {
-    guard await sessionExists(node, projectPath: projectPath) else {
+    guard await sessionExists(node, projectPath: projectPath, fresh: true) else {
       SessionIDStore.remove(forNodeID: node.id)
       return .success(())
     }
     await kill(node, projectPath: projectPath)
-    guard !(await sessionExists(node, projectPath: projectPath)) else {
+    guard !(await sessionExists(node, projectPath: projectPath, fresh: true)) else {
       return .failure(.failed("zmx session remained after terminate"))
     }
     return .success(())
@@ -1138,9 +1143,9 @@ public enum ZmxSessionLauncher {
           && line.split(whereSeparator: \.isWhitespace).contains("name=\(name)")
       }
     }
-    // A "no" decides whether a pane closing resolves the loop, and a shared listing can
-    // predate the session — so it is confirmed against a listing of its own.
-    if alive(in: await SessionListing.shared.listing()) { return true }
+    // Fresh both ways: a "no" decides whether a pane closing resolves the loop, and a
+    // "yes" tells a sender their message to a finished loop will be typed in. The shared
+    // listing can predate the session starting, or its task ending.
     return alive(in: await SessionListing.shared.listing(fresh: true))
   }
 
@@ -2633,7 +2638,7 @@ public enum ZmxSessionLauncher {
         DialLog.record(session: name, dial: "first-pass", event: "already-served")
         return
       }
-      guard await sessionExists(node) else {
+      guard await sessionExists(node, fresh: true) else {
         DialLog.record(session: name, dial: "first-pass", event: "no-session")
         return
       }
@@ -2748,7 +2753,7 @@ public enum ZmxSessionLauncher {
   /// count as the death they are.
   private static func sessionDiedImmediately(node: LoopNode) async -> Bool {
     try? await Task.sleep(for: .seconds(resumeSettleSeconds))
-    return await sessionTaskState(node) != .alive
+    return await sessionTaskState(node, fresh: true) != .alive
   }
 
   /// `logFragment` rides inside the run branch, so an ensure whose check found the
@@ -2858,7 +2863,11 @@ extension ZmxSessionLauncher {
       var reuseBound = passStartedAt.map { max($0, now - passReuseLimit) } ?? now - reuseWindow
       if let floor { reuseBound = max(reuseBound, floor) }
       if !fresh, let latest, latest.startedAt >= reuseBound { return latest.result }
-      if let inFlight, joinBound.map({ inFlight.startedAt >= $0 }) ?? true {
+      // A listing that has run longer than a pass may reuse one is hung, not slow; it
+      // is left to its own caller rather than stalling everyone who joins it.
+      if let inFlight,
+        inFlight.startedAt >= max(joinBound ?? now - passReuseLimit, now - passReuseLimit)
+      {
         return await inFlight.task.value
       }
       let startedAt = clock.now
