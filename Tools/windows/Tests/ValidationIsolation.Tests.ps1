@@ -70,7 +70,7 @@ AfterEach {
 }
 
   It "uses worktree-owned roots and restores them after success" {
-    $missingFunctions.Count | Should Be 0
+    $missingFunctions.Count | Should -Be 0
     $defaultSupport = Join-Path $userProfileRoot ".graphcode"
     $defaultLocal = Join-Path $localAppDataRoot "GraphCode"
     New-Item -ItemType Directory -Force -Path $defaultSupport,$defaultLocal | Out-Null
@@ -117,24 +117,24 @@ AfterEach {
       [IO.Path]::GetFullPath($path).StartsWith(
         $ownedPrefix,
         [StringComparison]::OrdinalIgnoreCase
-      ) | Should Be $true
+      ) | Should -Be $true
     }
-    $captured.support | Should BeExactly (Join-Path $captured.validationRoot "support")
-    $captured.localAppData | Should BeExactly (
+    $captured.support | Should -BeExactly (Join-Path $captured.validationRoot "support")
+    $captured.localAppData | Should -BeExactly (
       Join-Path $captured.validationRoot "local-app-data"
     )
-    $captured.temp | Should BeExactly (Join-Path $captured.validationRoot "temp")
-    $captured.temp | Should BeExactly $captured.tmp
-    Test-Path -LiteralPath $captured.validationRoot | Should Be $false
-    $env:GRAPHCODE_VALIDATION_ROOT | Should BeExactly "before-GRAPHCODE_VALIDATION_ROOT"
-    $env:GRAPHCODE_SUPPORT_DIR | Should BeExactly "before-GRAPHCODE_SUPPORT_DIR"
-    $env:LOCALAPPDATA | Should BeExactly "before-LOCALAPPDATA"
-    $env:TEMP | Should BeExactly "before-TEMP"
-    $env:TMP | Should BeExactly "before-TMP"
+    $captured.temp | Should -BeExactly (Join-Path $captured.validationRoot "temp")
+    $captured.temp | Should -BeExactly $captured.tmp
+    Test-Path -LiteralPath $captured.validationRoot | Should -Be $false
+    $env:GRAPHCODE_VALIDATION_ROOT | Should -BeExactly "before-GRAPHCODE_VALIDATION_ROOT"
+    $env:GRAPHCODE_SUPPORT_DIR | Should -BeExactly "before-GRAPHCODE_SUPPORT_DIR"
+    $env:LOCALAPPDATA | Should -BeExactly "before-LOCALAPPDATA"
+    $env:TEMP | Should -BeExactly "before-TEMP"
+    $env:TMP | Should -BeExactly "before-TMP"
   }
 
   It "restores and cleans owned roots when the workload fails" {
-    $missingFunctions.Count | Should Be 0
+    $missingFunctions.Count | Should -Be 0
     $caught = $null
     try {
       Invoke-WindowsShellValidationIsolation `
@@ -149,18 +149,18 @@ AfterEach {
       $caught = $_
     }
 
-    $caught.Exception.Message | Should BeExactly "controlled workload failure"
+    $caught.Exception.Message | Should -BeExactly "controlled workload failure"
     $ownedRoot = Get-Content -LiteralPath $capturePath -Raw
-    Test-Path -LiteralPath $ownedRoot.Trim() | Should Be $false
-    $env:GRAPHCODE_VALIDATION_ROOT | Should BeExactly "before-GRAPHCODE_VALIDATION_ROOT"
-    $env:GRAPHCODE_SUPPORT_DIR | Should BeExactly "before-GRAPHCODE_SUPPORT_DIR"
-    $env:LOCALAPPDATA | Should BeExactly "before-LOCALAPPDATA"
-    $env:TEMP | Should BeExactly "before-TEMP"
-    $env:TMP | Should BeExactly "before-TMP"
+    Test-Path -LiteralPath $ownedRoot.Trim() | Should -Be $false
+    $env:GRAPHCODE_VALIDATION_ROOT | Should -BeExactly "before-GRAPHCODE_VALIDATION_ROOT"
+    $env:GRAPHCODE_SUPPORT_DIR | Should -BeExactly "before-GRAPHCODE_SUPPORT_DIR"
+    $env:LOCALAPPDATA | Should -BeExactly "before-LOCALAPPDATA"
+    $env:TEMP | Should -BeExactly "before-TEMP"
+    $env:TMP | Should -BeExactly "before-TMP"
   }
 
   It "fails the task when a default-profile artifact changes" {
-    $missingFunctions.Count | Should Be 0
+    $missingFunctions.Count | Should -Be 0
     $defaultSupport = Join-Path $userProfileRoot ".graphcode"
     New-Item -ItemType Directory -Force -Path $defaultSupport | Out-Null
     $artifact = Join-Path $defaultSupport "graphcode-windows.log"
@@ -179,19 +179,19 @@ AfterEach {
       $caught = $_
     }
 
-    $caught.Exception.Message | Should Match "default profile artifact changed"
-    $caught.Exception.Message | Should Match ([regex]::Escape($defaultSupport))
-    $env:GRAPHCODE_SUPPORT_DIR | Should BeExactly "before-GRAPHCODE_SUPPORT_DIR"
+    $caught.Exception.Message | Should -Match "default profile artifact changed"
+    $caught.Exception.Message | Should -Match ([regex]::Escape($defaultSupport))
+    $env:GRAPHCODE_SUPPORT_DIR | Should -BeExactly "before-GRAPHCODE_SUPPORT_DIR"
   }
 
   It "routes the windows-shell task through the isolation boundary" {
-    $missingFunctions.Count | Should Be 0
-    $runnerSource | Should Match (
+    $missingFunctions.Count | Should -Be 0
+    $runnerSource | Should -Match (
       '(?s)foreach \(\$name in \$selected\)\s*\{\s*' +
       'if \(\$name -eq "windows-shell" -and -not \$DryRun\).*' +
       'Invoke-WindowsShellValidationIsolation.*Invoke-Task "windows-shell"'
     )
-    $runnerSource | Should Match (
+    $runnerSource | Should -Match (
       '(?s)Windows shell validation isolation contract.*' +
       'Invoke-Pester.*ValidationIsolation\.Tests\.ps1.*' +
       'TotalCount -le 0.*PassedCount -ne .*TotalCount.*FailedCount -ne 0'
