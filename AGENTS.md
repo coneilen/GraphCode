@@ -230,6 +230,11 @@ a suite builds or reads, add it to the classifier and its tests
 
 ### Bootstrap before anything else
 
+Start with the
+[Windows contributor quick start](graphcode-windows/README.md#windows-contributor-quick-start)
+for the pinned build/run/stop path, measured reference timings, sandbox
+behavior, and evidence limits.
+
 **Do not hand-roll a toolchain environment, and do not install toolchains by
 hand.** The repository already pins and resolves everything:
 
