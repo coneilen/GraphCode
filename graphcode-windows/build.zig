@@ -10,6 +10,11 @@ pub fn build(b: *std.Build) !void {
     });
     const optimize = b.standardOptimizeOption(.{});
     const package_version = b.option([]const u8, "version", "Packaged GraphCode release version") orelse "dev";
+    const worktrees_deferred = b.option(
+        bool,
+        "worktrees-deferred",
+        "Defer all Worktrees actions with the Windows preview message",
+    ) orelse false;
 
     const winghostty_dir = b.option(
         []const u8,
@@ -61,6 +66,7 @@ pub fn build(b: *std.Build) !void {
     module.addIncludePath(.{ .cwd_relative = winghostty_include });
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", package_version);
+    build_options.addOption(bool, "worktrees_deferred", worktrees_deferred);
     module.addOptions("build_options", build_options);
 
     const exe = b.addExecutable(.{
@@ -78,7 +84,7 @@ pub fn build(b: *std.Build) !void {
     });
     exe.addCSourceFile(.{
         .file = b.path("src/AccessibilityProvider.cpp"),
-        .flags = &.{ "-Wno-unused-command-line-argument" },
+        .flags = &.{"-Wno-unused-command-line-argument"},
     });
     exe.addObjectFile(.{ .cwd_relative = winghostty_lib });
     exe.addObjectFile(vt_library);

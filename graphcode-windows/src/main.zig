@@ -16,6 +16,13 @@ pub fn main() !void {
             try stdout.interface.print("{s}\n", .{build_options.version});
             return;
         }
+        if (std.mem.eql(u8, arg, "--worktrees-preview-state")) {
+            var stdout = std.fs.File.stdout().writer(&.{});
+            try stdout.interface.print("{s}\n", .{
+                if (build_options.worktrees_deferred) "deferred" else "available",
+            });
+            return;
+        }
     }
     var app = App.init(allocator) catch |err| {
         if (err == error.InstanceAlreadyRunning) {
