@@ -49,7 +49,7 @@ struct NodChatFeature {
       branch: String? = nil, goal: String? = nil
     ) {
       self.nodeID = nodeID
-      self.stateDirectory = stateDirectory ?? NodStateDirectory.url(forNode: nodeID)
+      self.stateDirectory = stateDirectory ?? NodRuntimeLocator.stateDirectory(forNodeID: nodeID)
       self.loopTitle = loopTitle
       self.loopType = loopType
       self.branch = branch

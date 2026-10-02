@@ -25,6 +25,13 @@ struct GraphcodeApp: App {
     unsetenv("ZMX_SESSION")
     AgentEnvironment.scrubInheritedAgentIdentity()
     SupportDirectory.prepare()
+    // From the cached ramp, so a fresh install need not wait on the network fetch. Not as a
+    // test host: the suite shares ~/.graphcode with whatever Nod this Mac has installed, and
+    // its hosting assertions must not depend on that.
+    if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+      FeatureRamps.publishNodFlag(enabled: FeatureRamps.isEnabled(.nod))
+      NodRuntimeLocator.installAvailability()
+    }
     let nodCards = NodLiveCardState()
     NodCardWiring.provider = nodCards
     NodCardWiring.answerer = nodCards

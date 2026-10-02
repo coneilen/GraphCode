@@ -31,7 +31,10 @@ struct NodBackendTests {
   /// Until NodRuntime ships a binary, a loop labelled Nod would open nothing — the exact
   /// failure `isSpiked` exists to refuse.
   @Test
-  func nodHostsNothingUntilTheRuntimeShips() {
+  func nodHostsNothingWhereItCannotLaunch() {
+    // The test host never installs `NodRuntimeLocator.installAvailability`, so this is the
+    // answer for a process with no ramp flag or runtime: only the override would count.
+    #expect(NodRuntimeLocation.developmentOverride == nil)
     #expect(!CLISessionBackendKind.nod.isSpiked)
     #expect(CLISessionBackendKind.nod.executableName == "graphcode-nod")
     for loopType in LoopType.allCases {

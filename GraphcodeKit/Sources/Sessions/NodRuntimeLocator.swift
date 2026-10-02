@@ -21,9 +21,13 @@ public enum NodRuntimeLocator {
       .appendingPathComponent("ramp.on")
   }
 
+  /// The test host shares ~/.graphcode with whatever Nod this Mac has installed; its
+  /// answers must come from the overrides above, never from that install.
+  static let isTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+
   /// Whether Nod may be created or launched at all on this install.
   public static var isRampedOn: Bool {
-    rampOverride ?? FileManager.default.fileExists(atPath: rampFlag.path)
+    rampOverride ?? (!isTestHost && FileManager.default.fileExists(atPath: rampFlag.path))
   }
 
   /// The runtime's directory inside the app bundle — `graphcode-nod` with what it loads
@@ -46,7 +50,14 @@ public enum NodRuntimeLocator {
       bundle.bundleURL.appendingPathComponent("\(bundledDirectory)/\(name)"),
       SupportDirectory.binDirectory.appendingPathComponent("\(installedDirectory)/\(name)"),
     ]
+    guard !isTestHost else { return nil }
     return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
+  }
+
+  /// Makes `CLISessionBackendKind.nod.isSpiked` mean "this process could launch it": the
+  /// ramp is on and a runtime is present. Called once by the app, the daemon and the CLI.
+  public static func installAvailability() {
+    NodRuntimeLocation.isAvailable = { binaryURL() != nil }
   }
 
   /// `$NOD_STATE` for a node — under the support directory, so a moved workspace keeps

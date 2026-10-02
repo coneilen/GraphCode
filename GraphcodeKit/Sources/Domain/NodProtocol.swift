@@ -671,6 +671,13 @@ public enum NodRuntimeLocation {
   /// launches the session: the app for a pane, `graphcoded` for an unattended loop.
   public static let overrideVariable = "GRAPHCODE_NOD_PATH"
 
+  /// Whether this process can launch Nod. Domain cannot see the support directory or the
+  /// app bundle, so each process installs the real answer at startup
+  /// (`NodRuntimeLocator.installAvailability`); until then only the override counts.
+  nonisolated(unsafe) public static var isAvailable: @Sendable () -> Bool = {
+    developmentOverride != nil
+  }
+
   /// The override, when it names an executable file.
   public static var developmentOverride: String? {
     guard let path = ProcessInfo.processInfo.environment[overrideVariable], !path.isEmpty,

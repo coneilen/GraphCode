@@ -1532,7 +1532,7 @@ public enum ZmxSessionLauncher {
       node.backend == .copilotCLI
       ? nil : SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     let resumeArgs =
-      nodArguments(forNode: node, projectPath: projectPath, settings: settings)
+      nodArguments(forNode: node, projectPath: projectPath, settings: settings, fresh: false)
       + node.backend.launchArguments(
         prompt: nil, tier: tier, settings: settings,
         workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath),
@@ -1566,18 +1566,20 @@ public enum ZmxSessionLauncher {
   }
 
   /// `nodArguments` for a launch from here: the node's working directory, and its goal
-  /// written where `--goal-file` points. Empty for every other backend. `inheritFile` is
-  /// for a fresh launch only — a resumed conversation already has what it inherited.
+  /// written where `--goal-file` points. Empty for every other backend. The lineage brief
+  /// rides a fresh launch only — a resumed conversation already has what it inherited.
+  /// A composite child is unattended like a timed loop: nobody is watching it to answer.
   static func nodArguments(
     forNode node: LoopNode, projectPath: String?, settings: GraphcodeSettings,
-    inheritFile: String? = nil
+    fresh: Bool = true
   ) -> [String] {
     guard node.backend == .nod else { return [] }
     return node.backend.nodArguments(
       nodeID: node.id, loopType: node.loopType, settings: settings,
       workingDirectory: workingDirectory(forNode: node, projectPath: projectPath),
-      goalFile: NodRuntimeLocator.writeGoal(of: node)?.path, inheritFile: inheritFile,
-      unattended: node.loopType == .timeBased)
+      goalFile: NodRuntimeLocator.writeGoal(of: node)?.path,
+      inheritFile: fresh ? node.lineage?.briefPath : nil,
+      unattended: node.loopType == .timeBased || node.lineage?.kind == .compositeChild)
   }
 
   /// A Nod session with nothing to say yet — a main loop with no starting note. Unlike a

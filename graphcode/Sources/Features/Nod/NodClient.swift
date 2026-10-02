@@ -13,14 +13,6 @@ struct NodClient: Sendable {
   var send: @Sendable (_ stateDirectory: URL, _ command: NodCommand) async throws -> Void
 }
 
-enum NodStateDirectory {
-  /// `$NOD_STATE` — `<support dir>/nod/<node-uuid>/`, which the runtime is launched with.
-  static func url(forNode id: UUID, supportDirectory: URL = SupportDirectory.url) -> URL {
-    supportDirectory.appendingPathComponent("nod", isDirectory: true)
-      .appendingPathComponent(id.uuidString, isDirectory: true)
-  }
-}
-
 /// Splits appended bytes into records, holding a torn final line back until the rest of
 /// it arrives. Pure, so the tail's edge cases are testable without a file.
 struct NodEventTail: Equatable {
