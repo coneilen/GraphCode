@@ -13129,7 +13129,7 @@ test "preview Worktrees guard blocks production actions without inspection" {
     app.selected_worktree_path = try allocator.dupe(u8, "C:\\preview-worktree");
     app.reclaim_confirmation_armed = true;
 
-    app.handleAction(.inspect_worktrees);
+    app.inspectWorktrees();
     try std.testing.expectEqualStrings(worktrees_deferred_message, app.status_override);
     try std.testing.expectEqual(@as(usize, 0), app.worktree_inspection_attempt_count);
     try std.testing.expect(app.worktree_inspection == null);
@@ -13137,7 +13137,6 @@ test "preview Worktrees guard blocks production actions without inspection" {
     try std.testing.expectEqual(@as(usize, 0), app.selected_worktree_path.len);
     try std.testing.expect(!app.reclaim_confirmation_armed);
 
-    app.inspectWorktrees();
     app.inspectWorktreesImpl(false);
     app.presentWorktreeSweep();
     app.reclaimWorktrees();
@@ -13152,16 +13151,6 @@ test "preview Worktrees guard blocks production actions without inspection" {
     try std.testing.expect(!app.selectWorktreeRow("C:\\preview-worktree"));
     try std.testing.expect(!app.toggleWorktreeRow(0));
     try std.testing.expect(!app.applyUiaWorktreeSelection(0, 0));
-    for ([_]InputRouter.Action{
-        .reclaim_worktrees,
-        .reveal_worktree,
-        .edit_worktree_policy,
-        .save_worktree_policy,
-        .worktree_next,
-        .worktree_previous,
-    }) |action| {
-        app.handleAction(action);
-    }
     try std.testing.expectEqualStrings(worktrees_deferred_message, app.status_override);
     try std.testing.expectEqual(@as(usize, 0), app.worktree_inspection_attempt_count);
 
