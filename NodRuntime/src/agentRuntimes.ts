@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { supportDirectory } from "./settings";
@@ -10,7 +10,11 @@ import { supportDirectory } from "./settings";
  */
 export interface Locations {
   env: Record<string, string | undefined>;
-  /** The running executable: graphcode-nod when compiled, bun when run from source. */
+  /**
+   * The running executable, symlinks resolved: graphcode-nod when compiled, bun when run from
+   * source. The daemon launches `<support-dir>/bin/graphcode-nod`, a symlink into the app
+   * bundle, and the runtimes ship beside the real file.
+   */
   execPath: string;
   /** This module's directory, for the source checkout's `node_modules`. */
   sourceDir: string;
@@ -22,7 +26,7 @@ export interface Locations {
 
 const here: Locations = {
   env: process.env,
-  execPath: process.execPath,
+  execPath: resolvedExecPath(),
   sourceDir: import.meta.dir,
   home: homedir(),
   support: supportDirectory(),
@@ -30,6 +34,14 @@ const here: Locations = {
 };
 
 const platform = `${process.platform}-${process.arch}`;
+
+function resolvedExecPath(): string {
+  try {
+    return realpathSync(process.execPath);
+  } catch {
+    return process.execPath;
+  }
+}
 
 /**
  * Claude Code: the human's own install first, so Nod shares its sign-in and its updates;
