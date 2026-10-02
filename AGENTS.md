@@ -261,6 +261,12 @@ It exports the variables the build and test scripts expect:
 Pass `-SkipSwift` when you only need Zig and the providers; `-ToolRoot` and
 `-ProviderRoot` relocate the tool and provider directories if the defaults
 (`.graphcode-tools` and `.graphcode-tools\providers`) do not suit your session.
+Bootstrap enables `core.longpaths=true` only in each provider repository and
+can resume a provider checkout that its own prior run left incomplete. If it
+warns that the checkout exceeds the legacy path budget, use a short repository
+root such as `C:\src\GraphCode`; pass `-ToolRoot C:\gc-tools` and
+`-ProviderRoot C:\gc-providers` to shorten the downloaded dependencies. Some
+repository test fixtures also require the checkout itself to be short.
 
 ### Pinned versions
 

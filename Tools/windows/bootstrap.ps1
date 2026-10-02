@@ -18,6 +18,44 @@ if (-not $ProviderRoot) {
 }
 $ToolRoot = [IO.Path]::GetFullPath($ToolRoot)
 $ProviderRoot = [IO.Path]::GetFullPath($ProviderRoot)
+
+function Test-BootstrapPathBudget(
+    [string] $RepositoryRoot,
+    [string] $Providers,
+    [scriptblock] $WarningSink
+  ) {
+  $legacyMaxPath = 259
+  $providerProbe = Join-Path (Join-Path $Providers "winghostty") (
+    "test\fuzz-libghostty\corpus\parser-cmin\" +
+    "id_000213,time_0,execs_0,orig_id_001278,src_001266,time_20982," +
+    "execs_1128131,op_quick,pos_31,val_+2,+cov")
+  $worktreeProbe = Join-Path $RepositoryRoot (
+    "graphcode-windows\.zig-cache\" +
+    "worktree-process-00000000000000000000000000000000\" +
+    "removal-output-selected-00000000000000000000000000000000\" +
+    "outside\.git\objects")
+  $overBudget = @($providerProbe, $worktreeProbe |
+      Where-Object { $_.Length -gt $legacyMaxPath })
+  if ($overBudget.Count -eq 0) {
+    return
+  }
+
+  $lengths = $overBudget | ForEach-Object { $_.Length }
+  $message = (
+    "GraphCode Windows bootstrap path budget warning: projected paths reach " +
+    "$($lengths -join ', ') characters, above legacy MAX_PATH " +
+    "($legacyMaxPath). Use a short checkout such as C:\src\GraphCode and, " +
+    "when needed, pass -ToolRoot C:\gc-tools -ProviderRoot C:\gc-providers. " +
+    "Provider Git operations enable repository-local core.longpaths=true, " +
+    "but other Windows tools and tests can still fail at this depth.")
+  if ($WarningSink) {
+    & $WarningSink $message
+  } else {
+    Write-Warning $message -WarningAction Continue
+  }
+}
+
+Test-BootstrapPathBudget $repoRoot $ProviderRoot
 New-Item -ItemType Directory -Force $ToolRoot, $ProviderRoot | Out-Null
 
 function Install-Zig([string] $Version, [string] $Sha256) {
@@ -65,23 +103,58 @@ function Install-Zig([string] $Version, [string] $Sha256) {
 
 function Install-Provider([object] $Pin, [string] $Name) {
   $destination = Join-Path $ProviderRoot $Name
-  if (-not (Test-Path -LiteralPath (Join-Path $destination ".git"))) {
-    git clone --no-checkout $Pin.remoteUrl $destination
+  $gitDirectory = Join-Path $destination ".git"
+  $checkoutMarker = Join-Path $gitDirectory "graphcode-bootstrap-checkout"
+  $existingCheckout = Test-Path -LiteralPath $gitDirectory -PathType Container
+  $recoverCheckout = $existingCheckout -and
+    (Test-Path -LiteralPath $checkoutMarker -PathType Leaf)
+  if (-not $existingCheckout) {
+    git -c core.longpaths=true clone --no-checkout $Pin.remoteUrl $destination
     if ($LASTEXITCODE -ne 0) {
       throw "Cloning $Name failed"
     }
   }
-  git -C $destination fetch --quiet origin $Pin.sha
+
+  git -C $destination config --local core.longpaths true
+  if ($LASTEXITCODE -ne 0) {
+    throw "Configuring long-path support for $Name failed"
+  }
+  if ($existingCheckout -and -not $recoverCheckout) {
+    $status = @(git -c core.longpaths=true -C $destination status `
+        --porcelain --untracked-files=all)
+    if ($LASTEXITCODE -ne 0) {
+      throw "Inspecting $Name provider checkout failed"
+    }
+    if ($status.Count -ne 0) {
+      throw "$Name provider checkout is dirty: $destination"
+    }
+  }
+
+  git -c core.longpaths=true -C $destination fetch --quiet origin $Pin.sha
   if ($LASTEXITCODE -ne 0) {
     throw "Fetching $Name pin $($Pin.sha) failed"
   }
-  git -C $destination checkout --quiet --detach $Pin.sha
+  if (-not $recoverCheckout) {
+    Set-Content -LiteralPath $checkoutMarker -Value $Pin.sha -NoNewline
+  }
+  if ($recoverCheckout) {
+    git -c core.longpaths=true -C $destination checkout --force --quiet `
+      --detach $Pin.sha
+  } else {
+    git -c core.longpaths=true -C $destination checkout --quiet --detach $Pin.sha
+  }
   if ($LASTEXITCODE -ne 0) {
     throw "Checking out $Name pin $($Pin.sha) failed"
   }
-  if (@(git -C $destination status --porcelain --untracked-files=all).Count -ne 0) {
+  $status = @(git -c core.longpaths=true -C $destination status `
+      --porcelain --untracked-files=all)
+  if ($LASTEXITCODE -ne 0) {
+    throw "Inspecting $Name provider checkout failed"
+  }
+  if ($status.Count -ne 0) {
     throw "$Name provider checkout is dirty: $destination"
   }
+  Remove-Item -LiteralPath $checkoutMarker -Force
   return $destination
 }
 
