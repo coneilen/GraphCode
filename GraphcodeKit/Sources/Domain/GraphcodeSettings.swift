@@ -282,6 +282,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
 
   public var piProjectTrust: PiProjectTrust
 
+  public var nod: NodSettings
+
   public var defaultBackend: CLISessionBackendKind {
     didSet {
       if !defaultBackend.isSpiked { defaultBackend = oldValue.isSpiked ? oldValue : .claudeCode }
@@ -466,6 +468,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     codexApprovals: CodexApprovals = .yolo,
     openCodePermissions: OpenCodePermissions = .auto,
     piProjectTrust: PiProjectTrust = .approve,
+    nod: NodSettings = NodSettings(),
     claudePermissionMode: ClaudePermissionMode = .auto,
     copilotPermissions: CopilotPermissions = .allowEverything,
     copilotPreferredVersion: String = "",
@@ -488,6 +491,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.codexApprovals = codexApprovals
     self.openCodePermissions = openCodePermissions
     self.piProjectTrust = piProjectTrust
+    self.nod = nod
     self.claudePermissionMode = claudePermissionMode
     self.copilotPermissions = copilotPermissions
     self.copilotPreferredVersion = copilotPreferredVersion
@@ -522,6 +526,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       ?? .auto
     piProjectTrust =
       try container.decodeIfPresent(PiProjectTrust.self, forKey: .piProjectTrust) ?? .approve
+    nod = try container.decodeIfPresent(NodSettings.self, forKey: .nod) ?? NodSettings()
     claudePermissionMode =
       try container.decodeIfPresent(ClaudePermissionMode.self, forKey: .claudePermissionMode)
       ?? .auto

@@ -1562,7 +1562,7 @@ public enum ZmxSessionLauncher {
     switch backend {
     case .claudeCode: return " --settings \"\(PresenceHooks.remotePathExpression)\""
     case .pi: return " -e \(PresenceHooks.remotePiExtensionExpression)"
-    case .copilotCLI, .codex, .openCode: return ""
+    case .copilotCLI, .codex, .openCode, .nod: return ""
     }
   }
 
@@ -1670,7 +1670,7 @@ public enum ZmxSessionLauncher {
       switch node.backend {
       case .copilotCLI: return copilotTrustSeedScript(forRemotePath: location.remotePath) + "; "
       case .claudeCode: return claudeTrustSeedScript(forRemotePath: location.remotePath) + "; "
-      case .codex, .openCode, .pi: return ""
+      case .codex, .openCode, .pi, .nod: return ""
       }
     }()
     let hooksWrite =
@@ -1697,7 +1697,7 @@ public enum ZmxSessionLauncher {
       switch node.backend {
       case .copilotCLI:
         return " && { " + CopilotSessionLog.remoteIDBankFragment(forNodeID: node.id) + "; }"
-      case .claudeCode, .codex, .openCode, .pi:
+      case .claudeCode, .codex, .openCode, .pi, .nod:
         return ""
       }
     }()
@@ -2449,7 +2449,7 @@ public enum ZmxSessionLauncher {
         case .copilotCLI:
           let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
           return CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
-        case .claudeCode, .codex, .openCode, .pi:
+        case .claudeCode, .codex, .openCode, .pi, .nod:
           return nil
         }
       }()
@@ -2494,7 +2494,7 @@ public enum ZmxSessionLauncher {
       switch node.backend {
       case .copilotCLI: CopilotTrust.ensureTrusted(directory: directory)
       case .claudeCode: ClaudeCodeTrust.ensureTrusted(directory: directory)
-      case .codex, .openCode, .pi: break
+      case .codex, .openCode, .pi, .nod: break
       }
     }
     // Noted *before* the launch: the first pass below waits for a Copilot session

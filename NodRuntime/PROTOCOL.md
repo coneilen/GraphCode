@@ -1,0 +1,60 @@
+# Nod protocol, version 1
+
+Source of truth: `GraphcodeKit/Sources/Domain/NodProtocol.swift`. Change both together.
+
+Each event and command is one JSON object on one line. A `type` field names it, and the
+payload's fields sit beside `type` rather than nested. Dates are ISO-8601 UTC. Unknown
+fields are ignored. Unknown event types decode as `unknown` and are skipped by readers, so
+adding an event never breaks an older app. Bump `v` only for a change an old reader would
+misread.
+
+## Events — `events.jsonl`
+
+Every line carries `v`, `seq` (strictly increasing from 1) and `at`.
+
+| type | fields | notes |
+|---|---|---|
+| `sessionStarted` | `engine` (`claude`/`copilot`), `model`, `conversationID`, `resumed` | first line of every run |
+| `turnStarted` | `turn`, `origin` (`user` `queue` `steer` `handoff` `mail` `timer` `goalCheck`) | |
+| `userMessage` | `id`, `text`, `delivery` (`queue`/`steer`), `attachments[]`, `fromNodeID?` | echoed when the runtime accepts it |
+| `assistantText` | `turn`, `messageID`, `delta`, `final` | deltas with one `messageID` concatenate |
+| `toolCall` | `turn`, `callID`, `tool`, `title` | `title` is the card's one line |
+| `toolResult` | `callID`, `status` (`running` `ok` `error`), `summary`, `output?`, `durationMs?` | |
+| `hunkStaged` | `turn`, `hunkID`, `file`, `header`, `diff`, `added`, `removed`, `autoAccepted` | written to disk only on accept |
+| `hunkResolved` | `hunkID`, `decision` (`accept` `reject` `comment`), `note?` | |
+| `permissionAsked` | `askID`, `kind` (`shell` `network` `editOutsideWorktree` `messageLoop` `mcpTool`), `subject`, `reason`, `answerableFromCard` | the loop is in Needs you until resolved |
+| `permissionResolved` | `askID`, `decision` (`allowOnce` `alwaysAllow` `deny`) | |
+| `goalCheck` | `turn`, `evaluatorModel`, `clauses[{text, met, evidence?}]`, `met` | run each time Nod tries to stop |
+| `turnEnded` | `turn`, `filesChanged`, `added`, `removed`, `summary?` | |
+| `usage` | `inputTokens`, `outputTokens`, `costUSD?`, `premiumRequests?`, `contextUsed` (0…1) | |
+| `planProposed` | `planID`, `title`, `steps[{id, text, files[], size?, editedByHuman}]` | |
+| `mailDraft` | `draftID`, `toNodeID`, `inReplyTo?`, `text` | sent only on `sendDraft` |
+| `compacted` | `fromTurn`, `throughTurn` | |
+| `activity` | `line` | the canvas card's live line |
+| `failure` | `kind` (`signInExpired` `contextFull` `spendCap` `permissionUnavailable` `engineError`), `message` | shown as a banner above the composer |
+
+## Commands — `control.sock`
+
+| type | fields |
+|---|---|
+| `send` | `text`, `delivery` (`queue`/`steer`), `attachments[]` |
+| `stop` | |
+| `resolveHunk` | `hunkID`, `decision`, `note?` |
+| `resolvePermission` | `askID`, `decision` |
+| `runPlan` | `planID`, `steps[]`, `mode` (`here`/`composite`) |
+| `fork` | `messageID` |
+| `sendDraft` | `draftID`, `text` |
+| `compact` | |
+| `setModel` | `model` |
+| `markGoalDone` | |
+
+The runtime answers each command line with `{"ok":true}` or `{"ok":false,"error":"…"}`.
+
+## Example
+
+```json
+{"v":1,"seq":1,"at":"2026-10-01T20:00:00Z","type":"sessionStarted","engine":"claude","model":"sonnet","conversationID":"8c1…","resumed":false}
+{"v":1,"seq":2,"at":"2026-10-01T20:00:01Z","type":"turnStarted","turn":1,"origin":"user"}
+{"v":1,"seq":3,"at":"2026-10-01T20:00:04Z","type":"toolCall","turn":1,"callID":"c1","tool":"Grep","title":"Search \"UsageGate\""}
+{"v":1,"seq":4,"at":"2026-10-01T20:00:04Z","type":"toolResult","callID":"c1","status":"ok","summary":"6 hits in 4 files","durationMs":400}
+```

@@ -86,9 +86,9 @@ public enum PresenceHooks {
         ("Stop", .idle),
         ("SessionEnd", .absent),
       ]
-    case .copilotCLI, .codex, .openCode, .pi:
+    case .copilotCLI, .codex, .openCode, .pi, .nod:
       // OpenCode and pi report through a plugin, not through a hooks table — see
-      // `OpenCodePresencePlugin`.
+      // `OpenCodePresencePlugin`. Nod's runtime reports its own events.
       return nil
     }
   }

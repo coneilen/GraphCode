@@ -74,7 +74,20 @@ extension CLISessionBackendKind {
     case .codex: return "Codex"
     case .openCode: return "OpenCode"
     case .pi: return "Pi"
+    case .nod: return "Nod"
     }
+  }
+
+  /// The name setup, settings and commits use. Inside the app the shorter
+  /// `displayName` reads better: "Runs as Nod", "Nod asks to run a command".
+  public var fullName: String {
+    self == .nod ? "GraphCode Nod" : displayName
+  }
+
+  /// Where a loop on this backend opens. The CLIs open in a terminal; Nod opens in a chat
+  /// pane in the same slot, which is the difference the agent menu groups by.
+  public var surface: AgentSurface {
+    self == .nod ? .chat : .terminal
   }
 
   /// docs/04-cli-backends.md's capability table. Claude Code is the reference backend —
@@ -233,6 +246,25 @@ extension CLISessionBackendKind {
         supportsInSessionRecurrence: false,
         supportsDaemonRecurrence: true,
         goalDirective: nil)
+
+    case .nod:
+      // Nod is graphcode's own harness, so its row is a design rather than a spike —
+      // NodRuntime/README.md. Presence and activity are exact because the runtime emits
+      // them as events. The goal is a field with its own evaluator, not a directive typed
+      // into the session, so `goalDirective` is nil for a different reason than pi's.
+      // Mid-session input covers both steer (at the next tool boundary) and queue.
+      // Sub-agents are real child loops on the canvas. Timed loops re-enter the same
+      // conversation on the daemon's cadence.
+      return BackendCapabilities(
+        supportsGoalMode: true,
+        supportsHooks: true,
+        supportsStructuredOutput: true,
+        supportsSubAgents: true,
+        supportsMCP: true,
+        supportsMidSessionInput: true,
+        supportsInSessionRecurrence: false,
+        supportsDaemonRecurrence: true,
+        goalDirective: nil)
     }
   }
 
@@ -246,10 +278,10 @@ extension CLISessionBackendKind {
   /// (`GhosttyTerminalView.command`), so a loop labelled Codex opened a Claude Code
   /// session. Silently running a different agent than the one the picker says is worse
   /// than refusing, so this now gates every loop type.
-  /// All four, now that Codex and OpenCode have adapters and rows read off their real CLIs.
-  /// Kept as a property rather than deleted: the *concept* is what stopped Codex being
-  /// claimed as working for months, and the next backend added will need it again.
-  public var isSpiked: Bool { true }
+  /// Every CLI, now that each has an adapter and a row read off its real binary. Nod is
+  /// the next backend the concept was kept for: its row is designed, but nothing can
+  /// launch it until NodRuntime ships, so it hosts nothing yet.
+  public var isSpiked: Bool { self != .nod }
 
   /// Whether this backend can host that loop type at all. The refusal
   /// docs/04-cli-backends.md asks `OrchestratorClient` to make, kept next to the

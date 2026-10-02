@@ -13,12 +13,16 @@ public enum CLISessionBackendKind: String, Codable, CaseIterable, Sendable {
   case codex
   case openCode
   case pi
+  /// GraphCode's own chat-native agent, running on the Claude Agent SDK or the GitHub
+  /// Copilot SDK — NodRuntime/README.md. Unlike the CLIs it is not a TUI graphcode types
+  /// into: the app reads its event stream (`NodEvent`) and renders a chat pane.
+  case nod
 
   /// Whether the daemon can read this backend's own goal verdict.
   public var recordsGoalVerdict: Bool {
     switch self {
     case .claudeCode, .codex, .copilotCLI: return true
-    case .openCode, .pi: return false
+    case .openCode, .pi, .nod: return false
     }
   }
 }

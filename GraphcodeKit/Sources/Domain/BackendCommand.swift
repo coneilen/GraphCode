@@ -18,6 +18,9 @@ extension CLISessionBackendKind {
     case .codex: return "codex"
     case .openCode: return "opencode"
     case .pi: return "pi"
+    // Launchable once NodRuntime ships its `graphcode-nod` binary — until then `isSpiked`
+    // keeps every loop type off it.
+    case .nod: return nil
     }
   }
 
@@ -65,6 +68,9 @@ extension CLISessionBackendKind {
     case .pi:
       // `--model` takes `provider/id`, and which providers are logged in is the user's
       // (`pi --list-models`), so nothing is passed and pi's own default applies.
+      return []
+    case .nod:
+      // Nod picks a model per loop type from its own settings, not from a tier.
       return []
     }
   }
@@ -158,6 +164,8 @@ extension CLISessionBackendKind {
             SessionPrompt.composed(
               preamble: SessionBriefing.pointer(toBriefingAt: briefingPath), prompt: prompt))
         ]
+    case .nod:
+      return model
     }
   }
 
@@ -174,7 +182,7 @@ extension CLISessionBackendKind {
   /// same answer `launchArguments` gives.
   public var promptFlag: String? {
     switch self {
-    case .claudeCode, .codex, .pi: return nil
+    case .claudeCode, .codex, .pi, .nod: return nil
     case .copilotCLI: return "--interactive"
     case .openCode: return "--prompt"
     }
@@ -183,7 +191,7 @@ extension CLISessionBackendKind {
   /// Whether a backend that verifies paths needs `--add-dir` for the briefing's folder.
   public var briefingNeedsDirectoryGrant: Bool {
     switch self {
-    case .claudeCode, .openCode, .pi: return false
+    case .claudeCode, .openCode, .pi, .nod: return false
     case .copilotCLI, .codex: return true
     }
   }
@@ -215,6 +223,7 @@ extension CLISessionBackendKind {
     case .codex: return settings.codexApprovals.arguments
     case .openCode: return settings.openCodePermissions.arguments
     case .pi: return settings.piProjectTrust.arguments
+    case .nod: return []
     }
   }
 
@@ -235,6 +244,7 @@ extension CLISessionBackendKind {
     case .claudeCode, .copilotCLI: return ["--resume", sessionID]
     case .codex: return ["resume", sessionID]
     case .openCode, .pi: return ["--session", sessionID]
+    case .nod: return []
     }
   }
 
@@ -254,7 +264,7 @@ extension CLISessionBackendKind {
     switch self {
     case .openCode:
       return hooksFile.map { ["OPENCODE_CONFIG": $0.path] } ?? [:]
-    case .claudeCode, .copilotCLI, .codex, .pi:
+    case .claudeCode, .copilotCLI, .codex, .pi, .nod:
       return [:]
     }
   }
@@ -305,6 +315,8 @@ extension CLISessionBackendKind {
     case .pi:
       // An extension, loaded by path alongside the user's own — see `PiPresenceExtension`.
       return hooksFile.map { ["-e", $0.path] } ?? []
+    case .nod:
+      return []
     }
   }
 }

@@ -42,7 +42,7 @@ public enum GoalVerdictReader {
       return copilotVerdict(
         lines: CopilotSessionLog.tailLines(
           ofLogAt: directory.appendingPathComponent("events.jsonl")))
-    case .openCode, .pi:
+    case .openCode, .pi, .nod:
       return nil
     }
   }
