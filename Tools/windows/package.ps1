@@ -42,6 +42,7 @@ $required = @("graphcoded.exe", "graphcode.exe", "zmx.exe")
 $packageManifest = Get-Content (Join-Path $shellRoot "build.zig.zon") -Raw
 $localSourceCommit = $null
 $localSourceTreeDirty = $false
+$worktreesDeferred = if ($Local) { "false" } else { "true" }
 if ($Local) {
   if ($Command -ne "Build") {
     throw "GraphCode packaging: -Local is only valid with -Command Build"
@@ -75,6 +76,28 @@ function Resolve-Input([string] $path) {
   if (-not $path) { return $null }
   if (-not (Test-Path -LiteralPath $path -PathType Container)) { Fail "input directory does not exist: $path" }
   return (Resolve-Path -LiteralPath $path).Path
+}
+function Invoke-ShellQuery([string] $root, [string] $argument) {
+  $stdout = Join-Path ([IO.Path]::GetTempPath()) "graphcode-shell-$([guid]::NewGuid()).out"
+  $stderr = Join-Path ([IO.Path]::GetTempPath()) "graphcode-shell-$([guid]::NewGuid()).err"
+  try {
+    $process = Start-Process -FilePath (Join-Path $root "bin\graphcode-windows.exe") `
+      -ArgumentList $argument -Wait -PassThru `
+      -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    $errorText = if (Test-Path -LiteralPath $stderr) {
+      $rawError = Get-Content -LiteralPath $stderr -Raw
+      if ($null -eq $rawError) { "" } else { $rawError.Trim() }
+    } else {
+      ""
+    }
+    Require ($process.ExitCode -eq 0) `
+      "graphcode-windows.exe $argument failed with exit code $($process.ExitCode): $errorText"
+    $rawOutput = Get-Content -LiteralPath $stdout -Raw
+    Require ($null -ne $rawOutput) "graphcode-windows.exe $argument produced no output"
+    return $rawOutput.Trim()
+  } finally {
+    Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+  }
 }
 function Get-Manifest([string] $root) {
   @(Get-ChildItem -LiteralPath $root -File -Recurse -Force |
@@ -122,6 +145,9 @@ function Write-Metadata([string] $root, [string] $version) {
     product = "GraphCode Windows"
     version = $version
     packageKind = if ($Local) { "local-development" } else { "release-candidate" }
+    previewFeatures = [ordered]@{
+      worktreesDeferred = ($worktreesDeferred -eq "true")
+    }
     platform = "windows-x86_64"
     executables = [ordered]@{ shell = "bin/graphcode-windows.exe"; daemon = "bin/graphcoded.exe"; cli = "bin/graphcode.exe"; zmx = "bin/zmx.exe" }
     hostAssets = @(Get-ChildItem -LiteralPath (Join-Path $root "bin") -File -ErrorAction SilentlyContinue |
@@ -261,6 +287,7 @@ function Build-Package {
         "-Dwinghostty-dir=$WinghosttyRoot" `
         "-Dwinghostty-lib=$(Join-Path $WinghosttyRoot 'zig-out\lib\winghostty-win32-host.lib')" `
         "-Dversion=$Version" `
+        "-Dworktrees-deferred=$worktreesDeferred" `
         -Doptimize=ReleaseSafe
       Require ($LASTEXITCODE -eq 0) "GraphCode Windows release build failed"
     } finally { Pop-Location }
@@ -271,8 +298,12 @@ function Build-Package {
   foreach ($name in $required + "graphcode-windows.exe") {
     Require (Test-Path (Join-Path $root "bin\$name")) "$name was not found; pass -InputDirectory with release outputs"
   }
-  $reportedVersion = (& (Join-Path $root "bin\graphcode-windows.exe") --version 2>$null | Select-Object -First 1).Trim()
+  $reportedVersion = Invoke-ShellQuery $root "--version"
   Require ($reportedVersion -eq $Version) "graphcode-windows.exe reports $reportedVersion, expected $Version"
+  $reportedWorktreeState = Invoke-ShellQuery $root "--worktrees-preview-state"
+  $expectedWorktreeState = if ($worktreesDeferred -eq "true") { "deferred" } else { "available" }
+  Require ($reportedWorktreeState -eq $expectedWorktreeState) `
+    "graphcode-windows.exe reports Worktrees $reportedWorktreeState, expected $expectedWorktreeState"
   Require (@(Get-ChildItem (Join-Path $root "bin") -Filter *.dll).Count -gt 0) "Swift runtime DLLs were not found"
   Copy-Item (Join-Path $repoRoot "LICENSE") (Join-Path $root "LICENSE") -Force
   Require ($WinghosttyRoot -and $ZmxRoot) "trusted provider roots are required for license attribution"
@@ -345,6 +376,9 @@ switch ($Command) {
       $root = Open-Package $Package
       Verify-PackageContents $root | Out-Null
       $metadata = Get-Content -LiteralPath (Join-Path $root "metadata.json") -Raw | ConvertFrom-Json
+      $expectedWorktreesDeferred = [string] $metadata.packageKind -eq "release-candidate"
+      Require ([bool] $metadata.previewFeatures.worktreesDeferred -eq $expectedWorktreesDeferred) `
+        "package metadata contradicts its Worktrees preview policy"
       if ([string] $metadata.packageKind -eq "local-development") {
         $provenance = $metadata.sourceProvenance
         $commit = [string] $provenance.sourceCommit
