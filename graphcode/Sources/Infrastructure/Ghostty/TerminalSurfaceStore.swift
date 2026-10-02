@@ -30,6 +30,8 @@ final class TerminalSurfaceStore {
 
   private var surfaces: [UUID: GhosttyTerminalNSView] = [:]
   private var policy: SurfaceRetentionPolicy
+  /// Text typed at a surface before it was built — a tab opened to receive a command.
+  private var pendingText: [UUID: String] = [:]
 
   init(capacity: Int = SurfaceRetentionPolicy.defaultCapacity) {
     policy = SurfaceRetentionPolicy(capacity: capacity)
@@ -48,6 +50,7 @@ final class TerminalSurfaceStore {
     } else {
       view = build()
       surfaces[id] = view
+      if let text = pendingText.removeValue(forKey: id) { type(text, into: view) }
     }
     // Only an unmounted surface may be aged out; see `SurfaceRetentionPolicy.touch`.
     if let evicted = policy.touch(id, isEvictable: { surfaces[$0]?.superview == nil }) {
@@ -62,6 +65,7 @@ final class TerminalSurfaceStore {
   func retire(_ ids: [UUID]) {
     for id in ids {
       policy.forget(id)
+      pendingText[id] = nil
       release(id)
     }
   }
@@ -70,6 +74,19 @@ final class TerminalSurfaceStore {
   /// pane left alive would watch its process die and report it.
   func retireAll() {
     retire(Array(surfaces.keys))
+  }
+
+  /// Types `text` at the surface's prompt without pressing ⏎, now or once it is built.
+  func typeText(_ text: String, into id: UUID) {
+    guard let view = surfaces[id] else {
+      pendingText[id] = text
+      return
+    }
+    type(text, into: view)
+  }
+
+  private func type(_ text: String, into view: GhosttyTerminalNSView) {
+    view.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
   }
 
   /// Whether a surface for `id` is currently alive. For tests and for callers deciding
@@ -115,6 +132,8 @@ struct TerminalSurfaceClient: Sendable {
   /// `projectPath` is the workspace's, so a remote project's shells are killed on their
   /// own host.
   var killSessions: @Sendable (_ ids: [UUID], _ projectPath: String?) -> Void
+  /// Puts text at a surface's prompt, unsent — Nod's "Open in zsh tab".
+  var typeText: @Sendable (_ id: UUID, _ text: String) -> Void = { _, _ in }
 }
 
 extension TerminalSurfaceClient: DependencyKey {
@@ -148,6 +167,11 @@ extension TerminalSurfaceClient: DependencyKey {
         for id in ids {
           await ZmxSessionLauncher.killSession(id: id, projectPath: projectPath)
         }
+      }
+    },
+    typeText: { id, text in
+      DispatchQueue.main.async {
+        MainActor.assumeIsolated { TerminalSurfaceStore.shared.typeText(text, into: id) }
       }
     })
 
