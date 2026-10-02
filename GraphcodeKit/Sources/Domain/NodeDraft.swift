@@ -77,6 +77,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   /// `TemplateFollow`. The text itself travels in the type's own field as
   /// the creation-time snapshot; this only says what to re-read next run.
   public var templateFollow: TemplateFollow?
+  public var lineage: LoopLineage?
 
   public init(
     id: UUID = UUID(),
@@ -95,7 +96,8 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     createdBy: UUID? = nil,
     attachments: [PromptAttachment] = [],
     createdFromTemplateID: UUID? = nil,
-    templateFollow: TemplateFollow? = nil
+    templateFollow: TemplateFollow? = nil,
+    lineage: LoopLineage? = nil
   ) {
     self.id = id
     self.title = title
@@ -114,6 +116,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     self.attachments = attachments
     self.createdFromTemplateID = createdFromTemplateID
     self.templateFollow = templateFollow
+    self.lineage = lineage
   }
 
   /// docs/08-quality-and-token-budgets.md wants the cheap-to-ignore version of each
@@ -223,6 +226,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
       createdBy: createdBy,
       createdFromTemplateID: createdFromTemplateID,
       templateFollow: loopType == .timeBased || loopType == .composite ? templateFollow : nil,
+      lineage: lineage,
       state: loopType == .goalBased ? .running : .idle)
   }
 }
@@ -232,7 +236,7 @@ extension NodeDraft {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
     case worktree, subGraph, createdBy, firstInstruction, pausesBeforeWritesOnly
     case heartbeatIntervalSeconds, attachments
-    case createdFromTemplateID, templateFollow
+    case createdFromTemplateID, templateFollow, lineage
   }
 
   /// `id` is `decodeIfPresent` because drafts also arrive over the wire from a CLI that
@@ -267,5 +271,6 @@ extension NodeDraft {
       try container.decodeIfPresent(UUID.self, forKey: .createdFromTemplateID)
     templateFollow =
       try container.decodeIfPresent(TemplateFollow.self, forKey: .templateFollow)
+    lineage = try? container.decodeIfPresent(LoopLineage.self, forKey: .lineage)
   }
 }

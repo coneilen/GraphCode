@@ -157,6 +157,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
         // treatment, for the same reason.
         subGraph: node.subGraph?.reIdentified(),
         pilotState: node.pilotState,
+        lineage: node.lineage,
         state: node.loopType == .goalBased ? .running : .idle)
       copy.nodes.append(fresh)
     }
