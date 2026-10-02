@@ -82,6 +82,10 @@ public enum ProviderPath {
       return nil
     }
     guard let executable = node.backend.executableName else { return nil }
+    if node.backend == .nod {
+      guard NodRuntimeLocator.binaryURL() == nil else { return nil }
+      return LaunchFailure(executable: executable, backend: node.backend)
+    }
     guard await isOnPath(executable) == false else { return nil }
     return LaunchFailure(executable: executable, backend: node.backend)
   }

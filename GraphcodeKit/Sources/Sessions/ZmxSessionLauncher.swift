@@ -874,7 +874,7 @@ public enum ZmxSessionLauncher {
       return .success(.attached)
     }
     var spawnedProcess: Process?
-    if node.sessionPrompt == nil || node.sessionPrompt?.isEmpty == true {
+    if node.backend != .nod, node.sessionPrompt == nil || node.sessionPrompt?.isEmpty == true {
       guard let executable = node.backend.executableName else {
         return .failure(.unavailable("backend has no executable"))
       }
@@ -1199,12 +1199,16 @@ public enum ZmxSessionLauncher {
     shedPrompt: ShedPromptReport? = nil
   ) -> [String]? {
     guard let prompt = node.sessionPrompt(forProjectPath: projectPath), !prompt.isEmpty else {
-      return nil
+      return node.backend == .nod
+        ? nodRunArguments(forNode: node, projectPath: projectPath, settings: settings) : nil
     }
     // A backend graphcode can't launch has no argv. `canHost` already refuses to create
     // such a node, so this is the belt to that braces — but silently starting the wrong
     // agent is the failure it exists to prevent, so it's worth both.
-    guard let executable = node.backend.executableName else { return nil }
+    guard let executable = executable(forNode: node, projectPath: projectPath) else {
+      return nil
+    }
+    let nodPrefix = nodArguments(forNode: node, projectPath: projectPath, settings: settings)
     // CR/LF are the one thing quoting can't save us from: zmx terminates the command it
     // types with `\r`, and the PTY's line discipline would accept the line early at an
     // embedded one, truncating the prompt. Prompts come from a single-line text field, so
@@ -1294,7 +1298,9 @@ public enum ZmxSessionLauncher {
       ? PresenceHooks.remoteOpenCodeConfigPath : nil
     let remoteHooksSuffix = Self.remoteHooksSuffix(
       forBackend: node.backend, isRemote: remote != nil)
-    let arguments = node.backend.launchArguments(
+    let arguments =
+      nodPrefix
+      + node.backend.launchArguments(
       prompt: promptWithMemory, tier: tier, briefingPath: briefingPath,
       settings: settings,
       workspacePaths: paths,
@@ -1310,7 +1316,7 @@ public enum ZmxSessionLauncher {
         of: executable, arguments: arguments,
         environment: Self.environment(
           forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile,
-          remoteHooksPath: remoteEnvironmentPath),
+          remoteHooksPath: remoteEnvironmentPath, nodeID: node.id),
         scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
 
     // `zmx` types this command into the session's shell, and a tty in canonical mode
@@ -1327,7 +1333,9 @@ public enum ZmxSessionLauncher {
     guard Self.fitsInATypedCommandLine(command) else {
       func shed(prompt: String, briefingPath: String?, extraPath: String?) -> [String] {
         let workspacePaths = paths + (extraPath.map { paths.contains($0) ? [] : [$0] } ?? [])
-        let arguments = node.backend.launchArguments(
+        let arguments =
+          nodPrefix
+          + node.backend.launchArguments(
           prompt: prompt, tier: tier, briefingPath: briefingPath, settings: settings,
           workspacePaths: workspacePaths,
           hooksFile: hooksFile,
@@ -1341,7 +1349,7 @@ public enum ZmxSessionLauncher {
             of: executable, arguments: arguments,
             environment: Self.environment(
               forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile,
-              remoteHooksPath: remoteEnvironmentPath),
+              remoteHooksPath: remoteEnvironmentPath, nodeID: node.id),
             scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
       }
       let unbriefedCommand = shed(prompt: promptWithMemory, briefingPath: nil, extraPath: nil)
@@ -1440,7 +1448,9 @@ public enum ZmxSessionLauncher {
     settings: GraphcodeSettings = GraphcodeSettingsStore.load()
   ) -> [String]? {
     guard node.backend.supportsResume else { return nil }
-    guard let executable = node.backend.executableName else { return nil }
+    guard let executable = executable(forNode: node, projectPath: projectPath) else {
+      return nil
+    }
     let remote = projectPath.flatMap { RemoteProjectLocation.parse(projectPath: $0) }
     let tier = node.effectiveModelTier(autoSelecting: settings.autoSelectsModel)
     let hooksFile = remote == nil ? PresenceHooks.write(forBackend: node.backend) : nil
@@ -1461,7 +1471,8 @@ public enum ZmxSessionLauncher {
       node.backend == .copilotCLI
       ? nil : SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     let resumeArgs =
-      node.backend.launchArguments(
+      nodArguments(forNode: node, projectPath: projectPath, settings: settings)
+      + node.backend.launchArguments(
         prompt: nil, tier: tier, settings: settings,
         workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath),
         hooksFile: hooksFile,
@@ -1479,8 +1490,44 @@ public enum ZmxSessionLauncher {
           briefingPath: Self.resumeBriefingPath(
             forBackend: node.backend, projectPath: projectPath, isRemote: remote != nil,
             settings: settings),
-          hooksFile: hooksFile, remoteHooksPath: remoteEnvironmentPath),
+          hooksFile: hooksFile, remoteHooksPath: remoteEnvironmentPath, nodeID: node.id),
         scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
+  }
+
+  /// The binary a node's session runs: the backend's CLI by name, which its login shell
+  /// finds on PATH, or Nod's runtime by absolute path (`NodRuntimeLocator`). Nod has no
+  /// remote launch yet — the bundle it would run from is on this machine.
+  static func executable(forNode node: LoopNode, projectPath: String?) -> String? {
+    guard node.backend == .nod else { return node.backend.executableName }
+    guard !NodSessionLog.isRemote(projectPath) else { return nil }
+    return NodRuntimeLocator.binaryURL()?.path
+  }
+
+  /// `nodArguments` for a launch from here: the node's working directory, and its goal
+  /// written where `--goal-file` points. Empty for every other backend.
+  static func nodArguments(
+    forNode node: LoopNode, projectPath: String?, settings: GraphcodeSettings
+  ) -> [String] {
+    guard node.backend == .nod else { return [] }
+    return node.backend.nodArguments(
+      nodeID: node.id, loopType: node.loopType, settings: settings,
+      workingDirectory: workingDirectory(forNode: node, projectPath: projectPath),
+      goalFile: NodRuntimeLocator.writeGoal(of: node)?.path)
+  }
+
+  /// A Nod session with nothing to say yet — a main loop with no starting note. Unlike a
+  /// CLI's, its launch still carries arguments: which node it is, and where its state lives.
+  static func nodRunArguments(
+    forNode node: LoopNode, projectPath: String?, settings: GraphcodeSettings
+  ) -> [String]? {
+    guard let executable = executable(forNode: node, projectPath: projectPath) else {
+      return nil
+    }
+    return ["run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d"]
+      + loginShellInvocation(
+        of: executable,
+        arguments: nodArguments(forNode: node, projectPath: projectPath, settings: settings),
+        environment: environment(forBackend: .nod, briefingPath: nil, nodeID: node.id))
   }
 
   /// Stands in for a remote session ID that this machine cannot know: the ID was written
@@ -1527,8 +1574,9 @@ public enum ZmxSessionLauncher {
   /// (`briefingEnvironment`) and OpenCode's presence plugin (`presenceEnvironment`).
   static func environment(
     forBackend backend: CLISessionBackendKind, briefingPath: String?, hooksFile: URL? = nil,
-    remoteHooksPath: String? = nil
+    remoteHooksPath: String? = nil, nodeID: UUID? = nil
   ) -> [String: String] {
+    if backend == .nod, let nodeID { return NodRuntimeLocator.environment(forNodeID: nodeID) }
     let briefing = backend.briefingEnvironment(briefingPath: briefingPath)
     if backend == .openCode, let remoteHooksPath {
       return briefing.merging(["OPENCODE_CONFIG": remoteHooksPath]) { $1 }

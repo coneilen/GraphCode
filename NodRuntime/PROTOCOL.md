@@ -8,6 +8,27 @@ fields are ignored. Unknown event types decode as `unknown` and are skipped by r
 adding an event never breaks an older app. Bump `v` only for a change an old reader would
 misread.
 
+## Launch
+
+graphcode starts `graphcode-nod` inside the node's zmx session:
+
+```
+graphcode-nod --node <uuid> [--cwd <dir>] --engine claude|copilot --loop-type main|goal|timed|turn|composite
+              [--model <id>] [--goal-file <path>] [--briefing <path>] [--prompt <text>] [--resume <conversation-id>]
+```
+
+- `NOD_STATE` (`NodProtocol.stateDirectoryVariable`) is always set, to
+  `<support-dir>/nod/<node-uuid>`. Use it rather than computing `~/.graphcode/...`: a
+  workspace can move its support directory. Create it if missing.
+- `--goal-file` is `$NOD_STATE/goal.md`, the goal's condition as plain text, rewritten on
+  every launch.
+- `--resume` is the `conversationID` of an earlier `sessionStarted`. graphcode banks it
+  from the event log while the session is live, so a reboot or restart resumes.
+- The binary comes from `Contents/Resources/bin/graphcode-nod` in the app bundle, then the
+  support directory's `bin/`. `GRAPHCODE_NOD_PATH` overrides both for development.
+- A plain line on the PTY is a queued `send`. graphcode falls back to typing when
+  `control.sock` is not there yet, so read stdin from the first moment.
+
 ## Events — `events.jsonl`
 
 Every line carries `v`, `seq` (strictly increasing from 1) and `at`.
@@ -22,16 +43,16 @@ Every line carries `v`, `seq` (strictly increasing from 1) and `at`.
 | `toolResult` | `callID`, `status` (`running` `ok` `error`), `summary`, `output?`, `durationMs?` | |
 | `hunkStaged` | `turn`, `hunkID`, `file`, `header`, `diff`, `added`, `removed`, `autoAccepted` | written to disk only on accept |
 | `hunkResolved` | `hunkID`, `decision` (`accept` `reject` `comment`), `note?` | |
-| `permissionAsked` | `askID`, `kind` (`shell` `network` `editOutsideWorktree` `messageLoop` `mcpTool`), `subject`, `reason`, `answerableFromCard` | the loop is in Needs you until resolved |
+| `permissionAsked` | `askID`, `kind` (`shell` `network` `editOutsideWorktree` `messageLoop` `mcpTool`), `subject`, `reason`, `answerableFromCard` | the loop is in Needs you until resolved, or until the next `sessionStarted` |
 | `permissionResolved` | `askID`, `decision` (`allowOnce` `alwaysAllow` `deny`) | |
 | `goalCheck` | `turn`, `evaluatorModel`, `clauses[{text, met, evidence?}]`, `met` | run each time Nod tries to stop |
 | `turnEnded` | `turn`, `filesChanged`, `added`, `removed`, `summary?` | |
-| `usage` | `inputTokens`, `outputTokens`, `costUSD?`, `premiumRequests?`, `contextUsed` (0…1) | |
+| `usage` | `inputTokens`, `outputTokens`, `costUSD?`, `premiumRequests?`, `contextUsed` (0…1) | running totals for the run, so the newest one is the answer |
 | `planProposed` | `planID`, `title`, `steps[{id, text, files[], size?, editedByHuman}]` | |
 | `mailDraft` | `draftID`, `toNodeID`, `inReplyTo?`, `text` | sent only on `sendDraft` |
 | `compacted` | `fromTurn`, `throughTurn` | |
 | `activity` | `line` | the canvas card's live line |
-| `failure` | `kind` (`signInExpired` `contextFull` `spendCap` `permissionUnavailable` `engineError`), `message` | shown as a banner above the composer |
+| `failure` | `kind` (`signInExpired` `contextFull` `spendCap` `permissionUnavailable` `engineError`), `message` | shown as a banner above the composer; every kind but `contextFull` puts the loop in Needs you until the next `turnStarted` |
 
 ## Commands — `control.sock`
 

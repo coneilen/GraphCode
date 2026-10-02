@@ -21,8 +21,8 @@ public enum CLISessionBackendKind: String, Codable, CaseIterable, Sendable {
   /// Whether the daemon can read this backend's own goal verdict.
   public var recordsGoalVerdict: Bool {
     switch self {
-    case .claudeCode, .codex, .copilotCLI: return true
-    case .openCode, .pi, .nod: return false
+    case .claudeCode, .codex, .copilotCLI, .nod: return true
+    case .openCode, .pi: return false
     }
   }
 }
