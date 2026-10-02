@@ -1,4 +1,5 @@
-import { isAbsolute, relative, resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { EventLog } from "./eventLog";
 import type { NodPermissionDecision, NodPermissionKind } from "./protocol";
 import type { Ask, NodSettings } from "./settings";
@@ -147,9 +148,20 @@ function key(kind: NodPermissionKind, subject: string): string {
   return `${kind}\u0000${subject}`;
 }
 
+/**
+ * Compared as real paths: engines report symlink-resolved paths (`/private/tmp/…` for a
+ * worktree opened as `/tmp/…`), and a file that doesn't exist yet resolves through its
+ * nearest existing ancestor.
+ */
 export function isInside(root: string, path: string): boolean {
-  const rel = relative(resolve(root), resolve(root, path));
+  const rel = relative(realPath(resolve(root)), realPath(resolve(root, path)));
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function realPath(path: string): string {
+  if (existsSync(path)) return realpathSync(path);
+  const parent = dirname(path);
+  return parent === path ? path : join(realPath(parent), basename(path));
 }
 
 /**

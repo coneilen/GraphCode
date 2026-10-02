@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventLog } from "../src/eventLog";
@@ -75,6 +75,15 @@ describe("classification", () => {
     expect(isReadOnlyCommand("cat a > b")).toBe(false);
     expect(isReadOnlyCommand("find . -delete")).toBe(false);
     expect(isReadOnlyCommand("rm -rf build")).toBe(false);
+  });
+
+  test("worktree containment compares real paths, for files that don't exist yet too", () => {
+    const real = mkdtempSync(join(tmpdir(), "nod-real-"));
+    const link = `${real}-link`;
+    symlinkSync(real, link);
+    expect(isInside(link, join(realpathSync(real), "new", "hello.txt"))).toBe(true);
+    expect(isInside(real, join(link, "hello.txt"))).toBe(true);
+    expect(isInside(link, join(real, "..", "elsewhere.txt"))).toBe(false);
   });
 
   test("worktree containment resolves .. and relative paths", () => {
