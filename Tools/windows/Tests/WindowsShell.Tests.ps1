@@ -893,7 +893,8 @@ Invoke-Native "Worktree status executable tests" {
 }
 Invoke-Native "Worktree Git process regression tests" {
   & (Join-Path $PSScriptRoot "WorktreeGitProcess.Tests.ps1") -Zig $zig `
-    -EvidenceDirectory (Join-Path $shellRoot (".zig-cache\worktree-process-" + [guid]::NewGuid().ToString("N")))
+    -EvidenceDirectory (Join-Path $shellRoot (".zig-cache\worktree-process-" + [guid]::NewGuid().ToString("N"))) `
+    -FixtureDirectory (Join-Path ([IO.Path]::GetTempPath()) ("graphcode-worktree-process-" + [guid]::NewGuid().ToString("N")))
 }
 Invoke-Native "Draft attachments executable tests" {
   Push-Location $shellRoot

@@ -3,6 +3,7 @@
 param(
     [Parameter(Mandatory)][string] $Zig,
     [Parameter(Mandatory)][string] $EvidenceDirectory,
+    [string] $FixtureDirectory,
     [ValidateSet(
         "scope-dir", "scope-mixed-case", "scope-config-count", "scope-config-parameters",
         "index", "objects", "preserve", "streams", "stdout-cap", "stderr-cap",
@@ -25,12 +26,44 @@ if (-not $IsWindows) { throw "The process harness requires Windows." }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $Zig = (Resolve-Path $Zig).Path
 $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
+$fixture = if ($FixtureDirectory) {
+    [IO.Path]::GetFullPath($FixtureDirectory)
+} else {
+    Join-Path ([IO.Path]::GetTempPath()) ("graphcode-worktree-process-" + [guid]::NewGuid().ToString("N"))
+}
+$evidencePrefix = $evidence.TrimEnd('\') + '\'
+$fixturePrefix = $fixture.TrimEnd('\') + '\'
+if ($evidence.Equals($fixture, [StringComparison]::OrdinalIgnoreCase) -or
+    $evidence.StartsWith($fixturePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+    $fixture.StartsWith($evidencePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Evidence and fixture directories must be isolated so fixture cleanup cannot remove immutable logs: evidence='$evidence'; fixture='$fixture'"
+}
+# The isolated Git config intentionally leaves core.longpaths unset, so budget for the legacy Win32 limit.
+$pathLimit = 259
+$longestFixturePath = Join-Path $fixture (
+    "removal-output-selected-" + ("0" * 32) + "\target\.git\worktrees\selected\logs\HEAD.lock"
+)
+if ($longestFixturePath.Length -gt $pathLimit) {
+    throw "Worktree Git fixture path budget exceeded: fixture root '$fixture' ($($fixture.Length) chars) projects a $($longestFixturePath.Length)-character Git metadata path; the supported limit is $pathLimit. Set TEMP/TMP to a shorter owned directory or pass -FixtureDirectory with a shorter unique path."
+}
 if (Test-Path -LiteralPath $evidence) { throw "Evidence directory already exists; RED logs must not be overwritten." }
+if (Test-Path -LiteralPath $fixture) { throw "Fixture directory already exists; per-run state must be uniquely owned: $fixture" }
 [void][IO.Directory]::CreateDirectory($evidence)
-$cache = Join-Path $evidence "cache"
-$globalCache = Join-Path $evidence "global-cache"
-$testExe = Join-Path $evidence "worktree-tests.exe"
-$emitter = Join-Path $evidence "worktree-child.exe"
+[void][IO.Directory]::CreateDirectory($fixture)
+$fixtureTemp = Join-Path $fixture "temp"
+[void][IO.Directory]::CreateDirectory($fixtureTemp)
+$cache = Join-Path $fixture "cache"
+$globalCache = Join-Path $fixture "global-cache"
+$testExe = Join-Path $fixture "worktree-tests.exe"
+$emitter = Join-Path $fixture "worktree-child.exe"
+$fixtureSummary = @(
+    "fixtureRoot=$fixture"
+    "fixtureRootLength=$($fixture.Length)"
+    "projectedLongestPath=$longestFixturePath"
+    "projectedLongestPathLength=$($longestFixturePath.Length)"
+    "supportedPathLimit=$pathLimit"
+) -join "`n"
+[IO.File]::WriteAllText((Join-Path $evidence "fixture-root.log"), $fixtureSummary + "`n")
 $realGit = (Get-Command git.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 $invalidCases = @("scope-config-countt", "removal-output-directt", "removal-output-selectedt", "removal-output-forcedt")
 $invalidSelections = @($invalidCases | ForEach-Object { @{ Name = $_; Values = @($_) } }) + @(
@@ -99,12 +132,13 @@ public static class WorktreeProcessJob {
 }
 '@
 
+$executedCases = 0
 Push-Location $repo
 try {
     & $Zig build-exe (Join-Path $PSScriptRoot "fixtures\worktree-git-child.zig") --cache-dir $cache --global-cache-dir $globalCache "-femit-bin=$emitter" 2>&1 |
         Tee-Object -FilePath (Join-Path $evidence "build-child.log")
     if ($LASTEXITCODE -ne 0) { throw "Child fixture build failed." }
-    $fakeBin = Join-Path $evidence "synthetic-git"
+    $fakeBin = Join-Path $fixture "synthetic-git"
     [void][IO.Directory]::CreateDirectory($fakeBin)
     Copy-Item -LiteralPath $emitter -Destination (Join-Path $fakeBin "git.exe")
     & $Zig test --test-no-exec --dep worktree "-Mroot=$(Join-Path $PSScriptRoot 'fixtures\worktree-git-tests.zig')" "-Mworktree=$(Join-Path $repo 'graphcode-windows\src\WorktreeStatus.zig')" --cache-dir $cache --global-cache-dir $globalCache "-femit-bin=$testExe" 2>&1 |
@@ -113,7 +147,7 @@ try {
     $failures = 0
     foreach ($case in (@($Cases) + $invalidCases)) {
         $expectRejected = $invalidCases -ccontains $case
-        $root = Join-Path $evidence ($case + "-" + [guid]::NewGuid().ToString("N"))
+        $root = Join-Path $fixture ($case + "-" + [guid]::NewGuid().ToString("N"))
         [void][IO.Directory]::CreateDirectory($root)
         $fixtureHome = Join-Path $root "home"
         [void][IO.Directory]::CreateDirectory($fixtureHome)
@@ -132,6 +166,8 @@ try {
         $info.Environment["HOME"] = $fixtureHome
         $info.Environment["USERPROFILE"] = $fixtureHome
         $info.Environment["XDG_CONFIG_HOME"] = $fixtureHome
+        $info.Environment["TEMP"] = $fixtureTemp
+        $info.Environment["TMP"] = $fixtureTemp
         $info.Environment["GIT_CONFIG_NOSYSTEM"] = "1"
         $info.Environment["GIT_CONFIG_GLOBAL"] = $config
         $info.Environment["GIT_TERMINAL_PROMPT"] = "0"
@@ -184,6 +220,7 @@ try {
                 $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()
             [IO.File]::WriteAllText((Join-Path $evidence "$case.log"), $log)
             Write-Output $log
+            $executedCases++
             $correctExit = $process.ExitCode -eq 0
             if ($expectRejected) {
                 $createdFixture = @("target", "outside", "selected", "child.pid") |
@@ -203,6 +240,11 @@ try {
     }
     if ($failures -ne 0) { throw "$failures process regression case(s) failed; immutable logs: $evidence" }
 } finally {
-    Pop-Location
+    try { Pop-Location } finally {
+        if (Test-Path -LiteralPath $fixture) {
+            Remove-Item -LiteralPath $fixture -Recurse -Force
+        }
+    }
 }
-Write-Output "WorktreeGitProcess.Tests.ps1: PASS; evidence=$evidence"
+if ($executedCases -le 0) { throw "Worktree Git process harness reported no executed cases." }
+Write-Output "WorktreeGitProcess.Tests.ps1: PASS; requested=$(@($Cases).Count); rejection=$($invalidCases.Count); executed=$executedCases; evidence=$evidence"
