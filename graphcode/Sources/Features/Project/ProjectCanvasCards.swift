@@ -48,7 +48,9 @@ extension ProjectCanvasView {
       },
       onKeep: { store.send(.keepWorktreeTapped(node.id)) },
       onDetachTemplate: node.templateFollow == nil
-        ? nil : { store.send(.detachTemplateTapped(node.id)) }
+        ? nil : { store.send(.detachTemplateTapped(node.id)) },
+      nod: NodCardWiring.detail(for: node),
+      onAllowOnce: { NodCardWiring.answerer.allowOnce(nodeID: node.id, askID: $0) }
     )
     .contentShape(Rectangle())
     // A composite has no session of its own to open (`LoopNode.firstInstruction` is nil

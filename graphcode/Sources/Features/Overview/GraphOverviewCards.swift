@@ -200,7 +200,9 @@ extension GraphOverviewView {
       onKeep: {
         store.send(
           .projects(.element(id: loop.projectPath, action: .keepWorktreeTapped(node.id))))
-      }
+      },
+      nod: NodCardWiring.detail(for: node),
+      onAllowOnce: { NodCardWiring.answerer.allowOnce(nodeID: node.id, askID: $0) }
     )
     .contentShape(Rectangle())
     .onTapGesture { open(loop) }

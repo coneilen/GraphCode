@@ -26,6 +26,8 @@ import SwiftUI
 /// whose fields are load-bearing would drift.
 struct NodeDraftForm: View {
   @Bindable var store: StoreOf<ProjectFeature>
+  @State private var nodSignedIn = false
+  private var nodSettings: NodSettings { SettingsModel.shared.settings.nod }
 
   /// Whether this graph's repository lives on another machine — see
   /// `RemoteProjectLocation`. Drives which bindings the form can honestly offer.
@@ -143,26 +145,26 @@ struct NodeDraftForm: View {
         DraftField(
           label: "Agent", fromTemplate: store.templateSetFields.contains(.backend)
         ) {
-          Picker("", selection: $store.draftBackend) {
-            ForEach(CLISessionBackendKind.allCases, id: \.self) { backend in
-              Text(backend.displayName).tag(backend)
-            }
-          }
-          .labelsHidden()
+          RunsAsAgentMenu(
+            backend: $store.draftBackend, modelTier: $store.draftModelTier,
+            loopType: store.draftLoopType, nodSignedIn: nodSignedIn)
         }
-        DraftField(label: "Model") {
-          Picker(
-            "",
-            selection: Binding(
-              get: { store.draftModelTier ?? .standard },
-              set: { store.draftModelTier = $0 }
-            )
-          ) {
-            ForEach(ModelTier.allCases, id: \.self) { tier in
-              Text(tier.displayName).tag(tier)
+        // Nod's model is chosen in the agent menu, where its per-type default is named.
+        if store.draftBackend != .nod {
+          DraftField(label: "Model") {
+            Picker(
+              "",
+              selection: Binding(
+                get: { store.draftModelTier ?? .standard },
+                set: { store.draftModelTier = $0 }
+              )
+            ) {
+              ForEach(ModelTier.allCases, id: \.self) { tier in
+                Text(tier.displayName).tag(tier)
+              }
             }
+            .labelsHidden()
           }
-          .labelsHidden()
         }
         if !isRemoteProject && !store.graph.isGlobal {
           DraftField(
@@ -198,6 +200,7 @@ struct NodeDraftForm: View {
             backend: store.draftBackend, loopType: store.draftLoopType))
       }
     }
+    .task { nodSignedIn = NodCredentialStore.live.isSignedIn(nodSettings.engine) }
     .onChange(of: store.draftLoopType) { _, newValue in
       // Changing the type can invalidate a backend that was fine a moment ago. Falling
       // back beats leaving an impossible pairing selected and refusing to submit with no
