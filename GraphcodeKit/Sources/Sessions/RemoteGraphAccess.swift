@@ -1292,7 +1292,7 @@ public enum RemoteGraphAccess {
                     payload["followUp"] = True
                 run_with_verdict(project, {"messageNode": payload},
                                  "accepted — typed in when the loop next goes idle"
-                                 if follow_up else "delivered")
+                                 if follow_up else "accepted — typing it in now")
             else:
                 run_with_verdict(project, {"memoNode": payload}, "noted")
 

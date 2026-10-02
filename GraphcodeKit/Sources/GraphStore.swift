@@ -250,6 +250,9 @@ public actor GraphStore {
   }
 
   private var pendingFollowUps: [PendingFollowUp] = []
+  /// Each target's `node send` messages still being typed, chained so they land in the
+  /// order they were sent — see `typeAfterAcknowledging`.
+  private var sessionTyping: [UUID: (token: UUID, task: Task<Void, Never>)] = [:]
   private var pendingDeliveryAttempts: Set<UUID> = []
   private var completedTimedOutDeliveries: [UUID: Bool] = [:]
   /// `drainPendingFollowUps` runs across several awaits, and the presence poll that
@@ -1337,7 +1340,15 @@ public actor GraphStore {
     // before anyone is told what the graph looks like. Cycle re-entries run before
     // hand-off deliveries because a re-entry *queues* one; nudges last, since an
     // update's memory record must exist before its session is told to go look.
-    let errors = await drainAndBroadcast(broadcastErrors: broadcastErrors)
+    // A `node send` is acknowledged before the drain, not after it: the drain types any
+    // follow-up an idle target can take now, and the CLI's ten-second wait for its
+    // verdict is not the place to spend that.
+    var errors: [String] = []
+    if case .messageNode = command {
+      errors = await drainPendingErrors(broadcastErrors: broadcastErrors)
+      if errors.isEmpty { await broadcast() }
+    }
+    errors += await drainAndBroadcast(broadcastErrors: broadcastErrors)
     if let error = errors.first {
       return .rejected(message: error, graph: graph)
     }
@@ -3679,10 +3690,10 @@ public actor GraphStore {
   /// message edge (`MessageBus`, the target backend's `sendInput`), so there is one
   /// definition of "may this session be typed into", not two.
   ///
-  /// A failure is said out loud rather than swallowed: an `.errorOccurred` goes to
-  /// every connection, which the app shows as its error banner and the CLI prints —
-  /// the whole point of the message was that a peer be told something, and pretending
-  /// it landed is the one wrong answer.
+  /// A message that cannot be typed now is said out loud rather than swallowed: an
+  /// `.errorOccurred` goes to every connection, which the app shows as its error banner
+  /// and the CLI prints. One that can is acknowledged once it is on the board and queued
+  /// for its session, and typed after — see `typeAfterAcknowledging`.
   private func deliverAdHocMessage(
     to nodeID: UUID, text: String, from senderID: UUID?, followUp: Bool = false,
     mirror: Bool = true, watchedPostID: Int? = nil
@@ -3732,11 +3743,17 @@ public actor GraphStore {
     // graph calls a resolved loop "not live" so edges and wakes leave it alone, but a
     // human asking what it did is the point of keeping the session; the answer changes
     // nothing about how it resolved (#346).
+    // A follow-up question to a finished loop whose session is still up reaches it. The
+    // graph calls a resolved loop "not live" so edges and wakes leave it alone, but a
+    // human asking what it did is the point of keeping the session; the answer changes
+    // nothing about how it resolved (#346). Liveness is asked before the acknowledgement
+    // so a sender reporting to a finished parent still hears "staged" — one shared
+    // listing (`SessionListing`), not a typing of the message.
     if target.state == .succeeded || target.state == .failed,
       target.backend.capabilities.supportsMidSessionInput,
-      await onSessionAlive?(target, graph.project.path) == true,
-      await deliverToSession(target, message)
+      await onSessionAlive?(target, graph.project.path) == true
     {
+      typeAfterAcknowledging(message, to: target, resolved: true)
       return
     }
     if MessageBus.deliverability(to: target) != nil {
@@ -3746,29 +3763,79 @@ public actor GraphStore {
           + "it will read it when it next wakes")
       return
     }
-    guard await deliverToSession(target, message) else {
-      // The transport can also fail because the session died after the graph last
-      // looked — a goal loop whose agent exited on its very first turn had no session
-      // left to type into, and (before sessions that answer while dead stopped passing
-      // the send gate) even a "delivered" that nobody received (issue #215). An
-      // unattended loop is the daemon's to keep alive, so a failed delivery is the
-      // moment to do exactly that: the ensure is create-only and husk-aware, so it
-      // relaunches precisely the dead case, the settle is the fresh session's boot
-      // beat, and the retry lands the message that would otherwise have sat staged
-      // until a wake that a dead loop has no way to know about. Attended loops stay
-      // human-timed — a turn-based session is respawned by a human opening it, not by
-      // a message arriving.
-      if target.runsUnattended, !target.isResolved {
-        ensureSession(target)
-        try? await Task.sleep(for: Self.respawnedSessionSettle)
-        if await deliverToSession(target, message) { return }
+    typeAfterAcknowledging(message, to: target, resolved: false)
+  }
+
+  /// Types a `node send` message into its target's session after the command that carried
+  /// it has been acknowledged.
+  ///
+  /// Typing used to happen inside the request: the send gate's `zmx ls`, one `zmx send`
+  /// per chunk, the submit beat, then Enter. On a CPU-starved machine that took 10–30s
+  /// against the CLI's ten-second wait, so a message that landed was reported as exit 75,
+  /// "may still have been applied". The acknowledgement now means what a sender can rely
+  /// on: the message is on the board and queued for this session, and if it cannot be
+  /// typed it is staged to the loop's memory for its next wake.
+  ///
+  /// A failure found after the acknowledgement is logged and staged, not announced:
+  /// `.errorOccurred` reaches every connection, and with the sender gone the first CLI to
+  /// be waiting on a verdict of its own would take it for one.
+  private func typeAfterAcknowledging(_ message: String, to target: LoopNode, resolved: Bool) {
+    let previous = sessionTyping[target.id]?.task
+    let token = UUID()
+    let task = Task { [self] in
+      await previous?.value
+      await typeAdHocMessage(message, to: target.id, resolved: resolved)
+      if sessionTyping[target.id]?.token == token {
+        sessionTyping.removeValue(forKey: target.id)
       }
-      recordMemory(nodeID, "while you were away: \(message)")
-      announceError(
-        "delivery to \(target.title)'s session failed — message staged to its memory; "
-          + "it will read it when it next wakes")
+      if pendingFollowUps.contains(where: { $0.nodeID == target.id }) {
+        await drainPendingFollowUps()
+      }
+    }
+    sessionTyping[target.id] = (token, task)
+  }
+
+  /// Waits until every acknowledged `node send` has been typed or staged.
+  public func finishSessionTyping() async {
+    while let typing = sessionTyping.values.first {
+      await typing.task.value
+    }
+  }
+
+  private func typeAdHocMessage(_ message: String, to nodeID: UUID, resolved: Bool) async {
+    guard let target = graph.nodes[id: nodeID] else { return }
+    if resolved {
+      if await deliverToSession(target, message) { return }
+      stageUntyped(message, to: target, reason: "session-gone")
       return
     }
+    if await deliverToSession(target, message) { return }
+    // The transport can also fail because the session died after the graph last
+    // looked — a goal loop whose agent exited on its very first turn had no session
+    // left to type into, and (before sessions that answer while dead stopped passing
+    // the send gate) even a "delivered" that nobody received (issue #215). An
+    // unattended loop is the daemon's to keep alive, so a failed delivery is the
+    // moment to do exactly that: the ensure is create-only and husk-aware, so it
+    // relaunches precisely the dead case, the settle is the fresh session's boot
+    // beat, and the retry lands the message that would otherwise have sat staged
+    // until a wake that a dead loop has no way to know about. Attended loops stay
+    // human-timed — a turn-based session is respawned by a human opening it, not by
+    // a message arriving.
+    if target.runsUnattended, !target.isResolved {
+      ensureSession(target)
+      try? await Task.sleep(for: Self.respawnedSessionSettle)
+      if await deliverToSession(target, message) { return }
+    }
+    stageUntyped(message, to: target, reason: "delivery-failed")
+  }
+
+  private func stageUntyped(_ message: String, to target: LoopNode, reason: String) {
+    recordMemory(target.id, "while you were away: \(message)")
+    DaemonLog.shared.record(
+      "send-staged", [("node", target.id.uuidString), ("reason", reason)])
+    onAnnounceError?(
+      "delivery to \(target.title)'s session failed — message staged to its memory; "
+        + "it will read it when it next wakes")
   }
 
   /// `GraphCommand.broadcastMessage`, as one operation over the whole tree rather than a
@@ -4010,6 +4077,13 @@ public actor GraphStore {
         continue
       case nil:
         break
+      }
+      // A `node send` still being typed into this session was sent first.
+      if sessionTyping[pending.nodeID] != nil {
+        remaining.append(staged(pending))
+        drainDeferred = remaining
+        drainInFlight = nil
+        continue
       }
       let presence: Presence
       if let known = readings[pending.nodeID] {
