@@ -10,6 +10,22 @@ public enum NodProtocol {
   /// Bumped only for a change an older reader would misread. Additive fields and new
   /// event types do not bump it: readers decode unknown types as `.unknown` instead.
   public static let version = 1
+
+  /// The variable graphcode sets to the runtime's state directory. The runtime falls back
+  /// to `~/.graphcode/nod/<node-uuid>` without it, which is wrong for any workspace whose
+  /// support directory was moved (`GRAPHCODE_SUPPORT_DIR`).
+  public static let stateDirectoryVariable = "NOD_STATE"
+  /// Which node this is and which project it belongs to, for the graphcode MCP server,
+  /// which asks `graphcoded` about siblings and edges. The project is unset for a node
+  /// outside any project.
+  public static let nodeIDVariable = "NOD_NODE_ID"
+  public static let projectPathVariable = "NOD_PROJECT_PATH"
+  public static let eventsFileName = "events.jsonl"
+  public static let controlSocketName = "control.sock"
+  public static let conversationFileName = "conversation.json"
+  /// The goal a goal loop is launched with, written by graphcode beside the event log and
+  /// passed as `--goal-file`.
+  public static let goalFileName = "goal.md"
 }
 
 // MARK: - Shared vocabulary
@@ -588,5 +604,22 @@ extension NodProtocol {
     return data.split(separator: UInt8(ascii: "\n")).compactMap {
       try? decoder.decode(NodEventRecord.self, from: Data($0))
     }
+  }
+}
+
+/// Where `graphcode-nod` comes from. The bundle and support-directory halves are resolved
+/// in `NodRuntimeLocator`; this is the part every layer can see.
+public enum NodRuntimeLocation {
+  /// Points graphcode at a runtime outside the app bundle — a development build, or the
+  /// fake runtime the tests drive. Read from the environment of whichever process
+  /// launches the session: the app for a pane, `graphcoded` for an unattended loop.
+  public static let overrideVariable = "GRAPHCODE_NOD_PATH"
+
+  /// The override, when it names an executable file.
+  public static var developmentOverride: String? {
+    guard let path = ProcessInfo.processInfo.environment[overrideVariable], !path.isEmpty,
+      FileManager.default.isExecutableFile(atPath: path)
+    else { return nil }
+    return path
   }
 }

@@ -98,7 +98,10 @@ enum FeatureRamps {
   /// change is seen next launch, not whenever the cache expires; failures keep the
   /// last good configuration.
   static func refresh() async {
-    defer { publishCodespaceMultiplexFlag(enabled: isEnabled(.codespaceMultiplex)) }
+    defer {
+      publishCodespaceMultiplexFlag(enabled: isEnabled(.codespaceMultiplex))
+      publishNodFlag(enabled: isEnabled(.nod))
+    }
     var request = URLRequest(url: rampsURL)
     request.cachePolicy = .reloadIgnoringLocalCacheData
     request.timeoutInterval = 10
@@ -122,6 +125,12 @@ enum FeatureRamps {
     } else {
       try? FileManager.default.removeItem(at: flag)
     }
+  }
+
+  /// The same mirror for `.nod`, which `graphcoded` and the CLI check before creating or
+  /// launching a Nod loop (`NodRuntimeLocator.isRampedOn`).
+  static func publishNodFlag(enabled: Bool, flag: URL = NodRuntimeLocator.rampFlag) {
+    publishCodespaceMultiplexFlag(enabled: enabled, flag: flag)
   }
 
   static func cachedConfiguration() -> Configuration? {
