@@ -148,7 +148,7 @@ pub fn textWithDescription(
 
 fn createTextDialog(parent: c.HWND, wide_title: []const u16) c.HWND {
     active_state.dpi = Dpi.normalize(Win32.dpiForWindow(parent));
-    fitWindow(&active_state) catch |err| {
+    fitWindow(&active_state, null) catch |err| {
         active_state.failure = err;
         return null;
     };
@@ -257,7 +257,8 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
         },
         c.WM_DPICHANGED => {
             active_state.dpi = Dpi.normalize(@intCast(wparam & 0xffff));
-            fitWindow(&active_state) catch |err| {
+            const suggested = if (lparam == 0) null else Win32.messagePointer(*const c.RECT, lparam);
+            fitWindow(&active_state, suggested) catch |err| {
                 failDialog(err);
                 return 0;
             };
@@ -393,10 +394,14 @@ fn measure(state: *State, width: i32, height: i32) !Layout {
     return layout;
 }
 
-fn fitWindow(state: *State) !void {
+fn fitWindow(state: *State, suggested: ?*const c.RECT) !void {
     var monitor = std.mem.zeroes(c.MONITORINFO);
     monitor.cbSize = @sizeOf(c.MONITORINFO);
-    if (c.GetMonitorInfoW(c.MonitorFromWindow(state.parent, c.MONITOR_DEFAULTTOPRIMARY), &monitor) == 0)
+    const target_monitor = if (suggested) |rect|
+        c.MonitorFromRect(rect, c.MONITOR_DEFAULTTONEAREST)
+    else
+        c.MonitorFromWindow(state.parent, c.MONITOR_DEFAULTTOPRIMARY);
+    if (c.GetMonitorInfoW(target_monitor, &monitor) == 0)
         return error.DialogWorkAreaFailed;
     var frame = std.mem.zeroes(c.RECT);
     if (AdjustWindowRectExForDpi(&frame, window_style, 0, window_ex_style, state.dpi) == 0)
@@ -409,11 +414,13 @@ fn fitWindow(state: *State) !void {
     const height = @min(measured.extent + measured.footer_height, @min(Dpi.scale(620, state.dpi), work.bottom - work.top - frame_height));
     if (height < measured.footer_height + measured.edit_height) return error.DialogWorkAreaTooSmall;
     var owner = work;
-    if (state.parent != null and c.GetWindowRect(state.parent, &owner) == 0) return error.DialogOwnerRectFailed;
+    if (suggested == null and state.parent != null and c.GetWindowRect(state.parent, &owner) == 0) return error.DialogOwnerRectFailed;
     const outer_width = width + frame_width;
     const outer_height = height + frame_height;
-    const x = std.math.clamp(owner.left + @divTrunc(owner.right - owner.left - outer_width, 2), work.left, work.right - outer_width);
-    const y = std.math.clamp(owner.top + @divTrunc(owner.bottom - owner.top - outer_height, 2), work.top, work.bottom - outer_height);
+    const desired_x = if (suggested) |rect| rect.left else owner.left + @divTrunc(owner.right - owner.left - outer_width, 2);
+    const desired_y = if (suggested) |rect| rect.top else owner.top + @divTrunc(owner.bottom - owner.top - outer_height, 2);
+    const x = std.math.clamp(desired_x, work.left, work.right - outer_width);
+    const y = std.math.clamp(desired_y, work.top, work.bottom - outer_height);
     state.window_rect = .{ .left = x, .top = y, .right = x + outer_width, .bottom = y + outer_height };
 }
 
@@ -487,6 +494,7 @@ fn revealField(index: usize) !void {
     const top = layout.label_y[index];
     const bottom = layout.edit_y[index] + layout.edit_height;
     var offset = active_state.scroll_offset;
+    if (layout.edit_y[index] < offset) offset = layout.edit_y[index];
     if (bottom > offset + layout.viewport_height) offset = bottom - layout.viewport_height;
     // Keep a wrapped label if it fits together with its edit; otherwise prioritize the edit.
     if (top < offset and bottom - top <= layout.viewport_height) offset = top;
@@ -575,7 +583,7 @@ fn hiddenPromptForDpi(count: usize, description: []const u8, dpi: u32) !c.HWND {
     active = true;
     try registerClass();
     active_state.dpi = dpi;
-    try fitWindow(&active_state);
+    try fitWindow(&active_state, null);
     return createDialogWindow(null, std.unicode.utf8ToUtf16LeStringLiteral("Prompt fixture")) orelse return active_state.failure orelse error.TestWindowCreationFailed;
 }
 
@@ -630,7 +638,7 @@ test "sheet framework: static labels paint an opaque panel background" {
     const dc = c.CreateCompatibleDC(null) orelse return error.TestDcCreationFailed;
     defer _ = c.DeleteDC(dc);
     _ = c.SetBkMode(dc, c.TRANSPARENT);
-    const brush = c.SendMessageW(hwnd, c.WM_CTLCOLORSTATIC, @intFromPtr(dc), @bitCast(@intFromPtr(active_state.label_windows[0])));
+    const brush = c.SendMessageW(active_state.viewport, c.WM_CTLCOLORSTATIC, @intFromPtr(dc), @bitCast(@intFromPtr(active_state.label_windows[0])));
     try std.testing.expect(brush != 0);
     try std.testing.expectEqual(@as(c.INT, c.OPAQUE), c.GetBkMode(dc));
     var info: c.LOGBRUSH = undefined;
@@ -698,6 +706,11 @@ test "sheet framework: overflow scroll and focus notifications leave footer fixe
     try std.testing.expectEqual(layout.maxOffset(), active_state.scroll_offset);
     var last = try rectIn(active_state.edits[15], active_state.viewport);
     try std.testing.expect(last.top >= 0 and last.bottom <= layout.viewport_height);
+    try setScrollOffset(100);
+    _ = c.SendMessageW(hwnd, c.WM_MOUSEWHEEL, @as(usize, 120) << 16, 0);
+    try std.testing.expectEqual(@as(i32, 16), active_state.scroll_offset);
+    _ = c.SendMessageW(hwnd, c.WM_MOUSEWHEEL, @as(usize, @as(u16, @bitCast(@as(i16, -120)))) << 16, 0);
+    try std.testing.expectEqual(@as(i32, 100), active_state.scroll_offset);
     _ = c.SendMessageW(active_state.viewport, c.WM_VSCROLL, c.SB_TOP, 0);
     try std.testing.expectEqual(@as(i32, 0), active_state.scroll_offset);
     // Inject the native notification without taking desktop focus.
@@ -772,6 +785,9 @@ test "sheet framework: short prompts hide scrollbar and wrapped labels use measu
         try std.testing.expect(@as(usize, @bitCast(c.GetWindowLongPtrW(active_state.viewport, c.GWL_STYLE))) & c.WS_VSCROLL == 0);
         const short_height = active_state.layout.label_height[0];
         active_state.labels[0] = "Long field label with wrapping " ** 18;
+        const wide_label = try wideZ(std.testing.allocator, active_state.labels[0]);
+        defer std.testing.allocator.free(wide_label);
+        try std.testing.expect(c.SetWindowTextW(active_state.label_windows[0], wide_label.ptr) != 0);
         try relayout(hwnd);
         try std.testing.expect(active_state.layout.label_height[0] > short_height);
         const label = try rectIn(active_state.label_windows[0], active_state.viewport);
@@ -801,6 +817,46 @@ test "sheet framework: child command routing preserves owned Unicode and modal o
             try std.testing.expect((try finishText(&active_state)) == null);
         }
     }
+}
+
+test "sheet framework: focus reveals an edit above scroll even with a viewport-tall label" {
+    defer active = false;
+    const hwnd = try hiddenPrompt(16, "");
+    defer {
+        _ = c.DestroyWindow(hwnd);
+        freeStateValues(&active_state);
+    }
+    active_state.labels[0] = "Long wrapped first label " ** 500;
+    try relayout(hwnd);
+    try setScrollOffset(active_state.layout.maxOffset());
+    const first = active_state.edits[0];
+    _ = c.SendMessageW(active_state.viewport, c.WM_COMMAND, (c.EN_SETFOCUS << 16) | 9904, @bitCast(@intFromPtr(first)));
+    const rect = try rectIn(first, active_state.viewport);
+    try std.testing.expect(rect.top >= 0 and rect.bottom <= active_state.layout.viewport_height);
+}
+
+test "sheet framework: DPI change respects suggested position rather than recentering" {
+    defer active = false;
+    const hwnd = try hiddenPrompt(1, "");
+    defer {
+        _ = c.DestroyWindow(hwnd);
+        freeStateValues(&active_state);
+    }
+    var monitor = std.mem.zeroes(c.MONITORINFO);
+    monitor.cbSize = @sizeOf(c.MONITORINFO);
+    try std.testing.expect(c.GetMonitorInfoW(c.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTOPRIMARY), &monitor) != 0);
+    var suggested = c.RECT{
+        .left = monitor.rcWork.left + 10,
+        .top = monitor.rcWork.top + 10,
+        .right = monitor.rcWork.left + 570,
+        .bottom = monitor.rcWork.top + 300,
+    };
+    _ = c.SendMessageW(hwnd, c.WM_DPICHANGED, 96 | (96 << 16), @bitCast(@intFromPtr(&suggested)));
+    try std.testing.expect(active_state.failure == null);
+    var actual: c.RECT = undefined;
+    try std.testing.expect(c.GetWindowRect(hwnd, &actual) != 0);
+    try std.testing.expectEqual(suggested.left, actual.left);
+    try std.testing.expectEqual(suggested.top, actual.top);
 }
 
 test "sheet framework: creation failures release partial values and controls" {
