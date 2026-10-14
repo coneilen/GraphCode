@@ -783,6 +783,24 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
         nativeCalls=0;actualHistoricalALossReproduced=$false}
     }
   }
+  Invoke-MultiCase "prompt viewport resolved edit preserves actual FocusMouse ownership guard" {
+    $api=New-MultiSequencedEditMock
+    $null=$api.FocusMouse([IntPtr]42,[IntPtr]9904,@(100,110),4242,[long]0)
+    Assert-MultiCase ($api.PhaseState.focusClicks -eq 1 -and $api.hitReads -eq 1 -and
+      $api.state.hitRoot -eq [IntPtr]42 -and $api.state.hitPID -eq 4242) "resolved nested edit did not retain ownership/hit checks"
+    return "Actual FocusMouse ScriptMethod accepts an injected exact edit hit; no native focus/input"
+  }
+  foreach($viewportMiss in @("background","foreign-root")){
+    Invoke-MultiCase ("prompt viewport actual FocusMouse refuses " + $viewportMiss) -Negative {
+      $api=New-MultiSequencedEditMock
+      if($viewportMiss -ceq "background"){$api.state.hitChild=[IntPtr]9890}
+      else{$api.state.hitRoot=[IntPtr]99}
+      $caught=$null;try{$api.FocusMouse([IntPtr]42,[IntPtr]9904,@(100,110),4242,[long]0)|Out-Null}catch{$caught=$_}
+      Assert-MultiCase ($null -ne $caught -and $caught.Exception.ToString().Contains("MULTIPROJECT_EDIT_FOCUS:") -and
+        $api.PhaseState.focusClicks -eq 0) "viewport miss or foreign root became an edit input target"
+      return "Injected Hit refusal through actual FocusMouse ScriptMethod; no native WindowFromPoint or input"
+    }
+  }
   Invoke-MultiCase "already owned GUI edit focus uses zero focus input" {
     $api=New-MultiSequencedEditMock;$api.PhaseState.focus=[IntPtr]9904
     $null=Invoke-MultiProjectSequencedEdit ([IntPtr]42) 4242 "Alpha renamed" "Alpha renamed" -nativeApi $api
@@ -3971,6 +3989,12 @@ public static class PromptLookupFixture {
   public static extern bool DestroyWindow(IntPtr window);
   [DllImport("user32.dll")]
   public static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll")]
+  private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+  public static void Place(IntPtr window, int x, int y, int width, int height) {
+    if (!SetWindowPos(window, IntPtr.Zero, x, y, width, height, 0x14))
+      throw new InvalidOperationException("Hidden lookup fixture placement failed.");
+  }
   public static void Register(string name) {
     var value = new WindowClass { Name = name, Instance = GetModuleHandle(null),
       Procedure = Marshal.GetFunctionPointerForDelegate(procedure) };
@@ -3978,7 +4002,7 @@ public static class PromptLookupFixture {
       throw new InvalidOperationException("Hidden lookup fixture class registration failed: " + Marshal.GetLastWin32Error());
   }
   public static IntPtr Create(string cls, IntPtr parent, int id) {
-    IntPtr result = CreateWindow(0, cls, "lookup fixture", parent == IntPtr.Zero ? 0u : 0x40000000u,
+    IntPtr result = CreateWindow(0, cls, "lookup fixture", parent == IntPtr.Zero ? 0u : 0x50000000u,
       0, 0, 400, 300, parent, new IntPtr(id), GetModuleHandle(null), IntPtr.Zero);
     if (result == IntPtr.Zero)
       throw new InvalidOperationException("Hidden lookup fixture creation failed: " + Marshal.GetLastWin32Error());
@@ -4042,6 +4066,58 @@ public static class PromptLookupFixture {
     Assert-PromptLookup ([IntPtr]::Zero) 9904 ([IntPtr]::Zero) "null parent"
     if ($script:promptLookupExecuted -ne 11) { throw "RED: prompt lookup case count was not 11" }
     Write-Host "Prompt lookup hidden native cases: $script:promptLookupExecuted passed"
+    $hitRoot = New-PromptLookupRoot "GraphCodeWindowsDialog"
+    $hitContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $hitRoot, 0)
+    [PromptLookupFixture]::Place($hitContent, 15, 20, 350, 250)
+    $hitEdit = [PromptLookupFixture]::Create("EDIT", $hitContent, 9904)
+    [PromptLookupFixture]::Place($hitEdit, 20, 25, 100, 24)
+    $editBounds = [GraphCodeUiaGateState]::WindowBounds($hitEdit)
+    $hitX = [int](($editBounds[0] + $editBounds[2])/2)
+    $hitY = [int](($editBounds[1] + $editBounds[3])/2)
+    if ([PromptLookupFixture]::IsWindowVisible($hitRoot) -or
+        [GraphCodeMultiProjectRenameNative]::ChildAt($hitRoot,$hitX,$hitY) -ne $hitEdit) {
+      throw "RED: prompt hit did not resolve nested edit in hidden named viewport"
+    }
+    $hitCases = 1
+    $contentBounds = [GraphCodeUiaGateState]::WindowBounds($hitContent)
+    if ([GraphCodeMultiProjectRenameNative]::ChildAt($hitRoot,$contentBounds[2]-10,$contentBounds[3]-10) -ne $hitContent) {
+      throw "RED: prompt viewport background became an edit hit"
+    }
+    $hitCases++
+    $plainRoot = New-PromptLookupRoot "STATIC"
+    $plainContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $plainRoot, 0)
+    $null = [PromptLookupFixture]::Create("EDIT", $plainContent, 9904)
+    $plainBounds = [GraphCodeUiaGateState]::WindowBounds($plainContent)
+    if ([GraphCodeMultiProjectRenameNative]::ChildAt($plainRoot,$plainBounds[0]+50,$plainBounds[1]+50) -ne $plainContent) {
+      throw "RED: prompt hit descended through wrong root class"
+    }
+    $hitCases++
+    $otherRoot = New-PromptLookupRoot "GraphCodeWindowsDialog"
+    $otherContent = [PromptLookupFixture]::Create("BUTTON", $otherRoot, 0)
+    $null = [PromptLookupFixture]::Create("EDIT", $otherContent, 9904)
+    $otherBounds = [GraphCodeUiaGateState]::WindowBounds($otherContent)
+    if ([GraphCodeMultiProjectRenameNative]::ChildAt($otherRoot,$otherBounds[0]+50,$otherBounds[1]+50) -ne $otherContent) {
+      throw "RED: prompt hit descended through wrong container class"
+    }
+    $hitCases++
+    $deepHitRoot = New-PromptLookupRoot "GraphCodeWindowsDialog"
+    $deepHitContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $deepHitRoot, 0)
+    $hitWrapper = [PromptLookupFixture]::Create("BUTTON", $deepHitContent, 0)
+    $null = [PromptLookupFixture]::Create("EDIT", $hitWrapper, 9904)
+    $deepBounds = [GraphCodeUiaGateState]::WindowBounds($hitWrapper)
+    if ([GraphCodeMultiProjectRenameNative]::ChildAt($deepHitRoot,$deepBounds[0]+50,$deepBounds[1]+50) -ne $hitWrapper) {
+      throw "RED: prompt hit recursively searched deeper descendants"
+    }
+    $hitCases++
+    $directRoot = New-PromptLookupRoot "GraphCodeWindowsDialog"
+    $directEdit = [PromptLookupFixture]::Create("EDIT", $directRoot, 9904)
+    $directBounds = [GraphCodeUiaGateState]::WindowBounds($directEdit)
+    if ([GraphCodeMultiProjectRenameNative]::ChildAt($directRoot,$directBounds[0]+50,$directBounds[1]+50) -ne $directEdit) {
+      throw "RED: prompt hit changed existing direct-child behavior"
+    }
+    $hitCases++
+    if ($hitCases -ne 6) { throw "RED: prompt hit case count was not 6" }
+    Write-Host "Prompt hit hidden native cases: $hitCases passed"
   } finally {
     foreach ($window in $lookupRoots) {
       if (-not [PromptLookupFixture]::DestroyWindow($window)) {

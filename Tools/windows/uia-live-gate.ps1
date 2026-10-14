@@ -3920,6 +3920,8 @@ public static class GraphCodeMultiProjectRenameNative {
   [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr window, uint flags);
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point point);
   [DllImport("user32.dll")] private static extern IntPtr RealChildWindowFromPoint(IntPtr window, Point point);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="GetClassNameW")]
+  private static extern int GetClassName(IntPtr window, System.Text.StringBuilder name, int capacity);
   [DllImport("user32.dll", SetLastError=true)] private static extern bool GetClientRect(IntPtr window, out Rect rect);
   [DllImport("user32.dll", SetLastError=true)] private static extern bool ClientToScreen(IntPtr window, ref Point point);
   [DllImport("user32.dll", SetLastError=true)] private static extern bool ScreenToClient(IntPtr window, ref Point point);
@@ -3944,7 +3946,18 @@ public static class GraphCodeMultiProjectRenameNative {
   public static IntPtr ChildAt(IntPtr window, int x, int y) {
     var point = new Point { X=x, Y=y };
     if (!ScreenToClient(window, ref point)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename ScreenToClient");
-    return RealChildWindowFromPoint(window, point);
+    IntPtr direct = RealChildWindowFromPoint(window, point);
+    var rootClass = new System.Text.StringBuilder(128);
+    var childClass = new System.Text.StringBuilder(128);
+    GetClassName(window, rootClass, rootClass.Capacity);
+    GetClassName(direct, childClass, childClass.Capacity);
+    if (!String.Equals(rootClass.ToString(), "GraphCodeWindowsDialog", StringComparison.Ordinal) ||
+        !String.Equals(childClass.ToString(), "GraphCodeWindowsDialogContent", StringComparison.Ordinal))
+      return direct;
+    var contentPoint = new Point { X=x, Y=y };
+    if (!ScreenToClient(direct, ref contentPoint))
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename content ScreenToClient");
+    return RealChildWindowFromPoint(direct, contentPoint);
   }
 }
 '@
