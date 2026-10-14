@@ -744,7 +744,7 @@ public static class GraphCodeUiaGateState {
     return true;
   }
   public static bool SetEditTextById(IntPtr parent, int controlId, string text) {
-    var edit = GetDlgItem(parent, controlId);
+    var edit = ControlById(parent, controlId);
     // Cross-process SetWindowText only updates the stored caption; WM_SETTEXT reaches the EDIT buffer.
     if (edit == IntPtr.Zero || SendMessageString(edit, 0x000C, UIntPtr.Zero, text) == IntPtr.Zero) return false;
     ulong command = ((ulong)0x0300 << 16) | (uint)controlId;
@@ -752,7 +752,7 @@ public static class GraphCodeUiaGateState {
     return true;
   }
   public static string EditTextById(IntPtr parent, int controlId) {
-    var edit = GetDlgItem(parent, controlId);
+    var edit = ControlById(parent, controlId);
     if (edit == IntPtr.Zero) return null;
     return EditBufferText(edit);
   }
@@ -881,7 +881,13 @@ public static class GraphCodeUiaGateState {
     return new[] { rect.Left, rect.Top, rect.Right, rect.Bottom };
   }
   public static IntPtr ControlById(IntPtr parent, int controlId) {
-    return parent == IntPtr.Zero ? IntPtr.Zero : GetDlgItem(parent, controlId);
+    if (parent == IntPtr.Zero) return IntPtr.Zero;
+    IntPtr direct = GetDlgItem(parent, controlId);
+    if (direct != IntPtr.Zero) return direct;
+    if (!String.Equals(ClassOf(parent), "GraphCodeWindowsDialog", StringComparison.Ordinal))
+      return IntPtr.Zero;
+    IntPtr content = FindWindowEx(parent, IntPtr.Zero, "GraphCodeWindowsDialogContent", null);
+    return content == IntPtr.Zero ? IntPtr.Zero : GetDlgItem(content, controlId);
   }
   public static ControlClick ClickScreenPoint(IntPtr target) {
     RECT rect;
@@ -1040,7 +1046,7 @@ public static class GraphCodeUiaGateState {
     LastEditClearExpected = LastEditClearSent = 0;
     LastEditTextExpected = LastEditTextSent = 0;
     LastEditUsedMessageFallback = false;
-    IntPtr edit = GetDlgItem(parent, controlId);
+    IntPtr edit = ControlById(parent, controlId);
     if (edit == IntPtr.Zero || !FocusControl(parent, edit)) return false;
     SendMessage(edit, 0x00B1, UIntPtr.Zero, new IntPtr(-1));
     var clear = new KeyInputRecord[2];
