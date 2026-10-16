@@ -1529,7 +1529,56 @@ function Invoke-CapPrebuiltFixtureContract {
     } finally { $scratch = $savedScratch }
 }
 
+function Get-CapJournalPostCopyObservations {
+    param([Management.Automation.Language.Ast]$Ast)
+    $readers = @($Ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Read-CapJournalObject'
+    }, $true))
+    Assert-CapTest ($readers.Count -eq 1) 'Journal reader AST is missing or duplicated.'
+    $reader = $readers[0]
+    $copies = @($reader.FindAll({ param($node)
+        $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Member.Value -ceq 'CopyTo'
+    }, $true))
+    Assert-CapTest ($copies.Count -eq 1) 'Journal CopyTo AST is missing or duplicated.'
+    $copy = $copies[0]
+    $checks = @($reader.FindAll({ param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Assert-CapJournalTime' -and $node.Extent.StartOffset -gt $copy.Extent.EndOffset
+    }, $true) | Sort-Object { $_.Extent.StartOffset })
+    Assert-CapTest ($checks.Count -gt 0) 'First post-copy time assertion is missing.'
+    $firstCheck = $checks[0]
+    return @($reader.FindAll({ param($node)
+        if ($node -isnot [Management.Automation.Language.CommandAst] -or
+            $node.GetCommandName() -cne 'Write-CapJournalObservation' -or
+            $node.Extent.StartOffset -le $copy.Extent.EndOffset -or
+            $node.Extent.EndOffset -ge $firstCheck.Extent.StartOffset) { return $false }
+        for ($parent = $node.Parent; $null -ne $parent; $parent = $parent.Parent) {
+            if ($parent -is [Management.Automation.Language.CatchClauseAst]) { return $false }
+        }
+        return $true
+    }, $true))
+}
+
 function Invoke-CapJournalTimingContract {
+    $readerAst = [Management.Automation.Language.Parser]::ParseFile($modulePath, [ref]$null, [ref]$null)
+    Assert-CapTest (@(Get-CapJournalPostCopyObservations $readerAst).Count -eq 0) `
+        'A success-path observation write intervenes between CopyTo and its first deadline assertion.'
+    $reader = @($readerAst.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Read-CapJournalObject'
+    }, $true))[0]
+    $copy = @($reader.FindAll({ param($node)
+        $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Member.Value -ceq 'CopyTo'
+    }, $true))[0]
+    $check = @($reader.FindAll({ param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Assert-CapJournalTime' -and $node.Extent.StartOffset -gt $copy.Extent.EndOffset
+    }, $true) | Sort-Object { $_.Extent.StartOffset })[0]
+    $position = $check.Extent.StartOffset - $reader.Extent.StartOffset
+    $mutant = $reader.Extent.Text.Insert($position,
+        "            Write-CapJournalObservation `$State `$Sequence `$attempt 'RenamedSuccessObservation' `$null `$Transaction`n")
+    $mutantAst = [Management.Automation.Language.Parser]::ParseInput($mutant, [ref]$null, [ref]$null)
+    Assert-CapTest (@(Get-CapJournalPostCopyObservations $mutantAst).Count -eq 1) `
+        'Post-copy ordering contract failed to reject a renamed success-path observation.'
     $directory = Join-Path $scratch ('journal-timing-' + [guid]::NewGuid().ToString('N'))
     $snapshots = Join-Path $directory 'snapshots'
     $null = New-Item -ItemType Directory -Path $snapshots
@@ -1554,10 +1603,12 @@ function Invoke-CapJournalTimingContract {
         $null -ne $transaction.CopyElapsedMilliseconds -and $transaction.CopyElapsedMilliseconds -ge 0) `
         'Actual Open/Copy phases were not measured.'
     $events = @(Get-Content -LiteralPath $observation | ForEach-Object { ConvertFrom-Json $_ -DateKind String })
-    $copied = @($events | Where-Object decision -CEQ 'CopyCompleted')
-    Assert-CapTest ($copied.Count -eq 1 -and $null -ne $copied[0].openElapsedMilliseconds -and
-        $null -ne $copied[0].copyElapsedMilliseconds -and $copied[0].totalElapsedMilliseconds -ge 0) `
-        'Actual copy-complete observation lacks measured phase durations.'
+    $verified = @($events | Where-Object decision -CEQ 'ReadVerified')
+    Assert-CapTest ($verified.Count -eq 1 -and
+        $verified[0].openElapsedMilliseconds -eq $transaction.OpenElapsedMilliseconds -and
+        $verified[0].copyElapsedMilliseconds -eq $transaction.CopyElapsedMilliseconds -and
+        $verified[0].totalElapsedMilliseconds -ge 0) `
+        'Existing post-verification observation lacks the actual Open/Copy accumulator values.'
     Start-Sleep -Milliseconds 1050
     $failure = Assert-CapRejects {
         & $module { param($Transaction) Assert-CapJournalTime $Transaction 1 } $transaction

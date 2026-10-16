@@ -2859,7 +2859,6 @@ function Read-CapJournalObject {
                 throw
             }
             finally { $buffer.Dispose() }
-            Write-CapJournalObservation $State $Sequence $attempt 'CopyCompleted' $null $Transaction
             Assert-CapJournalTime $Transaction $Sequence
             $envelope = ConvertFrom-CapJournalBytes $bytes
             try {
