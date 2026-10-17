@@ -4471,6 +4471,52 @@ fn paint764NodeIndex(nodes: []const GraphModel.Node, id: []const u8) ?usize {
     return null;
 }
 
+fn paint764RgbL1(a: u32, b: u32) u32 {
+    var distance: u32 = 0;
+    inline for ([_]u5{ 0, 8, 16 }) |shift| {
+        const left: i32 = @intCast((a >> shift) & 255);
+        const right: i32 = @intCast((b >> shift) & 255);
+        distance += @abs(left - right);
+    }
+    return distance;
+}
+
+fn verifyPaint764StrokeVisibility(dib: ParityDib, sample: c.RECT, expected: u32, edge_id: []const u8) !void {
+    try std.testing.expectEqual(@as(i32, 7), sample.right - sample.left);
+    try std.testing.expectEqual(@as(i32, 7), sample.bottom - sample.top);
+    const stroke_y = sample.top + 3;
+    // Sealed A6C523 has 42 pairs with minimum contrast/edge-distance advantage 80.
+    // Freeze half that minimum (40 RGB L1) for BOTH predicates, before any runs.
+    const margin: u32 = 40;
+    var comparisons: usize = 0;
+    var failures: usize = 0;
+    var x = sample.left;
+    while (x < sample.right) : (x += 1) {
+        const stroke = c.GetPixel(dib.dc, x, stroke_y);
+        for ([_]i32{ -1, 1 }) |offset| {
+            const neighbor = c.GetPixel(dib.dc, x, stroke_y + offset);
+            if (stroke == c.CLR_INVALID or neighbor == c.CLR_INVALID) {
+                std.debug.print("paint764 edge visibility unreadable edge={s} x={d} stroke-y={d} offset={d}\n",
+                    .{ edge_id, x, stroke_y, offset });
+                return error.Paint764EdgeStrokeSampleUnreadable;
+            }
+            const contrast = paint764RgbL1(stroke, neighbor);
+            const stroke_distance = paint764RgbL1(stroke, expected);
+            const neighbor_distance = paint764RgbL1(neighbor, expected);
+            const advantage = @as(i32, @intCast(neighbor_distance)) - @as(i32, @intCast(stroke_distance));
+            const visible = contrast >= margin and advantage >= @as(i32, @intCast(margin));
+            comparisons += 1;
+            if (!visible) failures += 1;
+            std.debug.print("paint764 edge visibility edge={s} x={d} stroke-y={d} neighbor-y={d} contrast={d} edge-advantage={d} margin={d} pass={}\n",
+                .{ edge_id, x, stroke_y, stroke_y + offset, contrast, advantage, margin, visible });
+        }
+    }
+    std.debug.print("paint764 edge visibility summary edge={s} region=({d},{d},{d},{d}) comparisons={d} failures={d} margin={d}\n",
+        .{ edge_id, sample.left, sample.top, sample.right, sample.bottom, comparisons, failures, margin });
+    try std.testing.expectEqual(@as(usize, 14), comparisons);
+    if (failures != 0) return error.Paint764EdgeStrokeNotVisible;
+}
+
 fn verifyPaint764Contract(
     dib: ParityDib,
     fixture: *const Paint764Fixture,
@@ -4522,7 +4568,9 @@ fn verifyPaint764Contract(
             const center_x = @divTrunc(from.x + to.x, 2);
             const center_y = @divTrunc(from.y + to.y, 2);
             const stroke_sample = rect(center_x - 3, center_y - 3, center_x + 4, center_y + 4);
-            try std.testing.expect(dib.count(stroke_sample, edgeKindColor(edge.kind)) > 0);
+            // All three 7x7 fixture windows lie 2..8 points from adjacent cards,
+            // inside their finite 36/54-point halo support; none is an exact-color control.
+            try verifyPaint764StrokeVisibility(dib, stroke_sample, edgeKindColor(edge.kind), edge.id);
             const label = try edgeLabel(allocator, edge);
             defer allocator.free(label);
             try std.testing.expectEqualStrings("handoff", label);
